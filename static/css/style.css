@@ -415,6 +415,57 @@ h2 { font-size: 19px; }
   animation: spin 0.8s linear infinite;
 }
 
+/* Placement pins */
+.place-photo-wrap {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--line);
+  touch-action: manipulation;
+}
+.place-photo-wrap img {
+  width: 100%;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+.marker-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.marker {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -100%);
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+}
+.marker-drop {
+  position: absolute;
+  inset: 0;
+  background: var(--marker-color, var(--orange));
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  border: 2px solid #fff;
+  box-shadow: 0 3px 8px rgba(0,0,0,0.4);
+}
+.marker-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 800;
+  font-size: 13px;
+  transform: translateY(-15%);
+  pointer-events: none;
+}
+
 /* Admin — prompt editor */
 .prompt-textarea {
   width: 100%;

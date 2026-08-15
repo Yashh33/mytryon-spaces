@@ -99,6 +99,7 @@
     { pattern: /^\/$/, view: viewHome },
     { pattern: /^\/new$/, view: viewSite },
     { pattern: /^\/new\/furniture\/(\d+)$/, view: viewFurniture },
+    { pattern: /^\/place\/(\d+)$/, view: viewPlace },
     { pattern: /^\/generating$/, view: viewGenerating },
     { pattern: /^\/project\/(\d+)$/, view: viewResult },
     { pattern: /^\/admin$/, view: viewAdmin, admin: true },
@@ -443,7 +444,7 @@
               <button class="btn btn-dark" id="add-piece-btn">Add piece</button>
             </div>
           `}
-          <button class="btn btn-primary" id="done-btn" style="margin-top:20px;" ${project.items.length ? "" : "disabled"}>Done — generate</button>
+          <button class="btn btn-primary" id="done-btn" style="margin-top:20px;" ${project.items.length ? "" : "disabled"}>Next — place furniture</button>
         </div>
       `;
 
@@ -501,8 +502,85 @@
         });
       }
 
-      root.querySelector("#done-btn").addEventListener("click", async () => {
-        const btn = root.querySelector("#done-btn");
+      root.querySelector("#done-btn").addEventListener("click", () => {
+        navigate("/place/" + projectId);
+      });
+    }
+
+    paint();
+  }
+
+  // ---------------------------------------------------------------------
+  // New visualization — placement pins
+  // ---------------------------------------------------------------------
+
+  const PIN_MARKER_COLORS = ["#F07522", "#1A1815", "#CE5C10", "#8A857E"];
+
+  function clamp01(v) {
+    return Math.min(1, Math.max(0, v));
+  }
+
+  async function viewPlace(root, projectId) {
+    root.innerHTML = `<div class="screen"><p class="muted">Loading…</p></div>`;
+    const data = await api("GET", "/api/projects/" + projectId);
+    let project = data.project;
+
+    if (!project.items.length) {
+      navigate("/new/furniture/" + projectId, true);
+      return;
+    }
+
+    let selectedId = project.items[0].id;
+
+    function paint() {
+      root.innerHTML = h`
+        <div class="screen">
+          <div class="top-actions">
+            <a data-link href="/new/furniture/${projectId}" class="back-btn">&#8592;</a>
+            <div class="eyebrow">Step 2 of 2</div>
+          </div>
+          <h1 style="margin-bottom:14px;">Where does each piece go?</h1>
+          <div class="place-photo-wrap" id="photo-wrap">
+            <img src="${project.room_photo_url}" id="place-img" draggable="false" alt="Room photo" />
+            <div class="marker-layer" id="marker-layer"></div>
+          </div>
+          <div class="hint-line" style="text-align:center;">Tap a piece, then tap the spot</div>
+          <div class="chips" id="piece-chips" style="margin-top:14px;">
+            ${project.items.map((it, i) => `
+              <button type="button" class="chip${it.id === selectedId ? " selected" : ""}" data-item="${it.id}">${i + 1} &middot; ${esc(it.category)}</button>
+            `).join("")}
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;margin-top:24px;">
+            <button class="btn btn-primary" id="generate-btn">Generate</button>
+            <button class="btn btn-ghost" id="skip-btn">Skip — let it decide</button>
+          </div>
+        </div>
+      `;
+
+      root.querySelectorAll("[data-item]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          selectedId = Number(btn.getAttribute("data-item"));
+          paint();
+        });
+      });
+
+      paintMarkers();
+
+      root.querySelector("#photo-wrap").addEventListener("click", async (e) => {
+        if (e.target.closest(".marker")) return;
+        if (selectedId == null) return;
+        const rect = root.querySelector("#photo-wrap").getBoundingClientRect();
+        const x = clamp01((e.clientX - rect.left) / rect.width);
+        const y = clamp01((e.clientY - rect.top) / rect.height);
+        try {
+          await setPin(selectedId, x, y);
+        } catch (err) {
+          toast(err.message);
+        }
+      });
+
+      root.querySelector("#generate-btn").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
         btn.disabled = true;
         btn.textContent = "Starting…";
         try {
@@ -510,16 +588,106 @@
         } catch (err) {
           toast(err.message);
           btn.disabled = false;
-          btn.textContent = "Done — generate";
+          btn.textContent = "Generate";
         }
       });
+
+      root.querySelector("#skip-btn").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = "Starting…";
+        try {
+          await startGeneration(projectId, { ignorePins: true });
+        } catch (err) {
+          toast(err.message);
+          btn.disabled = false;
+          btn.textContent = "Skip — let it decide";
+        }
+      });
+    }
+
+    async function setPin(itemId, x, y) {
+      const fresh = await api("POST", `/api/projects/${projectId}/items/${itemId}/pin`, { json: { x, y } });
+      project = fresh.project;
+      paintMarkers();
+    }
+
+    async function clearPin(itemId) {
+      const fresh = await api("DELETE", `/api/projects/${projectId}/items/${itemId}/pin`);
+      project = fresh.project;
+      paintMarkers();
+    }
+
+    function paintMarkers() {
+      const layer = root.querySelector("#marker-layer");
+      if (!layer) return;
+      layer.innerHTML = "";
+      project.items.forEach((it, i) => {
+        if (it.pin_x == null || it.pin_y == null) return;
+        const marker = document.createElement("div");
+        marker.className = "marker";
+        marker.style.left = (it.pin_x * 100) + "%";
+        marker.style.top = (it.pin_y * 100) + "%";
+        marker.style.setProperty("--marker-color", PIN_MARKER_COLORS[i % PIN_MARKER_COLORS.length]);
+        marker.innerHTML = `<div class="marker-drop"></div><div class="marker-num">${i + 1}</div>`;
+        attachDrag(marker, it.id);
+        layer.appendChild(marker);
+      });
+    }
+
+    function attachDrag(marker, itemId) {
+      let dragging = false;
+      let moved = false;
+      let startX = 0;
+      let startY = 0;
+
+      marker.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        dragging = true;
+        moved = false;
+        startX = e.clientX;
+        startY = e.clientY;
+        marker.setPointerCapture(e.pointerId);
+      });
+
+      marker.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        if (Math.abs(e.clientX - startX) > 4 || Math.abs(e.clientY - startY) > 4) moved = true;
+        const rect = root.querySelector("#photo-wrap").getBoundingClientRect();
+        const x = clamp01((e.clientX - rect.left) / rect.width);
+        const y = clamp01((e.clientY - rect.top) / rect.height);
+        marker.style.left = (x * 100) + "%";
+        marker.style.top = (y * 100) + "%";
+      });
+
+      async function finishDrag(e) {
+        if (!dragging) return;
+        dragging = false;
+        const rect = root.querySelector("#photo-wrap").getBoundingClientRect();
+        const x = clamp01((e.clientX - rect.left) / rect.width);
+        const y = clamp01((e.clientY - rect.top) / rect.height);
+        try {
+          if (moved) {
+            await setPin(itemId, x, y);
+          } else {
+            await clearPin(itemId);
+          }
+        } catch (err) {
+          toast(err.message);
+          paintMarkers();
+        }
+      }
+
+      marker.addEventListener("pointerup", (e) => { e.stopPropagation(); finishDrag(e); });
+      marker.addEventListener("pointercancel", (e) => { dragging = false; });
     }
 
     paint();
   }
 
-  async function startGeneration(projectId) {
-    const data = await api("POST", `/api/projects/${projectId}/generate`);
+  async function startGeneration(projectId, opts) {
+    const suffix = opts && opts.ignorePins ? "?ignore_pins=true" : "";
+    const data = await api("POST", `/api/projects/${projectId}/generate${suffix}`);
     localStorage.setItem("pendingJob", JSON.stringify({
       jobId: data.job_id,
       projectId: Number(projectId),

@@ -3,6 +3,7 @@ import io
 import logging
 import mimetypes
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pydantic import BaseModel
 from sqlalchemy import (
     Boolean,
@@ -29,6 +30,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -124,6 +126,24 @@ THIS REQUEST
 Room type: {{ROOM_TYPE}}
 Pieces, in the same order as the product reference photographs:
 {{PIECES}}
+
+{{#PINS}}
+PLACEMENT REFERENCE
+Two versions of the room are provided. The first is the clean
+photograph and is the canvas you must render. The second is an
+annotated copy showing numbered circular markers.
+
+Each marker indicates where the correspondingly numbered piece
+should stand, the marker's position being the floor contact point
+at the centre of that piece's footprint.
+
+The markers are guidance only. They are not objects in the room.
+Do not render the markers, circles, numbers or any annotation in
+your output. Render the clean room with the furniture placed at
+the marked positions.
+
+Marker numbers correspond to: {{PIN_MAP}}
+{{/PINS}}
 """
 
 PROMPT_SETTING_KEY = "generation_prompt"
@@ -135,6 +155,14 @@ PROMPT_PLACEHOLDERS = [
     {
         "token": "{{PIECES}}",
         "description": 'One line per added piece, in the same order the product photos are sent to the model, formatted as "- Sofa (L-shape), 7 ft wide".',
+    },
+    {
+        "token": "{{PIN_MAP}}",
+        "description": 'Inside the {{#PINS}}…{{/PINS}} block only: one line per pinned piece, e.g. "Marker 1 — L-shape sofa, 7 ft".',
+    },
+    {
+        "token": "{{#PINS}} … {{/PINS}}",
+        "description": "Wraps the placement-reference section. Only appears in the prompt sent to the model when at least one piece has a pin placed on the /place screen — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
     },
 ]
 
@@ -209,6 +237,8 @@ class Item(Base):
     type = Column(String, nullable=False)
     width_ft = Column(Float, nullable=False)
     photo_path = Column(String, nullable=False)
+    pin_x = Column(Float, nullable=True)  # normalised 0-1, relative to room photo width
+    pin_y = Column(Float, nullable=True)  # normalised 0-1, relative to room photo height
 
 
 class Render(Base):
@@ -244,6 +274,10 @@ SEED_USERS = [
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        # additive migration for DBs created before placement pins existed
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS pin_x DOUBLE PRECISION"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS pin_y DOUBLE PRECISION"))
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
@@ -438,9 +472,73 @@ def get_active_prompt(db: Session) -> str:
     return setting.value if setting else DEFAULT_GENERATION_PROMPT
 
 
-def build_prompt(template: str, room_type: str, items: list[Item]) -> str:
+PIN_BLOCK_RE = re.compile(r"\{\{#PINS\}\}(.*?)\{\{/PINS\}\}", re.DOTALL)
+
+
+def numbered_items(items: list[Item]) -> list[tuple[int, Item]]:
+    """Piece numbers are 1-based position in the list — the same order the
+    product reference photos are sent to Gemini and the /place chips show."""
+    return list(enumerate(items, start=1))
+
+
+def pinned_items(items: list[Item], ignore_pins: bool) -> list[tuple[int, Item]]:
+    if ignore_pins:
+        return []
+    return [(n, item) for n, item in numbered_items(items) if item.pin_x is not None and item.pin_y is not None]
+
+
+def build_prompt(template: str, room_type: str, items: list[Item], pinned: list[tuple[int, Item]]) -> str:
     pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
-    return template.replace("{{ROOM_TYPE}}", room_type).replace("{{PIECES}}", pieces)
+
+    if pinned:
+        pin_map = "\n".join(f"Marker {n} — {item.type} {item.category.lower()}, {item.width_ft:g} ft" for n, item in pinned)
+
+        def unwrap_block(match: re.Match) -> str:
+            return match.group(1).replace("{{PIN_MAP}}", pin_map)
+
+        template = PIN_BLOCK_RE.sub(unwrap_block, template)
+    else:
+        template = PIN_BLOCK_RE.sub("", template)
+
+    prompt = template.replace("{{ROOM_TYPE}}", room_type).replace("{{PIECES}}", pieces)
+    return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
+
+
+MARKER_COLORS = ["#F07522", "#1A1815", "#CE5C10", "#8A857E"]
+
+
+def build_marked_room_image(room_photo_path: Path, pinned: list[tuple[int, Item]]) -> Image.Image | None:
+    """Draws a filled, numbered circle at each pinned piece's floor contact
+    point on a copy of the room photo. The original file is never touched;
+    this copy exists only in memory for the duration of one generation call."""
+    if not pinned:
+        return None
+    image = Image.open(room_photo_path).convert("RGB").copy()
+    draw = ImageDraw.Draw(image)
+    diameter = image.width * 0.06
+    radius = diameter / 2
+    font = ImageFont.load_default(size=max(14, int(diameter * 0.55)))
+    for number, item in pinned:
+        cx = item.pin_x * image.width
+        cy = item.pin_y * image.height
+        color = MARKER_COLORS[(number - 1) % len(MARKER_COLORS)]
+        draw.ellipse(
+            [cx - radius, cy - radius, cx + radius, cy + radius],
+            fill=color,
+            outline="white",
+            width=max(2, int(diameter * 0.05)),
+        )
+        text_str = str(number)
+        bbox = draw.textbbox((0, 0), text_str, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), text_str, fill="white", font=font)
+    return image
+
+
+def image_to_part(image: Image.Image) -> types.Part:
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=92)
+    return types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
 
 
 def call_gemini(prompt: str, parts: list[types.Part], log_label: str) -> bytes:
@@ -507,7 +605,7 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 JOBS: dict[str, dict] = {}
 
 
-async def run_generation_job(job_id: str, project_id: int, user_id: int) -> None:
+async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_pins: bool = False) -> None:
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id, Project.user_id == user_id).first()
@@ -518,13 +616,20 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int) -> None
             JOBS[job_id] = {"status": "error", "message": "Add at least one piece of furniture first."}
             return
 
+        pinned = pinned_items(project.items, ignore_pins)
         template = get_active_prompt(db)
-        prompt = build_prompt(template, project.room_type, project.items)
+        prompt = build_prompt(template, project.room_type, project.items, pinned)
         room_part = load_local_image_part(DATA_ROOT / project.room_photo_path)
+        marked_image = build_marked_room_image(DATA_ROOT / project.room_photo_path, pinned)
         item_parts = [load_local_image_part(DATA_ROOT / item.photo_path) for item in project.items]
 
+        parts = [room_part]
+        if marked_image is not None:
+            parts.append(image_to_part(marked_image))
+        parts.extend(item_parts)
+
         try:
-            image_bytes = await asyncio.to_thread(call_gemini, prompt, [room_part, *item_parts], f"project:{project_id}")
+            image_bytes = await asyncio.to_thread(call_gemini, prompt, parts, f"project:{project_id}")
         except GenerationError as exc:
             JOBS[job_id] = {"status": "error", "message": exc.message}
             return
@@ -623,6 +728,8 @@ def project_detail(project: Project) -> dict:
                 "type": item.type,
                 "width_ft": item.width_ft,
                 "photo_url": f"/media/{item.photo_path}",
+                "pin_x": item.pin_x,
+                "pin_y": item.pin_y,
             }
             for item in project.items
         ],
@@ -732,9 +839,50 @@ def api_delete_item(
     return JSONResponse(content={"project": project_detail(project)})
 
 
+class PinBody(BaseModel):
+    x: float
+    y: float
+
+
+@app.post("/api/projects/{project_id}/items/{item_id}/pin")
+def api_set_pin(
+    project_id: int,
+    item_id: int,
+    body: PinBody,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    project = get_owned_project(project_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    if not (0 <= body.x <= 1) or not (0 <= body.y <= 1):
+        return error_response(400, "invalid_coordinates", "That pin is outside the photo.")
+    item.pin_x = body.x
+    item.pin_y = body.y
+    db.commit()
+    db.refresh(project)
+    return JSONResponse(content={"project": project_detail(project)})
+
+
+@app.delete("/api/projects/{project_id}/items/{item_id}/pin")
+def api_clear_pin(
+    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    project = get_owned_project(project_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    item.pin_x = None
+    item.pin_y = None
+    db.commit()
+    db.refresh(project)
+    return JSONResponse(content={"project": project_detail(project)})
+
+
 @app.post("/api/projects/{project_id}/generate")
 async def api_generate(
-    project_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    project_id: int, ignore_pins: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     project = get_owned_project(project_id, user, db)
     if not project.items:
@@ -742,7 +890,7 @@ async def api_generate(
 
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "processing"}
-    asyncio.create_task(run_generation_job(job_id, project.id, user.id))
+    asyncio.create_task(run_generation_job(job_id, project.id, user.id, ignore_pins))
     return JSONResponse(content={"job_id": job_id})
 
 

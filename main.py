@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 from pydantic import BaseModel
 from sqlalchemy import (
     Boolean,
@@ -26,6 +26,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     create_engine,
@@ -127,23 +128,29 @@ Room type: {{ROOM_TYPE}}
 Pieces, in the same order as the product reference photographs:
 {{PIECES}}
 
-{{#PINS}}
-PLACEMENT REFERENCE
+{{#PLACEMENT}}
+PLACEMENT ANNOTATION
 Two versions of the room are provided. The first is the clean
-photograph and is the canvas you must render. The second is an
-annotated copy showing numbered circular markers.
+photograph and is the canvas you must render. The second is the same
+photograph with hand-drawn coloured lines added.
 
-Each marker indicates where the correspondingly numbered piece
-should stand, the marker's position being the floor contact point
-at the centre of that piece's footprint.
+Each coloured line traces where the correspondingly coloured piece
+should sit: the line follows that piece's footprint on the floor and
+indicates its position, its extent and the direction it faces. For an
+L-shaped or sectional piece, the bend in the line shows where the
+piece turns and which way each section runs.
 
-The markers are guidance only. They are not objects in the room.
-Do not render the markers, circles, numbers or any annotation in
-your output. Render the clean room with the furniture placed at
-the marked positions.
+Treat the lines as a rough hand sketch, not a precise boundary. Match
+the intent — placement, orientation and approximate size — while
+keeping the piece's true proportions.
 
-Marker numbers correspond to: {{PIN_MAP}}
-{{/PINS}}
+The lines are annotation only. They are not objects, rugs, cables or
+markings in the room. Do not render the lines, their colour or any
+trace of them in your output. Render the clean room with the
+furniture placed as the lines indicate.
+
+Colour key: {{STROKE_MAP}}
+{{/PLACEMENT}}
 """
 
 PROMPT_SETTING_KEY = "generation_prompt"
@@ -157,12 +164,12 @@ PROMPT_PLACEHOLDERS = [
         "description": 'One line per added piece, in the same order the product photos are sent to the model, formatted as "- Sofa (L-shape), 7 ft wide".',
     },
     {
-        "token": "{{PIN_MAP}}",
-        "description": 'Inside the {{#PINS}}…{{/PINS}} block only: one line per pinned piece, e.g. "Marker 1 — L-shape sofa, 7 ft".',
+        "token": "{{STROKE_MAP}}",
+        "description": 'Inside the {{#PLACEMENT}}…{{/PLACEMENT}} block only: one line per piece with hand-drawn strokes, e.g. "Orange — L-shape sofa, 7 ft".',
     },
     {
-        "token": "{{#PINS}} … {{/PINS}}",
-        "description": "Wraps the placement-reference section. Only appears in the prompt sent to the model when at least one piece has a pin placed on the /place screen — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
+        "token": "{{#PLACEMENT}} … {{/PLACEMENT}}",
+        "description": "Wraps the placement-annotation section. Only appears in the prompt sent to the model when at least one piece has been drawn on in the /place screen — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
     },
 ]
 
@@ -237,8 +244,9 @@ class Item(Base):
     type = Column(String, nullable=False)
     width_ft = Column(Float, nullable=False)
     photo_path = Column(String, nullable=False)
-    pin_x = Column(Float, nullable=True)  # normalised 0-1, relative to room photo width
-    pin_y = Column(Float, nullable=True)  # normalised 0-1, relative to room photo height
+    # list of strokes, each a list of {"x": 0-1, "y": 0-1} points normalised
+    # to the room photo's width/height. Nullable; empty/None means no drawing.
+    strokes = Column(JSON, nullable=True)
 
 
 class Render(Base):
@@ -275,9 +283,11 @@ SEED_USERS = [
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
-        # additive migration for DBs created before placement pins existed
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS pin_x DOUBLE PRECISION"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS pin_y DOUBLE PRECISION"))
+        # migrate DBs created before free-hand placement drawing existed:
+        # drop the old pin columns, add the new strokes column, additively.
+        conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_x"))
+        conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_y"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS strokes JSON"))
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
@@ -472,7 +482,10 @@ def get_active_prompt(db: Session) -> str:
     return setting.value if setting else DEFAULT_GENERATION_PROMPT
 
 
-PIN_BLOCK_RE = re.compile(r"\{\{#PINS\}\}(.*?)\{\{/PINS\}\}", re.DOTALL)
+PLACEMENT_BLOCK_RE = re.compile(r"\{\{#PLACEMENT\}\}(.*?)\{\{/PLACEMENT\}\}", re.DOTALL)
+
+STROKE_COLORS = ["#F07522", "#2563EB", "#16A34A", "#9333EA"]
+STROKE_COLOR_NAMES = ["Orange", "Blue", "Green", "Purple"]
 
 
 def numbered_items(items: list[Item]) -> list[tuple[int, Item]]:
@@ -481,57 +494,52 @@ def numbered_items(items: list[Item]) -> list[tuple[int, Item]]:
     return list(enumerate(items, start=1))
 
 
-def pinned_items(items: list[Item], ignore_pins: bool) -> list[tuple[int, Item]]:
-    if ignore_pins:
+def marked_items(items: list[Item], ignore_placement: bool) -> list[tuple[int, Item]]:
+    if ignore_placement:
         return []
-    return [(n, item) for n, item in numbered_items(items) if item.pin_x is not None and item.pin_y is not None]
+    return [(n, item) for n, item in numbered_items(items) if item.strokes]
 
 
-def build_prompt(template: str, room_type: str, items: list[Item], pinned: list[tuple[int, Item]]) -> str:
+def build_prompt(template: str, room_type: str, items: list[Item], marked: list[tuple[int, Item]]) -> str:
     pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
 
-    if pinned:
-        pin_map = "\n".join(f"Marker {n} — {item.type} {item.category.lower()}, {item.width_ft:g} ft" for n, item in pinned)
+    if marked:
+        stroke_map = "\n".join(
+            f"{STROKE_COLOR_NAMES[(n - 1) % len(STROKE_COLOR_NAMES)]} — {item.type} {item.category.lower()}, {item.width_ft:g} ft"
+            for n, item in marked
+        )
 
         def unwrap_block(match: re.Match) -> str:
-            return match.group(1).replace("{{PIN_MAP}}", pin_map)
+            return match.group(1).replace("{{STROKE_MAP}}", stroke_map)
 
-        template = PIN_BLOCK_RE.sub(unwrap_block, template)
+        template = PLACEMENT_BLOCK_RE.sub(unwrap_block, template)
     else:
-        template = PIN_BLOCK_RE.sub("", template)
+        template = PLACEMENT_BLOCK_RE.sub("", template)
 
     prompt = template.replace("{{ROOM_TYPE}}", room_type).replace("{{PIECES}}", pieces)
     return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
 
 
-MARKER_COLORS = ["#F07522", "#1A1815", "#CE5C10", "#8A857E"]
-
-
-def build_marked_room_image(room_photo_path: Path, pinned: list[tuple[int, Item]]) -> Image.Image | None:
-    """Draws a filled, numbered circle at each pinned piece's floor contact
-    point on a copy of the room photo. The original file is never touched;
-    this copy exists only in memory for the duration of one generation call."""
-    if not pinned:
+def build_marked_room_image(room_photo_path: Path, marked: list[tuple[int, Item]]) -> Image.Image | None:
+    """Draws each piece's hand-drawn strokes, in that piece's colour, on a
+    copy of the room photo. The original file is never touched; this copy
+    exists only in memory for the duration of one generation call."""
+    if not marked:
         return None
     image = Image.open(room_photo_path).convert("RGB").copy()
     draw = ImageDraw.Draw(image)
-    diameter = image.width * 0.06
-    radius = diameter / 2
-    font = ImageFont.load_default(size=max(14, int(diameter * 0.55)))
-    for number, item in pinned:
-        cx = item.pin_x * image.width
-        cy = item.pin_y * image.height
-        color = MARKER_COLORS[(number - 1) % len(MARKER_COLORS)]
-        draw.ellipse(
-            [cx - radius, cy - radius, cx + radius, cy + radius],
-            fill=color,
-            outline="white",
-            width=max(2, int(diameter * 0.05)),
-        )
-        text_str = str(number)
-        bbox = draw.textbbox((0, 0), text_str, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), text_str, fill="white", font=font)
+    stroke_width = max(3, int(image.width * 0.015))
+    radius = stroke_width / 2
+    for number, item in marked:
+        color = STROKE_COLORS[(number - 1) % len(STROKE_COLORS)]
+        for stroke in item.strokes or []:
+            points = [(p["x"] * image.width, p["y"] * image.height) for p in stroke]
+            if len(points) >= 2:
+                draw.line(points, fill=color, width=stroke_width, joint="curve")
+            # rounded caps/joins: cap every vertex (including single-point
+            # "dot" strokes) with a filled circle of the same width
+            for x, y in points:
+                draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=color)
     return image
 
 
@@ -605,7 +613,7 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 JOBS: dict[str, dict] = {}
 
 
-async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_pins: bool = False) -> None:
+async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_placement: bool = False) -> None:
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id, Project.user_id == user_id).first()
@@ -616,11 +624,11 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
             JOBS[job_id] = {"status": "error", "message": "Add at least one piece of furniture first."}
             return
 
-        pinned = pinned_items(project.items, ignore_pins)
+        marked = marked_items(project.items, ignore_placement)
         template = get_active_prompt(db)
-        prompt = build_prompt(template, project.room_type, project.items, pinned)
+        prompt = build_prompt(template, project.room_type, project.items, marked)
         room_part = load_local_image_part(DATA_ROOT / project.room_photo_path)
-        marked_image = build_marked_room_image(DATA_ROOT / project.room_photo_path, pinned)
+        marked_image = build_marked_room_image(DATA_ROOT / project.room_photo_path, marked)
         item_parts = [load_local_image_part(DATA_ROOT / item.photo_path) for item in project.items]
 
         parts = [room_part]
@@ -728,8 +736,7 @@ def project_detail(project: Project) -> dict:
                 "type": item.type,
                 "width_ft": item.width_ft,
                 "photo_url": f"/media/{item.photo_path}",
-                "pin_x": item.pin_x,
-                "pin_y": item.pin_y,
+                "strokes": item.strokes or [],
             }
             for item in project.items
         ],
@@ -839,16 +846,31 @@ def api_delete_item(
     return JSONResponse(content={"project": project_detail(project)})
 
 
-class PinBody(BaseModel):
+class StrokePoint(BaseModel):
     x: float
     y: float
 
 
-@app.post("/api/projects/{project_id}/items/{item_id}/pin")
-def api_set_pin(
+class StrokeBody(BaseModel):
+    points: list[StrokePoint]
+
+
+def validated_stroke_points(points: list[StrokePoint]) -> list[dict] | None:
+    if not points:
+        return None
+    cleaned = []
+    for p in points:
+        if not (0 <= p.x <= 1) or not (0 <= p.y <= 1):
+            return None
+        cleaned.append({"x": p.x, "y": p.y})
+    return cleaned
+
+
+@app.post("/api/projects/{project_id}/items/{item_id}/strokes")
+def api_add_stroke(
     project_id: int,
     item_id: int,
-    body: PinBody,
+    body: StrokeBody,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -856,25 +878,38 @@ def api_set_pin(
     item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    if not (0 <= body.x <= 1) or not (0 <= body.y <= 1):
-        return error_response(400, "invalid_coordinates", "That pin is outside the photo.")
-    item.pin_x = body.x
-    item.pin_y = body.y
+    points = validated_stroke_points(body.points)
+    if points is None:
+        return error_response(400, "invalid_stroke", "That stroke is outside the photo.")
+    item.strokes = [*(item.strokes or []), points]
     db.commit()
     db.refresh(project)
     return JSONResponse(content={"project": project_detail(project)})
 
 
-@app.delete("/api/projects/{project_id}/items/{item_id}/pin")
-def api_clear_pin(
+@app.post("/api/projects/{project_id}/items/{item_id}/strokes/undo")
+def api_undo_stroke(
     project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     project = get_owned_project(project_id, user, db)
     item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    item.pin_x = None
-    item.pin_y = None
+    item.strokes = (item.strokes or [])[:-1]
+    db.commit()
+    db.refresh(project)
+    return JSONResponse(content={"project": project_detail(project)})
+
+
+@app.delete("/api/projects/{project_id}/items/{item_id}/strokes")
+def api_clear_strokes(
+    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    project = get_owned_project(project_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    item.strokes = []
     db.commit()
     db.refresh(project)
     return JSONResponse(content={"project": project_detail(project)})
@@ -882,7 +917,10 @@ def api_clear_pin(
 
 @app.post("/api/projects/{project_id}/generate")
 async def api_generate(
-    project_id: int, ignore_pins: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    project_id: int,
+    ignore_placement: bool = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> JSONResponse:
     project = get_owned_project(project_id, user, db)
     if not project.items:
@@ -890,7 +928,7 @@ async def api_generate(
 
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "processing"}
-    asyncio.create_task(run_generation_job(job_id, project.id, user.id, ignore_pins))
+    asyncio.create_task(run_generation_job(job_id, project.id, user.id, ignore_placement))
     return JSONResponse(content={"job_id": job_id})
 
 

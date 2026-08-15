@@ -511,14 +511,16 @@
   }
 
   // ---------------------------------------------------------------------
-  // New visualization — placement pins
+  // New visualization — free-hand placement drawing
   // ---------------------------------------------------------------------
 
-  const PIN_MARKER_COLORS = ["#F07522", "#1A1815", "#CE5C10", "#8A857E"];
+  const STROKE_COLORS = ["#F07522", "#2563EB", "#16A34A", "#9333EA"];
 
   function clamp01(v) {
     return Math.min(1, Math.max(0, v));
   }
+
+  let placeResizeHandler = null;
 
   async function viewPlace(root, projectId) {
     root.innerHTML = `<div class="screen"><p class="muted">Loading…</p></div>`;
@@ -531,162 +533,214 @@
     }
 
     let selectedId = project.items[0].id;
+    let activeStroke = null; // normalised {x,y} points while the pointer is down
 
-    function paint() {
-      root.innerHTML = h`
-        <div class="screen">
-          <div class="top-actions">
-            <a data-link href="/new/furniture/${projectId}" class="back-btn">&#8592;</a>
-            <div class="eyebrow">Step 2 of 2</div>
-          </div>
-          <h1 style="margin-bottom:14px;">Where does each piece go?</h1>
-          <div class="place-photo-wrap" id="photo-wrap">
-            <img src="${project.room_photo_url}" id="place-img" draggable="false" alt="Room photo" />
-            <div class="marker-layer" id="marker-layer"></div>
-          </div>
-          <div class="hint-line" style="text-align:center;">Tap a piece, then tap the spot</div>
-          <div class="chips" id="piece-chips" style="margin-top:14px;">
-            ${project.items.map((it, i) => `
-              <button type="button" class="chip${it.id === selectedId ? " selected" : ""}" data-item="${it.id}">${i + 1} &middot; ${esc(it.category)}</button>
-            `).join("")}
-          </div>
-          <div style="display:flex;flex-direction:column;gap:10px;margin-top:24px;">
-            <button class="btn btn-primary" id="generate-btn">Generate</button>
-            <button class="btn btn-ghost" id="skip-btn">Skip — let it decide</button>
-          </div>
+    root.innerHTML = h`
+      <div class="screen">
+        <div class="top-actions">
+          <a data-link href="/new/furniture/${projectId}" class="back-btn">&#8592;</a>
+          <div class="eyebrow">Step 2 of 2</div>
         </div>
-      `;
+        <h1 style="margin-bottom:14px;">Where does each piece go?</h1>
+        <div class="place-photo-wrap" id="photo-wrap">
+          <img src="${project.room_photo_url}" id="place-img" draggable="false" alt="Room photo" />
+          <canvas id="place-canvas"></canvas>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn btn-ghost btn-small" id="undo-btn" style="flex:1;">Undo</button>
+          <button class="btn btn-ghost btn-small" id="clear-btn" style="flex:1;">Clear</button>
+        </div>
+        <div class="hint-line" style="text-align:center;">Select a piece, then draw where it goes</div>
+        <div class="chips" id="piece-chips" style="margin-top:14px;">
+          ${project.items.map((it, i) => h`
+            <button type="button" class="chip${it.id === selectedId ? " selected" : ""}" data-item="${it.id}">
+              <span class="chip-dot" style="background:${STROKE_COLORS[i % STROKE_COLORS.length]}"></span>${i + 1} &middot; ${esc(it.category)}
+            </button>
+          `).join("")}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:24px;">
+          <button class="btn btn-primary" id="generate-btn">Generate</button>
+          <button class="btn btn-ghost" id="skip-btn">Skip — let it decide</button>
+        </div>
+      </div>
+    `;
 
-      root.querySelectorAll("[data-item]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          selectedId = Number(btn.getAttribute("data-item"));
-          paint();
+    const img = root.querySelector("#place-img");
+    const canvas = root.querySelector("#place-canvas");
+    const ctx = canvas.getContext("2d");
+
+    function sizeCanvas() {
+      const rect = img.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      canvas.style.width = rect.width + "px";
+      canvas.style.height = rect.height + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function drawPath(points, rect, color, width) {
+      if (!points.length) return;
+      if (points.length === 1) {
+        const p = points[0];
+        ctx.beginPath();
+        ctx.arc(p.x * rect.width, p.y * rect.height, width / 2, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        return;
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      points.forEach((p, i) => {
+        const px = p.x * rect.width;
+        const py = p.y * rect.height;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    }
+
+    function redraw() {
+      const rect = img.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      const strokeWidth = rect.width * 0.015;
+      project.items.forEach((it, i) => {
+        const color = STROKE_COLORS[i % STROKE_COLORS.length];
+        (it.strokes || []).forEach((stroke) => drawPath(stroke, rect, color, strokeWidth));
+      });
+      if (activeStroke && activeStroke.length) {
+        const idx = project.items.findIndex((it) => it.id === selectedId);
+        drawPath(activeStroke, rect, STROKE_COLORS[(idx < 0 ? 0 : idx) % STROKE_COLORS.length], strokeWidth);
+      }
+    }
+
+    function setupCanvas() {
+      sizeCanvas();
+      redraw();
+    }
+
+    if (img.complete) setupCanvas();
+    else img.addEventListener("load", setupCanvas, { once: true });
+
+    if (placeResizeHandler) window.removeEventListener("resize", placeResizeHandler);
+    placeResizeHandler = () => setupCanvas();
+    window.addEventListener("resize", placeResizeHandler);
+
+    root.querySelectorAll("[data-item]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedId = Number(btn.getAttribute("data-item"));
+        root.querySelectorAll("[data-item]").forEach((b) => {
+          b.classList.toggle("selected", Number(b.getAttribute("data-item")) === selectedId);
         });
       });
+    });
 
-      paintMarkers();
-
-      root.querySelector("#photo-wrap").addEventListener("click", async (e) => {
-        if (e.target.closest(".marker")) return;
-        if (selectedId == null) return;
-        const rect = root.querySelector("#photo-wrap").getBoundingClientRect();
-        const x = clamp01((e.clientX - rect.left) / rect.width);
-        const y = clamp01((e.clientY - rect.top) / rect.height);
-        try {
-          await setPin(selectedId, x, y);
-        } catch (err) {
-          toast(err.message);
-        }
-      });
-
-      root.querySelector("#generate-btn").addEventListener("click", async (e) => {
-        const btn = e.currentTarget;
-        btn.disabled = true;
-        btn.textContent = "Starting…";
-        try {
-          await startGeneration(projectId);
-        } catch (err) {
-          toast(err.message);
-          btn.disabled = false;
-          btn.textContent = "Generate";
-        }
-      });
-
-      root.querySelector("#skip-btn").addEventListener("click", async (e) => {
-        const btn = e.currentTarget;
-        btn.disabled = true;
-        btn.textContent = "Starting…";
-        try {
-          await startGeneration(projectId, { ignorePins: true });
-        } catch (err) {
-          toast(err.message);
-          btn.disabled = false;
-          btn.textContent = "Skip — let it decide";
-        }
-      });
-    }
-
-    async function setPin(itemId, x, y) {
-      const fresh = await api("POST", `/api/projects/${projectId}/items/${itemId}/pin`, { json: { x, y } });
+    async function addStroke(itemId, points) {
+      const fresh = await api("POST", `/api/projects/${projectId}/items/${itemId}/strokes`, { json: { points } });
       project = fresh.project;
-      paintMarkers();
+      redraw();
     }
 
-    async function clearPin(itemId) {
-      const fresh = await api("DELETE", `/api/projects/${projectId}/items/${itemId}/pin`);
-      project = fresh.project;
-      paintMarkers();
-    }
-
-    function paintMarkers() {
-      const layer = root.querySelector("#marker-layer");
-      if (!layer) return;
-      layer.innerHTML = "";
-      project.items.forEach((it, i) => {
-        if (it.pin_x == null || it.pin_y == null) return;
-        const marker = document.createElement("div");
-        marker.className = "marker";
-        marker.style.left = (it.pin_x * 100) + "%";
-        marker.style.top = (it.pin_y * 100) + "%";
-        marker.style.setProperty("--marker-color", PIN_MARKER_COLORS[i % PIN_MARKER_COLORS.length]);
-        marker.innerHTML = `<div class="marker-drop"></div><div class="marker-num">${i + 1}</div>`;
-        attachDrag(marker, it.id);
-        layer.appendChild(marker);
-      });
-    }
-
-    function attachDrag(marker, itemId) {
-      let dragging = false;
-      let moved = false;
-      let startX = 0;
-      let startY = 0;
-
-      marker.addEventListener("pointerdown", (e) => {
-        e.stopPropagation();
-        dragging = true;
-        moved = false;
-        startX = e.clientX;
-        startY = e.clientY;
-        marker.setPointerCapture(e.pointerId);
-      });
-
-      marker.addEventListener("pointermove", (e) => {
-        if (!dragging) return;
-        if (Math.abs(e.clientX - startX) > 4 || Math.abs(e.clientY - startY) > 4) moved = true;
-        const rect = root.querySelector("#photo-wrap").getBoundingClientRect();
-        const x = clamp01((e.clientX - rect.left) / rect.width);
-        const y = clamp01((e.clientY - rect.top) / rect.height);
-        marker.style.left = (x * 100) + "%";
-        marker.style.top = (y * 100) + "%";
-      });
-
-      async function finishDrag(e) {
-        if (!dragging) return;
-        dragging = false;
-        const rect = root.querySelector("#photo-wrap").getBoundingClientRect();
-        const x = clamp01((e.clientX - rect.left) / rect.width);
-        const y = clamp01((e.clientY - rect.top) / rect.height);
-        try {
-          if (moved) {
-            await setPin(itemId, x, y);
-          } else {
-            await clearPin(itemId);
-          }
-        } catch (err) {
-          toast(err.message);
-          paintMarkers();
-        }
+    root.querySelector("#undo-btn").addEventListener("click", async () => {
+      try {
+        const fresh = await api("POST", `/api/projects/${projectId}/items/${selectedId}/strokes/undo`);
+        project = fresh.project;
+        redraw();
+      } catch (err) {
+        toast(err.message);
       }
+    });
 
-      marker.addEventListener("pointerup", (e) => { e.stopPropagation(); finishDrag(e); });
-      marker.addEventListener("pointercancel", (e) => { dragging = false; });
+    root.querySelector("#clear-btn").addEventListener("click", async () => {
+      try {
+        const fresh = await api("DELETE", `/api/projects/${projectId}/items/${selectedId}/strokes`);
+        project = fresh.project;
+        redraw();
+      } catch (err) {
+        toast(err.message);
+      }
+    });
+
+    root.querySelector("#generate-btn").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = "Starting…";
+      try {
+        await startGeneration(projectId);
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+        btn.textContent = "Generate";
+      }
+    });
+
+    root.querySelector("#skip-btn").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = "Starting…";
+      try {
+        await startGeneration(projectId, { ignorePlacement: true });
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+        btn.textContent = "Skip — let it decide";
+      }
+    });
+
+    let activePointerId = null;
+
+    canvas.addEventListener("pointerdown", (e) => {
+      if (selectedId == null) return;
+      activePointerId = e.pointerId;
+      canvas.setPointerCapture(activePointerId);
+      const rect = img.getBoundingClientRect();
+      activeStroke = [{
+        x: clamp01((e.clientX - rect.left) / rect.width),
+        y: clamp01((e.clientY - rect.top) / rect.height),
+      }];
+      redraw();
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      if (activeStroke == null || e.pointerId !== activePointerId) return;
+      const rect = img.getBoundingClientRect();
+      const x = clamp01((e.clientX - rect.left) / rect.width);
+      const y = clamp01((e.clientY - rect.top) / rect.height);
+      const last = activeStroke[activeStroke.length - 1];
+      const dx = (x - last.x) * rect.width;
+      const dy = (y - last.y) * rect.height;
+      if (Math.hypot(dx, dy) < 2) return;
+      activeStroke.push({ x, y });
+      redraw();
+    });
+
+    async function finishStroke(e) {
+      if (activeStroke == null || e.pointerId !== activePointerId) return;
+      const points = activeStroke;
+      activeStroke = null;
+      activePointerId = null;
+      try {
+        await addStroke(selectedId, points);
+      } catch (err) {
+        toast(err.message);
+        redraw();
+      }
     }
 
-    paint();
+    canvas.addEventListener("pointerup", finishStroke);
+    canvas.addEventListener("pointercancel", () => {
+      activeStroke = null;
+      activePointerId = null;
+      redraw();
+    });
   }
 
   async function startGeneration(projectId, opts) {
-    const suffix = opts && opts.ignorePins ? "?ignore_pins=true" : "";
+    const suffix = opts && opts.ignorePlacement ? "?ignore_placement=true" : "";
     const data = await api("POST", `/api/projects/${projectId}/generate${suffix}`);
     localStorage.setItem("pendingJob", JSON.stringify({
       jobId: data.job_id,

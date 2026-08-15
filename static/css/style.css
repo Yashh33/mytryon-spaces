@@ -415,6 +415,40 @@ h2 { font-size: 19px; }
   animation: spin 0.8s linear infinite;
 }
 
+/* Admin — prompt editor */
+.prompt-textarea {
+  width: 100%;
+  min-height: 46vh;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 10px;
+  padding: 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+  resize: vertical;
+}
+.prompt-textarea:focus { outline: 2px solid var(--orange); outline-offset: -1px; }
+.placeholder-list { display: flex; flex-direction: column; gap: 8px; }
+.placeholder-item {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 13px;
+}
+.placeholder-token {
+  display: inline-block;
+  background: var(--tint);
+  color: var(--orange-d);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+.placeholder-desc { font-size: 12.5px; color: var(--ink2); line-height: 1.5; }
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 9px;

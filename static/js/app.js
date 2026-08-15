@@ -103,6 +103,7 @@
     { pattern: /^\/project\/(\d+)$/, view: viewResult },
     { pattern: /^\/admin$/, view: viewAdmin, admin: true },
     { pattern: /^\/admin\/user\/(\d+)$/, view: viewAdminDetail, admin: true },
+    { pattern: /^\/admin\/prompt$/, view: viewAdminPrompt, admin: true },
   ];
 
   function navigate(path, replace) {
@@ -756,8 +757,9 @@
   function renderAdmin(root, users) {
     root.innerHTML = h`
       <div class="screen">
-        <div class="top-actions">
+        <div class="top-actions" style="justify-content:space-between;">
           <a data-link href="/" class="back-btn">&#8592;</a>
+          <a data-link href="/admin/prompt" class="mono" style="font-size:12px;font-weight:700;color:var(--orange-d);">Edit prompt &#8250;</a>
         </div>
         <div class="eyebrow">Admin</div>
         <div class="admin-header">
@@ -920,6 +922,76 @@
         toast(err.message);
         btn.disabled = false;
         btn.textContent = "Save new password";
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Admin — generation prompt
+  // ---------------------------------------------------------------------
+
+  async function viewAdminPrompt(root) {
+    root.innerHTML = `<div class="screen"><p class="muted">Loading…</p></div>`;
+    const data = await api("GET", "/api/admin/prompt");
+    paintAdminPrompt(root, data);
+  }
+
+  function paintAdminPrompt(root, data) {
+    root.innerHTML = h`
+      <div class="screen">
+        <div class="top-actions">
+          <a data-link href="/admin" class="back-btn">&#8592;</a>
+        </div>
+        <div class="eyebrow">Admin</div>
+        <h1 style="margin-bottom:4px;">Generation prompt</h1>
+        <div class="muted" style="font-size:12.5px;margin-bottom:16px;">
+          ${data.updated_at ? "Last saved " + formatDate(data.updated_at) : "Using the built-in default"}
+        </div>
+        <textarea id="prompt-textarea" class="prompt-textarea" spellcheck="false">${esc(data.prompt)}</textarea>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">
+          <button class="btn btn-primary" id="save-prompt-btn">Save</button>
+          <button class="btn btn-ghost" id="reset-prompt-btn">Reset to default</button>
+        </div>
+        <div class="section-label" style="margin-top:26px;">Placeholders you can use</div>
+        <div class="placeholder-list">
+          ${data.placeholders.map((p) => h`
+            <div class="placeholder-item">
+              <div class="placeholder-token mono">${esc(p.token)}</div>
+              <div class="placeholder-desc">${esc(p.description)}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+
+    root.querySelector("#save-prompt-btn").addEventListener("click", async () => {
+      const value = root.querySelector("#prompt-textarea").value;
+      const btn = root.querySelector("#save-prompt-btn");
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const fresh = await api("POST", "/api/admin/prompt", { json: { prompt: value } });
+        toast("Prompt saved.");
+        paintAdminPrompt(root, fresh);
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+        btn.textContent = "Save";
+      }
+    });
+
+    root.querySelector("#reset-prompt-btn").addEventListener("click", async () => {
+      const btn = root.querySelector("#reset-prompt-btn");
+      btn.disabled = true;
+      btn.textContent = "Resetting…";
+      try {
+        const fresh = await api("POST", "/api/admin/prompt/reset");
+        toast("Reset to the built-in default.");
+        paintAdminPrompt(root, fresh);
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+        btn.textContent = "Reset to default";
       }
     });
   }

@@ -26,6 +26,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     create_engine,
     func,
 )
@@ -51,54 +52,91 @@ for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
 MODEL_NAME = "gemini-3.1-flash-image"
 
 # ---------------------------------------------------------------------------
-# GEMINI PROMPT — edited frequently, kept isolated. No string interpolation
-# is performed on this constant; it is sent to the model verbatim, followed
-# by the room photo, each product reference photo, and a per-request detail
-# block naming the room type and every piece with its type and width.
+# GEMINI PROMPT — the live prompt lives in the `settings` table (key
+# "generation_prompt") and is editable from /admin/prompt with no redeploy.
+# This constant is only the seed value on first run and the "reset to
+# default" target. It is loaded fresh from the DB on every generation, never
+# cached at startup. {{ROOM_TYPE}} and {{PIECES}} are substituted in before
+# the prompt is sent to the model, alongside the room photo and each product
+# reference photo in order — see PROMPT_PLACEHOLDERS below.
 # ---------------------------------------------------------------------------
-GENERATION_PROMPT = """\
-You are given a set of reference images, in this order:
-1. A photo of a customer's room, currently under-construction or unfurnished.
-2. One or more furniture product photos, each a single piece the customer
-   has shortlisted, supplied in the same order as the piece list below.
+DEFAULT_GENERATION_PROMPT = """\
+You are compositing furniture into a photograph of a real room.
 
-Generate one photorealistic image that places every product from the
-product reference photos into the room from the first reference photo.
+CAMERA — highest priority
+Reproduce the room photograph from the exact same camera position,
+height, angle and focal length. Do not re-frame, re-crop, zoom, pan or
+change the perspective in any way. The output must look like the same
+photograph with furniture added, not a new photograph of the same room.
 
-Before placing furniture, clean up the room itself: remove any people,
-ladders, scaffolding, tools, cement bags, tile stacks, packaging, and
-construction debris visible in the room photo. Render the room as warm,
-finished, and lived-in — soft warm lighting, clean finished walls and
-floor. This is an aspirational image for a customer, not a documentary
-photo of a construction site.
+ROOM — do not alter
+Preserve the room exactly: wall positions, room width, depth and
+ceiling height, floor material and pattern, windows, doors, balcony
+openings, curtains, ceiling fan, light fixtures, and the direction and
+colour of the existing light. Do not enlarge, shrink or reproportion
+the space. Do not add or remove architectural features.
 
-Product identity is authoritative and must be preserved exactly for each
-piece: silhouette, proportions, cushion and panel count, leg shape,
-stitching, fabric colour, and fabric texture. Do not redesign, restyle,
-or simplify any product.
+PRODUCT DESIGN — take from the reference photograph
+For each piece, reproduce its design language exactly as shown in its
+reference photograph: fabric, colour, texture, weave, stitching,
+tufting pattern, arm profile, back profile, leg or plinth style,
+cushion style and overall visual character.
 
-Transfer only the furniture product itself from each product photo.
-Exclude any staging props visible in the product reference photos — rugs,
-cushions, coffee tables, plants, lamps, decorative objects. Place only
-the products in the room.
+PRODUCT CONFIGURATION — take from the written specification
+Each piece has a written type and width. Build the piece at that size
+and in that seating configuration, even where the reference photograph
+shows a different one. A two-seater reference at a stated seven feet
+must be rendered as a seven-foot version of that same design, with
+seat count and proportions extended naturally and consistently.
 
-The room's architecture must be preserved: flooring, walls, windows,
-doors, and proportions, along with the existing lighting direction and
-colour temperature, stay consistent with the room photo.
+When the photograph and the specification disagree:
+- the photograph decides material, colour, texture and design detail
+- the specification decides length, seat count and configuration
 
-Place each product flat and contact-correct on the floor plane, with
-grounded, physically plausible shadows. Scale each piece to its stated
-width in feet, relative to the room's real proportions and other visible
-reference objects (doors, windows, floor tiles/boards).
+PLACEMENT AND SCALE
+Place each piece flat on the floor plane with correct contact shadows.
+Scale each piece to its stated width relative to the room's visible
+architecture — door heights, window sills, floor tiles and ceiling
+height are the references. A seven-foot sofa must measure seven feet
+against those cues.
+Remove any existing furniture occupying the target area and rebuild the
+floor and wall behind it consistently.
 
-If existing furniture occupies a target placement area, remove it and
-reconstruct the floor and wall behind it consistently with the rest of
-the room.
+CLEAR THE SPACE
+Remove people, workers, ladders, tools, paint buckets, cement bags,
+stacked tiles, packaging and construction debris. Finish any visibly
+unfinished surfaces — bare plaster becomes painted wall, exposed screed
+becomes finished flooring — while keeping the same materials, layout
+and proportions.
 
-Match the output's exposure and white balance to the room photo. The
-result must read as a real photograph of the room with the products in
-it, not a studio render or a collage.
+EXCLUDE FROM THE PRODUCT REFERENCE
+Transfer only the furniture itself. Do not bring across rugs, cushions,
+coffee tables, plants, lamps, artwork or any staging visible in the
+product photograph unless that item was separately specified.
+
+FINISH
+Render a warm, inviting, lived-in interior. Soft warm lighting, gentle
+shadows, clean finished surfaces. Photographic realism at the same
+exposure and white balance as the room photograph. This is an
+aspirational image for a customer deciding on a purchase.
+
+THIS REQUEST
+Room type: {{ROOM_TYPE}}
+Pieces, in the same order as the product reference photographs:
+{{PIECES}}
 """
+
+PROMPT_SETTING_KEY = "generation_prompt"
+PROMPT_PLACEHOLDERS = [
+    {
+        "token": "{{ROOM_TYPE}}",
+        "description": 'The room type chosen for this visualization — "Living room", "Bedroom", "Dining", or "Balcony".',
+    },
+    {
+        "token": "{{PIECES}}",
+        "description": 'One line per added piece, in the same order the product photos are sent to the model, formatted as "- Sofa (L-shape), 7 ft wide".',
+    },
+]
 
 # ---------------------------------------------------------------------------
 
@@ -181,6 +219,13 @@ class Render(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class Setting(Base):
+    __tablename__ = "settings"
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -214,6 +259,10 @@ async def lifespan(app: FastAPI):
                 )
             db.commit()
             logger.info("seeded %d users", len(SEED_USERS))
+        if db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first() is None:
+            db.add(Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT))
+            db.commit()
+            logger.info("seeded default generation prompt")
     finally:
         db.close()
     yield
@@ -382,11 +431,16 @@ class GenerationError(Exception):
         self.message = message
 
 
-def build_prompt(room_type: str, items: list[Item]) -> str:
-    lines = [GENERATION_PROMPT, "", f"Room type: {room_type}", "Pieces, in reference-photo order:"]
-    for item in items:
-        lines.append(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide")
-    return "\n".join(lines)
+def get_active_prompt(db: Session) -> str:
+    """Loaded fresh on every generation — never cached — so admin edits to
+    /admin/prompt take effect immediately with no redeploy."""
+    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+    return setting.value if setting else DEFAULT_GENERATION_PROMPT
+
+
+def build_prompt(template: str, room_type: str, items: list[Item]) -> str:
+    pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
+    return template.replace("{{ROOM_TYPE}}", room_type).replace("{{PIECES}}", pieces)
 
 
 def call_gemini(prompt: str, parts: list[types.Part], log_label: str) -> bytes:
@@ -464,7 +518,8 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int) -> None
             JOBS[job_id] = {"status": "error", "message": "Add at least one piece of furniture first."}
             return
 
-        prompt = build_prompt(project.room_type, project.items)
+        template = get_active_prompt(db)
+        prompt = build_prompt(template, project.room_type, project.items)
         room_part = load_local_image_part(DATA_ROOT / project.room_photo_path)
         item_parts = [load_local_image_part(DATA_ROOT / item.photo_path) for item in project.items]
 
@@ -787,6 +842,60 @@ def api_admin_toggle_active(user_id: int, admin: User = Depends(require_admin), 
     target.active = not target.active
     db.commit()
     return JSONResponse(content={"user": user_public(target)})
+
+
+# ---------------------------------------------------------------------------
+# Admin — generation prompt
+# ---------------------------------------------------------------------------
+
+
+def prompt_setting_response(setting: Setting | None) -> dict:
+    return {
+        "prompt": setting.value if setting else DEFAULT_GENERATION_PROMPT,
+        "default_prompt": DEFAULT_GENERATION_PROMPT,
+        "updated_at": setting.updated_at.isoformat() if setting and setting.updated_at else None,
+        "placeholders": PROMPT_PLACEHOLDERS,
+    }
+
+
+@app.get("/api/admin/prompt")
+def api_admin_get_prompt(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+    return JSONResponse(content=prompt_setting_response(setting))
+
+
+class PromptBody(BaseModel):
+    prompt: str
+
+
+@app.post("/api/admin/prompt")
+def api_admin_save_prompt(
+    body: PromptBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if not body.prompt.strip():
+        return error_response(400, "empty_prompt", "The prompt can't be empty.")
+    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+    if setting is None:
+        setting = Setting(key=PROMPT_SETTING_KEY, value=body.prompt)
+        db.add(setting)
+    else:
+        setting.value = body.prompt
+    db.commit()
+    db.refresh(setting)
+    return JSONResponse(content=prompt_setting_response(setting))
+
+
+@app.post("/api/admin/prompt/reset")
+def api_admin_reset_prompt(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+    if setting is None:
+        setting = Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT)
+        db.add(setting)
+    else:
+        setting.value = DEFAULT_GENERATION_PROMPT
+    db.commit()
+    db.refresh(setting)
+    return JSONResponse(content=prompt_setting_response(setting))
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import io
 import logging
 import mimetypes
@@ -15,7 +16,6 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from google import genai
-from google.genai import types
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from PIL import Image, ImageDraw, ImageOps
 from pydantic import BaseModel
@@ -420,45 +420,53 @@ async def save_validated_upload(upload: UploadFile, dest_dir: Path) -> str:
     return str((dest_dir / filename).relative_to(DATA_ROOT)).replace("\\", "/")
 
 
-def load_local_image_part(path: Path) -> types.Part:
+def load_local_image_block(path: Path) -> dict:
     mime_type, _ = mimetypes.guess_type(path.name)
-    return types.Part.from_bytes(data=path.read_bytes(), mime_type=mime_type or "image/jpeg")
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "image", "data": data, "mime_type": mime_type or "image/jpeg"}
 
 
-BLOCKED_FINISH_REASONS = {
-    types.FinishReason.SAFETY,
-    types.FinishReason.PROHIBITED_CONTENT,
-    types.FinishReason.IMAGE_SAFETY,
-    types.FinishReason.IMAGE_PROHIBITED_CONTENT,
-    types.FinishReason.BLOCKLIST,
-    types.FinishReason.SPII,
-    types.FinishReason.RECITATION,
-    types.FinishReason.IMAGE_RECITATION,
+def image_to_block(image: Image.Image) -> dict:
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=92)
+    data = base64.b64encode(buf.getvalue()).decode("ascii")
+    return {"type": "image", "data": data, "mime_type": "image/jpeg"}
+
+
+ASPECT_RATIOS = {
+    "1:1": 1 / 1, "2:3": 2 / 3, "3:2": 3 / 2, "3:4": 3 / 4, "4:3": 4 / 3,
+    "4:5": 4 / 5, "5:4": 5 / 4, "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9,
+    "1:8": 1 / 8, "8:1": 8 / 1, "1:4": 1 / 4, "4:1": 4 / 1,
 }
 
 
-def blocked_reason(response: types.GenerateContentResponse) -> str | None:
-    feedback = getattr(response, "prompt_feedback", None)
-    if feedback is not None and getattr(feedback, "block_reason", None):
-        return f"prompt_blocked:{feedback.block_reason}"
-    if not response.candidates:
-        return "no_candidates"
-    finish_reason = response.candidates[0].finish_reason
-    if finish_reason in BLOCKED_FINISH_REASONS:
-        return f"finish_reason:{finish_reason}"
-    return None
+def nearest_aspect_ratio(width: int, height: int) -> str:
+    ratio = width / height
+    return min(ASPECT_RATIOS, key=lambda key: abs(ASPECT_RATIOS[key] - ratio))
 
 
-def extract_image(response: types.GenerateContentResponse) -> tuple[bytes, str] | None:
-    try:
-        parts = response.parts
-    except Exception:
+def interaction_failure_reason(interaction) -> str | None:
+    """None on success; a non-completed Interactions API status otherwise —
+    covers safety blocks, budget_exceeded, incomplete and failed alike."""
+    if interaction.status == "completed":
         return None
-    if not parts:
-        return None
-    for part in parts:
-        if part.inline_data and part.inline_data.data:
-            return part.inline_data.data, part.inline_data.mime_type or "image/png"
+    return f"status:{interaction.status}"
+
+
+def extract_image_from_interaction(interaction) -> bytes | None:
+    """Reads interaction.output_image.data (base64) and decodes it. Falls
+    back to scanning interaction.steps for a model_output "image" block —
+    the SDK usually populates output_image itself, but this covers the case
+    where it doesn't."""
+    output_image = getattr(interaction, "output_image", None)
+    if output_image is not None and getattr(output_image, "data", None):
+        return base64.b64decode(output_image.data)
+    for step in reversed(interaction.steps or []):
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for item in reversed(getattr(step, "content", None) or []):
+            if getattr(item, "type", None) == "image" and getattr(item, "data", None):
+                return base64.b64decode(item.data)
     return None
 
 
@@ -543,23 +551,22 @@ def build_marked_room_image(room_photo_path: Path, marked: list[tuple[int, Item]
     return image
 
 
-def image_to_part(image: Image.Image) -> types.Part:
-    buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=92)
-    return types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
-
-
-def call_gemini(prompt: str, parts: list[types.Part], log_label: str) -> bytes:
-    """Calls Gemini with retry on rate limits, safety blocks and empty
-    responses. Runs synchronously — callers should offload to a thread."""
-    last_error = "unknown"
+def call_gemini(prompt: str, image_blocks: list[dict], response_format: dict, log_label: str) -> bytes:
+    """Calls Gemini's Interactions API — the current recommended surface and
+    the only one exposing thinking control — with retry on rate limits,
+    non-completed statuses (safety blocks, budget_exceeded, etc.) and empty
+    responses. Images are sent before the text prompt, per Google's editing
+    and inpainting examples. Runs synchronously — callers should offload to
+    a thread."""
+    input_blocks = [*image_blocks, {"type": "text", "text": prompt}]
     for attempt in range(GENERATION_RETRIES + 1):
         start = time.monotonic()
         try:
-            response = client.models.generate_content(
+            interaction = client.interactions.create(
                 model=MODEL_NAME,
-                contents=[prompt, *parts],
-                config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+                input=input_blocks,
+                generation_config={"thinking_level": "high"},
+                response_format=response_format,
             )
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -568,7 +575,6 @@ def call_gemini(prompt: str, parts: list[types.Part], log_label: str) -> bytes:
                 "gen label=%s attempt=%d elapsed_ms=%.0f result=exception:%s retryable=%s",
                 log_label, attempt, elapsed_ms, exc.__class__.__name__, retryable,
             )
-            last_error = "rate_limited" if retryable else "model_error"
             if retryable and attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
@@ -577,26 +583,24 @@ def call_gemini(prompt: str, parts: list[types.Part], log_label: str) -> bytes:
             raise GenerationError("Something went wrong generating your image. Please try again.")
 
         elapsed_ms = (time.monotonic() - start) * 1000
-        block_reason = blocked_reason(response)
-        if block_reason:
-            logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=%s", log_label, attempt, elapsed_ms, block_reason)
-            last_error = "blocked"
+        failure_reason = interaction_failure_reason(interaction)
+        if failure_reason:
+            logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=%s", log_label, attempt, elapsed_ms, failure_reason)
             if attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
             raise GenerationError("We couldn't generate a result for those photos. Try a different angle or photo.")
 
-        image = extract_image(response)
-        if image is None:
+        image_bytes = extract_image_from_interaction(interaction)
+        if image_bytes is None:
             logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=empty_response", log_label, attempt, elapsed_ms)
-            last_error = "empty_response"
             if attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
             raise GenerationError("That attempt didn't produce an image. Please try again.")
 
         logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=success", log_label, attempt, elapsed_ms)
-        return image[0]
+        return image_bytes
 
     raise GenerationError("Something went wrong generating your image. Please try again.")
 
@@ -627,17 +631,24 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
         marked = marked_items(project.items, ignore_placement)
         template = get_active_prompt(db)
         prompt = build_prompt(template, project.room_type, project.items, marked)
-        room_part = load_local_image_part(DATA_ROOT / project.room_photo_path)
-        marked_image = build_marked_room_image(DATA_ROOT / project.room_photo_path, marked)
-        item_parts = [load_local_image_part(DATA_ROOT / item.photo_path) for item in project.items]
 
-        parts = [room_part]
+        room_path = DATA_ROOT / project.room_photo_path
+        with Image.open(room_path) as room_image:
+            response_format = {"type": "image", "aspect_ratio": nearest_aspect_ratio(*room_image.size)}
+
+        room_block = load_local_image_block(room_path)
+        marked_image = build_marked_room_image(room_path, marked)
+        item_blocks = [load_local_image_block(DATA_ROOT / item.photo_path) for item in project.items]
+
+        image_blocks = [room_block]
         if marked_image is not None:
-            parts.append(image_to_part(marked_image))
-        parts.extend(item_parts)
+            image_blocks.append(image_to_block(marked_image))
+        image_blocks.extend(item_blocks)
 
         try:
-            image_bytes = await asyncio.to_thread(call_gemini, prompt, parts, f"project:{project_id}")
+            image_bytes = await asyncio.to_thread(
+                call_gemini, prompt, image_blocks, response_format, f"project:{project_id}"
+            )
         except GenerationError as exc:
             JOBS[job_id] = {"status": "error", "message": exc.message}
             return

@@ -172,6 +172,18 @@ PROMPT_PLACEHOLDERS = [
         "token": "{{#PLACEMENT}} … {{/PLACEMENT}}",
         "description": "Wraps the placement-annotation section. Only appears in the prompt sent to the model when at least one piece has been drawn on in the /place screen — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
     },
+    {
+        "token": "{{IMAGE_MANIFEST}}",
+        "description": 'One line per image, in the exact order sent to the model, e.g. "Image 1 is a room." / "Image 2 is the same room as Image 1 with coloured lines drawn on it." / "Image 3 is a 3+3 sofa from a showroom." The numbering always matches the real send order — without strokes, image 2 becomes the first product.',
+    },
+    {
+        "token": "{{CONFIG_NOTES}}",
+        "description": 'Definitions for only the piece configurations actually selected in this request — e.g. what "3+3" or "L-shape" means — one line per matching type. Empty when nothing selected has a definition; works unwrapped or inside {{#CONFIG_NOTES}}…{{/CONFIG_NOTES}}.',
+    },
+    {
+        "token": "{{#CONFIG_NOTES}} … {{/CONFIG_NOTES}}",
+        "description": "Optional wrapper for a configuration-notes section. Only appears in the prompt sent to the model when at least one selected piece has a matching definition — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
+    },
 ]
 
 IMAGE_QUALITY_KEY = "image_quality"
@@ -529,14 +541,36 @@ def get_active_prompt(db: Session) -> str:
 
 
 PLACEMENT_BLOCK_RE = re.compile(r"\{\{#PLACEMENT\}\}(.*?)\{\{/PLACEMENT\}\}", re.DOTALL)
+CONFIG_NOTES_BLOCK_RE = re.compile(r"\{\{#CONFIG_NOTES\}\}(.*?)\{\{/CONFIG_NOTES\}\}", re.DOTALL)
 
 STROKE_COLORS = ["#F07522", "#2563EB", "#16A34A", "#9333EA"]
 STROKE_COLOR_NAMES = ["Orange", "Blue", "Green", "Purple"]
 
+# Definitions for {{CONFIG_NOTES}}, keyed by (category, type) since "Single"
+# means different things for a Chair and a Bed. Only types with an entry
+# here ever produce a note; "3+2+1" isn't a selectable type yet but is kept
+# for when it is.
+CONFIG_NOTES = {
+    ("Sofa", "3+2"): "A set of two separate sofas: one three-seater and one two-seater, placed as a pair around the same coffee table, usually at right angles or facing each other. Not one continuous sofa.",
+    ("Sofa", "3+3"): "A set of two separate three-seater sofas, placed as a pair, usually facing each other or at right angles. Not one continuous sofa.",
+    ("Sofa", "3+2+1"): "A set of three separate pieces: a three-seater sofa, a two-seater sofa and a single armchair.",
+    ("Sofa", "L-shape"): "One continuous sectional sofa with a single right-angle turn forming an L. A single piece, not a set.",
+    ("Sofa", "Curved"): "One continuous sofa with a gently curved, arcing back rather than straight sections. A single piece.",
+    ("Dining table", "4 seater"): "A dining table with four chairs around it.",
+    ("Dining table", "6 seater"): "A dining table with six chairs around it.",
+    ("Dining table", "8 seater"): "A long dining table with eight chairs around it.",
+    ("Bed", "Single"): "A single bed.",
+    ("Bed", "Queen"): "A queen size double bed.",
+    ("Bed", "King"): "A king size double bed.",
+    ("Chair", "Pair"): "Two matching chairs.",
+}
+MULTI_PIECE_SOFA_TYPES = {"3+2", "3+3", "3+2+1"}
+MULTI_PIECE_WIDTH_NOTE = "The stated width refers to the largest single sofa in the set, not the combined width of all pieces."
+
 
 def numbered_items(items: list[Item]) -> list[tuple[int, Item]]:
     """Piece numbers are 1-based position in the list — the same order the
-    product reference photos are sent to Gemini and the /place chips show."""
+    product reference photos are sent to the model and the /place chips show."""
     return list(enumerate(items, start=1))
 
 
@@ -546,8 +580,43 @@ def marked_items(items: list[Item], ignore_placement: bool) -> list[tuple[int, I
     return [(n, item) for n, item in numbered_items(items) if item.strokes]
 
 
+def build_image_manifest(items: list[Item], marked: list[tuple[int, Item]]) -> str:
+    """One line per image, in the exact order sent to the model — the whole
+    point being that the numbering here always matches reality."""
+    lines = ["Image 1 is a room."]
+    n = 2
+    if marked:
+        lines.append(f"Image {n} is the same room as Image 1 with coloured lines drawn on it.")
+        n += 1
+    for item in items:
+        lines.append(f"Image {n} is a {item.type} {item.category.lower()} from a showroom.")
+        n += 1
+    return "\n".join(lines)
+
+
+def build_config_notes(items: list[Item]) -> str:
+    """Definitions only for configurations actually present among items —
+    e.g. what "3+3" or "L-shape" means — so the prompt never explains
+    configurations that aren't in play."""
+    lines = []
+    seen = set()
+    has_multi_piece_sofa = False
+    for item in items:
+        key = (item.category, item.type)
+        if key in CONFIG_NOTES and key not in seen:
+            seen.add(key)
+            lines.append(f"{item.type} — {CONFIG_NOTES[key]}")
+        if item.category == "Sofa" and item.type in MULTI_PIECE_SOFA_TYPES:
+            has_multi_piece_sofa = True
+    if has_multi_piece_sofa:
+        lines.append(MULTI_PIECE_WIDTH_NOTE)
+    return "\n".join(lines)
+
+
 def build_prompt(template: str, room_type: str, items: list[Item], marked: list[tuple[int, Item]]) -> str:
     pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
+    image_manifest = build_image_manifest(items, marked)
+    config_notes = build_config_notes(items)
 
     if marked:
         stroke_map = "\n".join(
@@ -555,14 +624,27 @@ def build_prompt(template: str, room_type: str, items: list[Item], marked: list[
             for n, item in marked
         )
 
-        def unwrap_block(match: re.Match) -> str:
+        def unwrap_placement(match: re.Match) -> str:
             return match.group(1).replace("{{STROKE_MAP}}", stroke_map)
 
-        template = PLACEMENT_BLOCK_RE.sub(unwrap_block, template)
+        template = PLACEMENT_BLOCK_RE.sub(unwrap_placement, template)
     else:
         template = PLACEMENT_BLOCK_RE.sub("", template)
 
-    prompt = template.replace("{{ROOM_TYPE}}", room_type).replace("{{PIECES}}", pieces)
+    if config_notes:
+        def unwrap_config_notes(match: re.Match) -> str:
+            return match.group(1).replace("{{CONFIG_NOTES}}", config_notes)
+
+        template = CONFIG_NOTES_BLOCK_RE.sub(unwrap_config_notes, template)
+    else:
+        template = CONFIG_NOTES_BLOCK_RE.sub("", template)
+
+    prompt = (
+        template.replace("{{ROOM_TYPE}}", room_type)
+        .replace("{{PIECES}}", pieces)
+        .replace("{{IMAGE_MANIFEST}}", image_manifest)
+        .replace("{{CONFIG_NOTES}}", config_notes)  # covers bare (unwrapped) use too
+    )
     return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
 
 

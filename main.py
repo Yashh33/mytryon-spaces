@@ -15,8 +15,8 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from google import genai
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from openai import BadRequestError, OpenAI, RateLimitError
 from PIL import Image, ImageDraw, ImageOps
 from pydantic import BaseModel
 from sqlalchemy import (
@@ -52,10 +52,10 @@ RENDERS_DIR = DATA_ROOT / "renders"
 for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-MODEL_NAME = "gemini-3.1-flash-image"
+MODEL_NAME = "gpt-image-2"
 
 # ---------------------------------------------------------------------------
-# GEMINI PROMPT — the live prompt lives in the `settings` table (key
+# GENERATION PROMPT — the live prompt lives in the `settings` table (key
 # "generation_prompt") and is editable from /admin/prompt with no redeploy.
 # This constant is only the seed value on first run and the "reset to
 # default" target. It is loaded fresh from the DB on every generation, never
@@ -173,6 +173,14 @@ PROMPT_PLACEHOLDERS = [
     },
 ]
 
+IMAGE_QUALITY_KEY = "image_quality"
+DEFAULT_IMAGE_QUALITY = "low"
+IMAGE_QUALITY_CHOICES = ["low", "medium", "high"]
+
+SIZE_MODE_KEY = "size_mode"
+DEFAULT_SIZE_MODE = "auto"
+SIZE_MODE_CHOICES = ["auto", "1024x1024", "1024x1536", "1536x1024"]
+
 # ---------------------------------------------------------------------------
 
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
@@ -192,7 +200,7 @@ ITEM_TYPES = {
     "Bed": ["Single", "Queen", "King"],
 }
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 serializer = URLSafeTimedSerializer(os.environ["SESSION_SECRET"], salt="mytryon-session")
 
 
@@ -307,6 +315,12 @@ async def lifespan(app: FastAPI):
             db.add(Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT))
             db.commit()
             logger.info("seeded default generation prompt")
+        if db.query(Setting).filter(Setting.key == IMAGE_QUALITY_KEY).first() is None:
+            db.add(Setting(key=IMAGE_QUALITY_KEY, value=DEFAULT_IMAGE_QUALITY))
+            db.commit()
+        if db.query(Setting).filter(Setting.key == SIZE_MODE_KEY).first() is None:
+            db.add(Setting(key=SIZE_MODE_KEY, value=DEFAULT_SIZE_MODE))
+            db.commit()
     finally:
         db.close()
     yield
@@ -420,59 +434,32 @@ async def save_validated_upload(upload: UploadFile, dest_dir: Path) -> str:
     return str((dest_dir / filename).relative_to(DATA_ROOT)).replace("\\", "/")
 
 
-def load_local_image_block(path: Path) -> dict:
+def load_local_image_file(path: Path) -> tuple[str, bytes, str]:
     mime_type, _ = mimetypes.guess_type(path.name)
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return {"type": "image", "data": data, "mime_type": mime_type or "image/jpeg"}
+    return (path.name, path.read_bytes(), mime_type or "image/jpeg")
 
 
-def image_to_block(image: Image.Image) -> dict:
+def image_to_file(image: Image.Image, filename: str) -> tuple[str, bytes, str]:
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=92)
-    data = base64.b64encode(buf.getvalue()).decode("ascii")
-    return {"type": "image", "data": data, "mime_type": "image/jpeg"}
+    return (filename, buf.getvalue(), "image/jpeg")
 
 
-ASPECT_RATIOS = {
-    "1:1": 1 / 1, "2:3": 2 / 3, "3:2": 3 / 2, "3:4": 3 / 4, "4:3": 4 / 3,
-    "4:5": 4 / 5, "5:4": 5 / 4, "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9,
-    "1:8": 1 / 8, "8:1": 8 / 1, "1:4": 1 / 4, "4:1": 4 / 1,
-}
+def derive_size(width: int, height: int) -> str:
+    if width > height:
+        return "1536x1024"
+    if height > width:
+        return "1024x1536"
+    return "1024x1024"
 
 
-def nearest_aspect_ratio(width: int, height: int) -> str:
-    ratio = width / height
-    return min(ASPECT_RATIOS, key=lambda key: abs(ASPECT_RATIOS[key] - ratio))
-
-
-def interaction_failure_reason(interaction) -> str | None:
-    """None on success; a non-completed Interactions API status otherwise —
-    covers safety blocks, budget_exceeded, incomplete and failed alike."""
-    if interaction.status == "completed":
+def extract_image_from_result(result) -> bytes | None:
+    if not result.data:
         return None
-    return f"status:{interaction.status}"
-
-
-def extract_image_from_interaction(interaction) -> bytes | None:
-    """Reads interaction.output_image.data (base64) and decodes it. Falls
-    back to scanning interaction.steps for a model_output "image" block —
-    the SDK usually populates output_image itself, but this covers the case
-    where it doesn't."""
-    output_image = getattr(interaction, "output_image", None)
-    if output_image is not None and getattr(output_image, "data", None):
-        return base64.b64decode(output_image.data)
-    for step in reversed(interaction.steps or []):
-        if getattr(step, "type", None) != "model_output":
-            continue
-        for item in reversed(getattr(step, "content", None) or []):
-            if getattr(item, "type", None) == "image" and getattr(item, "data", None):
-                return base64.b64decode(item.data)
-    return None
-
-
-def is_rate_limited(exc: Exception) -> bool:
-    message = str(exc)
-    return "429" in message or "RESOURCE_EXHAUSTED" in message.upper()
+    b64_json = result.data[0].b64_json
+    if not b64_json:
+        return None
+    return base64.b64decode(b64_json)
 
 
 class GenerationError(Exception):
@@ -483,11 +470,27 @@ class GenerationError(Exception):
         self.message = message
 
 
-def get_active_prompt(db: Session) -> str:
+def get_setting(db: Session, key: str, default: str) -> str:
     """Loaded fresh on every generation — never cached — so admin edits to
     /admin/prompt take effect immediately with no redeploy."""
-    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
-    return setting.value if setting else DEFAULT_GENERATION_PROMPT
+    setting = db.query(Setting).filter(Setting.key == key).first()
+    return setting.value if setting else default
+
+
+def set_setting(db: Session, key: str, value: str) -> Setting:
+    setting = db.query(Setting).filter(Setting.key == key).first()
+    if setting is None:
+        setting = Setting(key=key, value=value)
+        db.add(setting)
+    else:
+        setting.value = value
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def get_active_prompt(db: Session) -> str:
+    return get_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
 
 
 PLACEMENT_BLOCK_RE = re.compile(r"\{\{#PLACEMENT\}\}(.*?)\{\{/PLACEMENT\}\}", re.DOTALL)
@@ -551,55 +554,70 @@ def build_marked_room_image(room_photo_path: Path, marked: list[tuple[int, Item]
     return image
 
 
-def call_gemini(prompt: str, image_blocks: list[dict], response_format: dict, log_label: str) -> bytes:
-    """Calls Gemini's Interactions API — the current recommended surface and
-    the only one exposing thinking control — with retry on rate limits,
-    non-completed statuses (safety blocks, budget_exceeded, etc.) and empty
-    responses. Images are sent before the text prompt, per Google's editing
-    and inpainting examples. Runs synchronously — callers should offload to
-    a thread."""
-    input_blocks = [*image_blocks, {"type": "text", "text": prompt}]
+def call_image_api(
+    prompt: str,
+    image_files: list[tuple[str, bytes, str]],
+    size: str,
+    quality: str,
+    log_label: str,
+) -> bytes:
+    """Calls OpenAI's Image API edit endpoint with retry on rate limits,
+    content-policy/bad-request failures and empty responses. Runs
+    synchronously — callers should offload to a thread. On success, prints
+    one stdout line with quality/size/input-image-count/elapsed time and
+    the full token usage object, for cost tracking from Render logs."""
     for attempt in range(GENERATION_RETRIES + 1):
         start = time.monotonic()
         try:
-            interaction = client.interactions.create(
+            result = client.images.edit(
                 model=MODEL_NAME,
-                input=input_blocks,
-                generation_config={"thinking_level": "high"},
-                response_format=response_format,
+                image=image_files,
+                prompt=prompt,
+                size=size,
+                quality=quality,
+                n=1,
             )
-        except Exception as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            retryable = is_rate_limited(exc)
-            logger.info(
-                "gen label=%s attempt=%d elapsed_ms=%.0f result=exception:%s retryable=%s",
-                log_label, attempt, elapsed_ms, exc.__class__.__name__, retryable,
-            )
-            if retryable and attempt < GENERATION_RETRIES:
+        except RateLimitError as exc:
+            elapsed_s = time.monotonic() - start
+            logger.info("gen label=%s attempt=%d elapsed_s=%.1f result=rate_limited", log_label, attempt, elapsed_s)
+            if attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
-            if retryable:
-                raise GenerationError("The service is a little busy right now. Please try again in a moment.")
-            raise GenerationError("Something went wrong generating your image. Please try again.")
-
-        elapsed_ms = (time.monotonic() - start) * 1000
-        failure_reason = interaction_failure_reason(interaction)
-        if failure_reason:
-            logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=%s", log_label, attempt, elapsed_ms, failure_reason)
+            raise GenerationError("The service is a little busy right now. Please try again in a moment.")
+        except BadRequestError as exc:
+            elapsed_s = time.monotonic() - start
+            logger.info(
+                "gen label=%s attempt=%d elapsed_s=%.1f result=blocked:%s",
+                log_label, attempt, elapsed_s, exc.code or exc.type,
+            )
             if attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
             raise GenerationError("We couldn't generate a result for those photos. Try a different angle or photo.")
+        except Exception as exc:
+            elapsed_s = time.monotonic() - start
+            logger.info(
+                "gen label=%s attempt=%d elapsed_s=%.1f result=exception:%s",
+                log_label, attempt, elapsed_s, exc.__class__.__name__,
+            )
+            raise GenerationError("Something went wrong generating your image. Please try again.")
 
-        image_bytes = extract_image_from_interaction(interaction)
+        elapsed_s = time.monotonic() - start
+        image_bytes = extract_image_from_result(result)
         if image_bytes is None:
-            logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=empty_response", log_label, attempt, elapsed_ms)
+            logger.info("gen label=%s attempt=%d elapsed_s=%.1f result=empty_response", log_label, attempt, elapsed_s)
             if attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
             raise GenerationError("That attempt didn't produce an image. Please try again.")
 
-        logger.info("gen label=%s attempt=%d elapsed_ms=%.0f result=success", log_label, attempt, elapsed_ms)
+        usage = result.usage.model_dump() if result.usage else None
+        print(
+            f"gpt-image-2 generation label={log_label} quality={quality} size={size} "
+            f"input_images={len(image_files)} elapsed_s={elapsed_s:.1f} usage={usage}",
+            flush=True,
+        )
+        logger.info("gen label=%s attempt=%d elapsed_s=%.1f result=success", log_label, attempt, elapsed_s)
         return image_bytes
 
     raise GenerationError("Something went wrong generating your image. Please try again.")
@@ -632,22 +650,25 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
         template = get_active_prompt(db)
         prompt = build_prompt(template, project.room_type, project.items, marked)
 
+        quality = get_setting(db, IMAGE_QUALITY_KEY, DEFAULT_IMAGE_QUALITY)
+        size_mode = get_setting(db, SIZE_MODE_KEY, DEFAULT_SIZE_MODE)
+
         room_path = DATA_ROOT / project.room_photo_path
         with Image.open(room_path) as room_image:
-            response_format = {"type": "image", "aspect_ratio": nearest_aspect_ratio(*room_image.size)}
+            size = derive_size(*room_image.size) if size_mode == "auto" else size_mode
 
-        room_block = load_local_image_block(room_path)
+        room_file = load_local_image_file(room_path)
         marked_image = build_marked_room_image(room_path, marked)
-        item_blocks = [load_local_image_block(DATA_ROOT / item.photo_path) for item in project.items]
+        item_files = [load_local_image_file(DATA_ROOT / item.photo_path) for item in project.items]
 
-        image_blocks = [room_block]
+        image_files = [room_file]
         if marked_image is not None:
-            image_blocks.append(image_to_block(marked_image))
-        image_blocks.extend(item_blocks)
+            image_files.append(image_to_file(marked_image, "marked-copy.jpg"))
+        image_files.extend(item_files)
 
         try:
             image_bytes = await asyncio.to_thread(
-                call_gemini, prompt, image_blocks, response_format, f"project:{project_id}"
+                call_image_api, prompt, image_files, size, quality, f"project:{project_id}"
             )
         except GenerationError as exc:
             JOBS[job_id] = {"status": "error", "message": exc.message}
@@ -1046,19 +1067,23 @@ def api_admin_toggle_active(user_id: int, admin: User = Depends(require_admin), 
 # ---------------------------------------------------------------------------
 
 
-def prompt_setting_response(setting: Setting | None) -> dict:
+def prompt_setting_response(db: Session, setting: Setting | None) -> dict:
     return {
         "prompt": setting.value if setting else DEFAULT_GENERATION_PROMPT,
         "default_prompt": DEFAULT_GENERATION_PROMPT,
         "updated_at": setting.updated_at.isoformat() if setting and setting.updated_at else None,
         "placeholders": PROMPT_PLACEHOLDERS,
+        "image_quality": get_setting(db, IMAGE_QUALITY_KEY, DEFAULT_IMAGE_QUALITY),
+        "image_quality_choices": IMAGE_QUALITY_CHOICES,
+        "size_mode": get_setting(db, SIZE_MODE_KEY, DEFAULT_SIZE_MODE),
+        "size_mode_choices": SIZE_MODE_CHOICES,
     }
 
 
 @app.get("/api/admin/prompt")
 def api_admin_get_prompt(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
     setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
-    return JSONResponse(content=prompt_setting_response(setting))
+    return JSONResponse(content=prompt_setting_response(db, setting))
 
 
 class PromptBody(BaseModel):
@@ -1071,28 +1096,42 @@ def api_admin_save_prompt(
 ) -> JSONResponse:
     if not body.prompt.strip():
         return error_response(400, "empty_prompt", "The prompt can't be empty.")
-    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
-    if setting is None:
-        setting = Setting(key=PROMPT_SETTING_KEY, value=body.prompt)
-        db.add(setting)
-    else:
-        setting.value = body.prompt
-    db.commit()
-    db.refresh(setting)
-    return JSONResponse(content=prompt_setting_response(setting))
+    setting = set_setting(db, PROMPT_SETTING_KEY, body.prompt)
+    return JSONResponse(content=prompt_setting_response(db, setting))
 
 
 @app.post("/api/admin/prompt/reset")
 def api_admin_reset_prompt(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
-    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
-    if setting is None:
-        setting = Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT)
-        db.add(setting)
-    else:
-        setting.value = DEFAULT_GENERATION_PROMPT
-    db.commit()
-    db.refresh(setting)
-    return JSONResponse(content=prompt_setting_response(setting))
+    setting = set_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
+    return JSONResponse(content=prompt_setting_response(db, setting))
+
+
+class ImageQualityBody(BaseModel):
+    value: str
+
+
+@app.post("/api/admin/settings/image-quality")
+def api_admin_set_image_quality(
+    body: ImageQualityBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if body.value not in IMAGE_QUALITY_CHOICES:
+        return error_response(400, "invalid_quality", "That isn't a valid image quality.")
+    set_setting(db, IMAGE_QUALITY_KEY, body.value)
+    return JSONResponse(content={"image_quality": body.value})
+
+
+class SizeModeBody(BaseModel):
+    value: str
+
+
+@app.post("/api/admin/settings/size-mode")
+def api_admin_set_size_mode(
+    body: SizeModeBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if body.value not in SIZE_MODE_CHOICES:
+        return error_response(400, "invalid_size_mode", "That isn't a valid size mode.")
+    set_setting(db, SIZE_MODE_KEY, body.value)
+    return JSONResponse(content={"size_mode": body.value})
 
 
 # ---------------------------------------------------------------------------

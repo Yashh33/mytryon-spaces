@@ -1174,6 +1174,26 @@
           <button class="btn btn-primary" id="save-prompt-btn">Save</button>
           <button class="btn btn-ghost" id="reset-prompt-btn">Reset to default</button>
         </div>
+
+        <div class="section-label" style="margin-top:26px;">Image generation settings</div>
+        <div class="field">
+          <label>Quality</label>
+          <select id="quality-select">
+            <option value="low" ${data.image_quality === "low" ? "selected" : ""}>Low &mdash; ~$0.005 per image</option>
+            <option value="medium" ${data.image_quality === "medium" ? "selected" : ""}>Medium &mdash; ~$0.041 per image</option>
+            <option value="high" ${data.image_quality === "high" ? "selected" : ""}>High &mdash; ~$0.165 per image (landscape)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Output size</label>
+          <select id="size-select">
+            <option value="auto" ${data.size_mode === "auto" ? "selected" : ""}>Auto &mdash; matches the room photo</option>
+            <option value="1024x1024" ${data.size_mode === "1024x1024" ? "selected" : ""}>Square &mdash; 1024&times;1024</option>
+            <option value="1024x1536" ${data.size_mode === "1024x1536" ? "selected" : ""}>Portrait &mdash; 1024&times;1536</option>
+            <option value="1536x1024" ${data.size_mode === "1536x1024" ? "selected" : ""}>Landscape &mdash; 1536&times;1024</option>
+          </select>
+        </div>
+
         <div class="section-label" style="margin-top:26px;">Placeholders you can use</div>
         <div class="placeholder-list">
           ${data.placeholders.map((p) => h`
@@ -1185,6 +1205,26 @@
         </div>
       </div>
     `;
+
+    root.querySelector("#quality-select").addEventListener("change", async (e) => {
+      const value = e.target.value;
+      try {
+        await api("POST", "/api/admin/settings/image-quality", { json: { value } });
+        toast("Quality updated.");
+      } catch (err) {
+        toast(err.message);
+      }
+    });
+
+    root.querySelector("#size-select").addEventListener("change", async (e) => {
+      const value = e.target.value;
+      try {
+        await api("POST", "/api/admin/settings/size-mode", { json: { value } });
+        toast("Output size updated.");
+      } catch (err) {
+        toast(err.message);
+      }
+    });
 
     root.querySelector("#save-prompt-btn").addEventListener("click", async () => {
       const value = root.querySelector("#prompt-textarea").value;

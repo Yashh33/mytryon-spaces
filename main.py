@@ -13,7 +13,7 @@ from pathlib import Path
 import bcrypt
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from openai import BadRequestError, OpenAI, RateLimitError
@@ -49,7 +49,8 @@ DATA_ROOT = Path(os.environ.get("DATA_DIR") or ("/data" if Path("/data").is_dir(
 ROOMS_DIR = DATA_ROOT / "rooms"
 ITEMS_DIR = DATA_ROOT / "items"
 RENDERS_DIR = DATA_ROOT / "renders"
-for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
+DEBUG_DIR = DATA_ROOT / "debug"
+for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR, DEBUG_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 MODEL_NAME = "gpt-image-2"
@@ -272,6 +273,21 @@ class Setting(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class GenerationDebug(Base):
+    __tablename__ = "generation_debug"
+    id = Column(Integer, primary_key=True)
+    render_id = Column(Integer, ForeignKey("renders.id"), nullable=False, unique=True)
+    prompt = Column(Text, nullable=False)
+    model = Column(String, nullable=False)
+    quality = Column(String, nullable=False)
+    size = Column(String, nullable=False)
+    elapsed_s = Column(Float, nullable=False)
+    usage = Column(JSON, nullable=True)
+    # ordered list of {filename, role, width, height, size_bytes, url}
+    images = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -434,15 +450,34 @@ async def save_validated_upload(upload: UploadFile, dest_dir: Path) -> str:
     return str((dest_dir / filename).relative_to(DATA_ROOT)).replace("\\", "/")
 
 
-def load_local_image_file(path: Path) -> tuple[str, bytes, str]:
+def load_local_image_with_debug(path: Path, role: str, url: str) -> tuple[tuple[str, bytes, str], dict]:
     mime_type, _ = mimetypes.guess_type(path.name)
-    return (path.name, path.read_bytes(), mime_type or "image/jpeg")
+    data = path.read_bytes()
+    with Image.open(io.BytesIO(data)) as im:
+        width, height = im.size
+    file_tuple = (path.name, data, mime_type or "image/jpeg")
+    descriptor = {
+        "filename": path.name, "role": role, "width": width, "height": height,
+        "size_bytes": len(data), "url": url,
+    }
+    return file_tuple, descriptor
 
 
-def image_to_file(image: Image.Image, filename: str) -> tuple[str, bytes, str]:
+def save_marked_copy_with_debug(image: Image.Image) -> tuple[tuple[str, bytes, str], dict]:
+    """Saves the marked copy to DEBUG_DIR (never discarded, for the debug
+    view) and returns both the OpenAI-bound file tuple and its descriptor."""
+    filename = f"{uuid.uuid4().hex}.jpg"
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=92)
-    return (filename, buf.getvalue(), "image/jpeg")
+    data = buf.getvalue()
+    (DEBUG_DIR / filename).write_bytes(data)
+    url = f"/media/debug/{filename}"
+    file_tuple = ("marked-copy.jpg", data, "image/jpeg")
+    descriptor = {
+        "filename": "marked-copy.jpg", "role": "marked_copy", "width": image.width, "height": image.height,
+        "size_bytes": len(data), "url": url,
+    }
+    return file_tuple, descriptor
 
 
 def derive_size(width: int, height: int) -> str:
@@ -560,12 +595,14 @@ def call_image_api(
     size: str,
     quality: str,
     log_label: str,
-) -> bytes:
+) -> dict:
     """Calls OpenAI's Image API edit endpoint with retry on rate limits,
     content-policy/bad-request failures and empty responses. Runs
     synchronously — callers should offload to a thread. On success, prints
     one stdout line with quality/size/input-image-count/elapsed time and
-    the full token usage object, for cost tracking from Render logs."""
+    the full token usage object, for cost tracking from Render logs, and
+    returns {"image_bytes", "elapsed_s", "usage"} so callers (the debug
+    view) can persist the same numbers."""
     for attempt in range(GENERATION_RETRIES + 1):
         start = time.monotonic()
         try:
@@ -618,7 +655,7 @@ def call_image_api(
             flush=True,
         )
         logger.info("gen label=%s attempt=%d elapsed_s=%.1f result=success", log_label, attempt, elapsed_s)
-        return image_bytes
+        return {"image_bytes": image_bytes, "elapsed_s": elapsed_s, "usage": usage}
 
     raise GenerationError("Something went wrong generating your image. Please try again.")
 
@@ -657,17 +694,28 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
         with Image.open(room_path) as room_image:
             size = derive_size(*room_image.size) if size_mode == "auto" else size_mode
 
-        room_file = load_local_image_file(room_path)
-        marked_image = build_marked_room_image(room_path, marked)
-        item_files = [load_local_image_file(DATA_ROOT / item.photo_path) for item in project.items]
+        image_files: list[tuple[str, bytes, str]] = []
+        debug_images: list[dict] = []
 
-        image_files = [room_file]
+        room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{project.room_photo_path}")
+        image_files.append(room_file)
+        debug_images.append(room_debug)
+
+        marked_image = build_marked_room_image(room_path, marked)
         if marked_image is not None:
-            image_files.append(image_to_file(marked_image, "marked-copy.jpg"))
-        image_files.extend(item_files)
+            marked_file, marked_debug = save_marked_copy_with_debug(marked_image)
+            image_files.append(marked_file)
+            debug_images.append(marked_debug)
+
+        for item in project.items:
+            item_file, item_debug = load_local_image_with_debug(
+                DATA_ROOT / item.photo_path, "product", f"/media/{item.photo_path}"
+            )
+            image_files.append(item_file)
+            debug_images.append(item_debug)
 
         try:
-            image_bytes = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 call_image_api, prompt, image_files, size, quality, f"project:{project_id}"
             )
         except GenerationError as exc:
@@ -675,7 +723,7 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
             return
 
         filename = f"{uuid.uuid4().hex}.jpg"
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        image = Image.open(io.BytesIO(result["image_bytes"])).convert("RGB")
         image.save(RENDERS_DIR / filename, format="JPEG", quality=92)
         relative_path = f"renders/{filename}"
 
@@ -683,6 +731,20 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
         db.add(render)
         db.commit()
         db.refresh(render)
+
+        db.add(
+            GenerationDebug(
+                render_id=render.id,
+                prompt=prompt,
+                model=MODEL_NAME,
+                quality=quality,
+                size=size,
+                elapsed_s=result["elapsed_s"],
+                usage=result["usage"],
+                images=debug_images,
+            )
+        )
+        db.commit()
 
         JOBS[job_id] = {
             "status": "done",
@@ -1132,6 +1194,46 @@ def api_admin_set_size_mode(
         return error_response(400, "invalid_size_mode", "That isn't a valid size mode.")
     set_setting(db, SIZE_MODE_KEY, body.value)
     return JSONResponse(content={"size_mode": body.value})
+
+
+# ---------------------------------------------------------------------------
+# Debug — exactly what was sent to the model for a given render
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/debug/generation/{render_id}")
+def api_debug_generation(render_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+    render = db.query(Render).filter(Render.id == render_id).first()
+    if render is None:
+        return error_response(404, "render_not_found", "That render could not be found.")
+    debug_row = db.query(GenerationDebug).filter(GenerationDebug.render_id == render_id).first()
+    if debug_row is None:
+        return error_response(404, "no_debug_data", "No debug data was recorded for this render.")
+    project = render.project
+    return JSONResponse(
+        content={
+            "render_id": render.id,
+            "project_id": render.project_id,
+            "customer_name": project.customer_name if project else None,
+            "output_image_url": f"/media/{render.image_path}",
+            "created_at": render.created_at.isoformat() if render.created_at else None,
+            "prompt": debug_row.prompt,
+            "model": debug_row.model,
+            "quality": debug_row.quality,
+            "size": debug_row.size,
+            "elapsed_s": debug_row.elapsed_s,
+            "usage": debug_row.usage,
+            "images": debug_row.images,
+        }
+    )
+
+
+@app.get("/debug/latest")
+def debug_latest(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> Response:
+    debug_row = db.query(GenerationDebug).order_by(GenerationDebug.id.desc()).first()
+    if debug_row is None:
+        raise HTTPException(status_code=404, detail="No generations have been recorded yet.")
+    return RedirectResponse(url=f"/debug/generation/{debug_row.render_id}")
 
 
 # ---------------------------------------------------------------------------

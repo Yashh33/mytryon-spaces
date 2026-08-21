@@ -105,6 +105,7 @@
     { pattern: /^\/admin$/, view: viewAdmin, admin: true },
     { pattern: /^\/admin\/user\/(\d+)$/, view: viewAdminDetail, admin: true },
     { pattern: /^\/admin\/prompt$/, view: viewAdminPrompt, admin: true },
+    { pattern: /^\/debug\/generation\/(\d+)$/, view: viewDebugGeneration, admin: true },
   ];
 
   function navigate(path, replace) {
@@ -866,8 +867,9 @@
       const imgUrl = showingAfter && renderUrl ? renderUrl : project.room_photo_url;
       root.innerHTML = h`
         <div class="screen">
-          <div class="top-actions">
+          <div class="top-actions" style="justify-content:space-between;">
             <a data-link href="/" class="back-btn">&#8592;</a>
+            ${CURRENT_USER.role === "admin" && renderUrl ? `<a data-link href="/debug/generation/${project.latest_render.id}" class="mono" style="font-size:12px;font-weight:700;color:var(--orange-d);">Debug &#8250;</a>` : ""}
           </div>
           <div class="result-header">
             <h1>${esc(project.customer_name)}</h1>
@@ -1256,6 +1258,66 @@
         btn.textContent = "Reset to default";
       }
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Debug — exactly what was sent to the model for a render
+  // ---------------------------------------------------------------------
+
+  const DEBUG_ROLE_LABELS = { room: "Room photo", marked_copy: "Marked copy", product: "Product photo" };
+
+  function formatBytes(n) {
+    if (n == null) return "";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  async function viewDebugGeneration(root, renderId) {
+    root.innerHTML = `<div class="screen"><p class="muted">Loading…</p></div>`;
+    const data = await api("GET", "/api/debug/generation/" + renderId);
+    root.innerHTML = h`
+      <div class="screen">
+        <div class="top-actions">
+          <a data-link href="/project/${data.project_id}" class="back-btn">&#8592;</a>
+          <div class="eyebrow">Debug &middot; Render #${data.render_id}</div>
+        </div>
+        <h1 style="margin-bottom:2px;">${esc(data.customer_name || "")}</h1>
+        <div class="muted" style="font-size:12.5px;margin-bottom:18px;">${formatDate(data.created_at)}</div>
+
+        <div class="section-label">Resolved prompt</div>
+        <textarea class="prompt-textarea" readonly spellcheck="false" style="min-height:32vh;">${esc(data.prompt)}</textarea>
+
+        <div class="section-label" style="margin-top:22px;">Input images, in order sent</div>
+        <div class="debug-image-grid">
+          ${data.images.map((img, i) => h`
+            <div class="debug-image-card">
+              <img src="${img.url}" loading="lazy" />
+              <div class="debug-image-meta">
+                <div class="debug-image-role">${i + 1}. ${esc(DEBUG_ROLE_LABELS[img.role] || img.role)}</div>
+                <div class="mono muted" style="font-size:11px;">${img.width}&times;${img.height} &middot; ${formatBytes(img.size_bytes)}</div>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+
+        <div class="section-label" style="margin-top:22px;">Output</div>
+        <div class="result-image-wrap">
+          <img src="${data.output_image_url}" />
+        </div>
+
+        <div class="section-label" style="margin-top:22px;">Parameters</div>
+        <div class="debug-params">
+          <div><span class="mono muted">Model</span><span class="mono">${esc(data.model)}</span></div>
+          <div><span class="mono muted">Quality</span><span class="mono">${esc(data.quality)}</span></div>
+          <div><span class="mono muted">Size</span><span class="mono">${esc(data.size)}</span></div>
+          <div><span class="mono muted">Elapsed</span><span class="mono">${data.elapsed_s.toFixed(1)}s</span></div>
+        </div>
+
+        <div class="section-label" style="margin-top:18px;">Usage</div>
+        <pre class="debug-usage mono">${esc(JSON.stringify(data.usage, null, 2))}</pre>
+      </div>
+    `;
   }
 
   // ---------------------------------------------------------------------

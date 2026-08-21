@@ -480,6 +480,52 @@ h2 { font-size: 19px; }
 }
 .placeholder-desc { font-size: 12.5px; color: var(--ink2); line-height: 1.5; }
 
+/* Debug */
+.debug-image-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.debug-image-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.debug-image-card img {
+  width: 100%;
+  aspect-ratio: 4/3;
+  object-fit: cover;
+  background: var(--line);
+}
+.debug-image-meta { padding: 8px 10px; }
+.debug-image-role { font-size: 12.5px; font-weight: 700; margin-bottom: 2px; }
+.debug-params {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 14px;
+}
+.debug-params > div {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.debug-params > div:first-child { border-top: none; }
+.debug-usage {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink2);
+}
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 9px;

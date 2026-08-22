@@ -100,6 +100,7 @@
     { pattern: /^\/new$/, view: viewSite },
     { pattern: /^\/new\/furniture\/(\d+)$/, view: viewFurniture },
     { pattern: /^\/place\/(\d+)$/, view: viewPlace },
+    { pattern: /^\/finish\/(\d+)$/, view: viewFinish },
     { pattern: /^\/generating$/, view: viewGenerating },
     { pattern: /^\/project\/(\d+)$/, view: viewResult },
     { pattern: /^\/admin$/, view: viewAdmin, admin: true },
@@ -314,7 +315,7 @@
         <div class="screen">
           <div class="top-actions">
             <a data-link href="/" class="back-btn">&#8592;</a>
-            <div class="eyebrow">Step 1 of 2</div>
+            <div class="eyebrow">Step 1 of 4</div>
           </div>
           <h1 style="margin-bottom:20px;">New visualization</h1>
           <div class="field">
@@ -404,7 +405,7 @@
         <div class="screen">
           <div class="top-actions">
             <a data-link href="/new" class="back-btn">&#8592;</a>
-            <div class="eyebrow">Step 2 of 2</div>
+            <div class="eyebrow">Step 2 of 4</div>
           </div>
           <h1 style="margin-bottom:18px;">Add furniture</h1>
           <div id="items-list">
@@ -540,7 +541,7 @@
       <div class="screen">
         <div class="top-actions">
           <a data-link href="/new/furniture/${projectId}" class="back-btn">&#8592;</a>
-          <div class="eyebrow">Step 2 of 2</div>
+          <div class="eyebrow">Step 3 of 4</div>
         </div>
         <h1 style="margin-bottom:14px;">Where does each piece go?</h1>
         <div class="place-photo-wrap" id="photo-wrap">
@@ -666,30 +667,12 @@
       }
     });
 
-    root.querySelector("#generate-btn").addEventListener("click", async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      btn.textContent = "Starting…";
-      try {
-        await startGeneration(projectId);
-      } catch (err) {
-        toast(err.message);
-        btn.disabled = false;
-        btn.textContent = "Generate";
-      }
+    root.querySelector("#generate-btn").addEventListener("click", () => {
+      navigate("/finish/" + projectId);
     });
 
-    root.querySelector("#skip-btn").addEventListener("click", async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      btn.textContent = "Starting…";
-      try {
-        await startGeneration(projectId, { ignorePlacement: true });
-      } catch (err) {
-        toast(err.message);
-        btn.disabled = false;
-        btn.textContent = "Skip — let it decide";
-      }
+    root.querySelector("#skip-btn").addEventListener("click", () => {
+      navigate("/finish/" + projectId + "?ignore_placement=true");
     });
 
     let activePointerId = null;
@@ -738,6 +721,86 @@
       activePointerId = null;
       redraw();
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // New visualization — finishing touches
+  // ---------------------------------------------------------------------
+
+  const ROOM_TREATMENT_OPTIONS = [
+    { value: "luxury", label: "Luxury finishing" },
+    { value: "minimal", label: "Minimal finishing" },
+  ];
+  const LIGHTING_OPTIONS = [
+    { value: "warm", label: "Warm" },
+    { value: "daylight", label: "Daylight" },
+    { value: "studio", label: "Studio" },
+  ];
+
+  async function viewFinish(root, projectId) {
+    root.innerHTML = `<div class="screen"><p class="muted">Loading…</p></div>`;
+    const ignorePlacement = new URLSearchParams(window.location.search).get("ignore_placement") === "true";
+    const data = await api("GET", "/api/projects/" + projectId);
+    const project = data.project;
+
+    let roomTreatment = project.room_treatment || "luxury";
+    let lighting = project.lighting || "warm";
+
+    function paint() {
+      root.innerHTML = h`
+        <div class="screen">
+          <div class="top-actions">
+            <a data-link href="/place/${projectId}" class="back-btn">&#8592;</a>
+            <div class="eyebrow">Step 4 of 4</div>
+          </div>
+          <h1 style="margin-bottom:20px;">Finishing touches</h1>
+          <div class="field">
+            <label>How should the room look?</label>
+            <div class="chips">
+              ${ROOM_TREATMENT_OPTIONS.map((o) => `<button type="button" class="chip${o.value === roomTreatment ? " selected" : ""}" data-treatment="${o.value}">${esc(o.label)}</button>`).join("")}
+            </div>
+          </div>
+          <div class="field">
+            <label>Lighting</label>
+            <div class="chips">
+              ${LIGHTING_OPTIONS.map((o) => `<button type="button" class="chip${o.value === lighting ? " selected" : ""}" data-lighting="${o.value}">${esc(o.label)}</button>`).join("")}
+            </div>
+          </div>
+          <button class="btn btn-primary" id="generate-btn" style="margin-top:12px;">Generate</button>
+        </div>
+      `;
+
+      root.querySelectorAll("[data-treatment]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          roomTreatment = btn.getAttribute("data-treatment");
+          paint();
+        });
+      });
+      root.querySelectorAll("[data-lighting]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          lighting = btn.getAttribute("data-lighting");
+          paint();
+        });
+      });
+
+      root.querySelector("#generate-btn").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = "Starting…";
+        try {
+          await api("POST", `/api/projects/${projectId}/finish`, {
+            json: { room_treatment: roomTreatment, lighting },
+          });
+          await startGeneration(projectId, { ignorePlacement });
+        } catch (err) {
+          toast(err.message);
+          btn.disabled = false;
+          btn.textContent = "Generate";
+        }
+      });
+    }
+
+    paint();
   }
 
   async function startGeneration(projectId, opts) {

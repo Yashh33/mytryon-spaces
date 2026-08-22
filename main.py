@@ -184,6 +184,14 @@ PROMPT_PLACEHOLDERS = [
         "token": "{{#CONFIG_NOTES}} … {{/CONFIG_NOTES}}",
         "description": "Optional wrapper for a configuration-notes section. Only appears in the prompt sent to the model when at least one selected piece has a matching definition — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
     },
+    {
+        "token": "{{ROOM_TREATMENT}}",
+        "description": 'The salesman\'s "How should the room look?" choice from the /finish step — expands to the full luxury or minimal styling instruction, e.g. "...present the space with refined luxury interior styling and premium finishing."',
+    },
+    {
+        "token": "{{LIGHTING}}",
+        "description": 'The salesman\'s lighting choice from the /finish step — warm, daylight, or studio — expands to the full lighting instruction, e.g. "Light the room with bright natural daylight entering from the existing windows..."',
+    },
 ]
 
 IMAGE_QUALITY_KEY = "image_quality"
@@ -211,6 +219,42 @@ ITEM_TYPES = {
     "Dining table": ["4 seater", "6 seater", "8 seater"],
     "Chair": ["Single", "Pair"],
     "Bed": ["Single", "Queen", "King"],
+}
+
+DEFAULT_ROOM_TREATMENT = "luxury"
+ROOM_TREATMENT_CHOICES = ["luxury", "minimal"]
+ROOM_TREATMENT_TEXT = {
+    "luxury": (
+        "Clear away any people, tools, ladders, cement bags, rubble or building "
+        "material, and finish all bare surfaces. Keep the walls, windows, doors, "
+        "flooring, ceiling and room proportions exactly as photographed. Within "
+        "those unchanged boundaries, present the space with refined luxury "
+        "interior styling and premium finishing."
+    ),
+    "minimal": (
+        "Clear away any people, tools, ladders, cement bags, rubble or building "
+        "material, and finish all bare surfaces. Keep the walls, windows, doors, "
+        "flooring, ceiling and room proportions exactly as photographed. Within "
+        "those unchanged boundaries, present the space with calm, uncluttered "
+        "minimal styling."
+    ),
+}
+
+DEFAULT_LIGHTING = "warm"
+LIGHTING_CHOICES = ["warm", "daylight", "studio"]
+LIGHTING_TEXT = {
+    "warm": (
+        "Light the room with warm evening interior lighting in soft amber tones, "
+        "so it reads as a finished, inviting home."
+    ),
+    "daylight": (
+        "Light the room with bright natural daylight entering from the existing "
+        "windows, consistent with their position in the photograph."
+    ),
+    "studio": (
+        "Light the room with even, diffused, shadow-free lighting, as in a "
+        "professional interior photograph."
+    ),
 }
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -251,6 +295,8 @@ class Project(Base):
     customer_name = Column(String, nullable=False)
     room_type = Column(String, nullable=False)
     room_photo_path = Column(String, nullable=False)
+    room_treatment = Column(String, nullable=False, server_default="luxury")
+    lighting = Column(String, nullable=False, server_default="warm")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     items = relationship("Item", backref="project", cascade="all, delete-orphan", order_by="Item.id")
@@ -324,6 +370,9 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_x"))
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_y"))
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS strokes JSON"))
+        # migrate DBs created before the finishing step existed
+        conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_treatment VARCHAR NOT NULL DEFAULT 'luxury'"))
+        conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS lighting VARCHAR NOT NULL DEFAULT 'warm'"))
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
@@ -613,10 +662,19 @@ def build_config_notes(items: list[Item]) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(template: str, room_type: str, items: list[Item], marked: list[tuple[int, Item]]) -> str:
+def build_prompt(
+    template: str,
+    room_type: str,
+    items: list[Item],
+    marked: list[tuple[int, Item]],
+    room_treatment: str,
+    lighting: str,
+) -> str:
     pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
     image_manifest = build_image_manifest(items, marked)
     config_notes = build_config_notes(items)
+    room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
+    lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
 
     if marked:
         stroke_map = "\n".join(
@@ -644,6 +702,8 @@ def build_prompt(template: str, room_type: str, items: list[Item], marked: list[
         .replace("{{PIECES}}", pieces)
         .replace("{{IMAGE_MANIFEST}}", image_manifest)
         .replace("{{CONFIG_NOTES}}", config_notes)  # covers bare (unwrapped) use too
+        .replace("{{ROOM_TREATMENT}}", room_treatment_text)
+        .replace("{{LIGHTING}}", lighting_text)
     )
     return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
 
@@ -767,7 +827,9 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
 
         marked = marked_items(project.items, ignore_placement)
         template = get_active_prompt(db)
-        prompt = build_prompt(template, project.room_type, project.items, marked)
+        prompt = build_prompt(
+            template, project.room_type, project.items, marked, project.room_treatment, project.lighting
+        )
 
         quality = get_setting(db, IMAGE_QUALITY_KEY, DEFAULT_IMAGE_QUALITY)
         size_mode = get_setting(db, SIZE_MODE_KEY, DEFAULT_SIZE_MODE)
@@ -904,6 +966,8 @@ def project_detail(project: Project) -> dict:
         "customer_name": project.customer_name,
         "room_type": project.room_type,
         "room_photo_url": f"/media/{project.room_photo_path}",
+        "room_treatment": project.room_treatment,
+        "lighting": project.lighting,
         "created_at": project.created_at.isoformat() if project.created_at else None,
         "items": [
             {
@@ -1086,6 +1150,27 @@ def api_clear_strokes(
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
     item.strokes = []
+    db.commit()
+    db.refresh(project)
+    return JSONResponse(content={"project": project_detail(project)})
+
+
+class FinishBody(BaseModel):
+    room_treatment: str
+    lighting: str
+
+
+@app.post("/api/projects/{project_id}/finish")
+def api_set_finish(
+    project_id: int, body: FinishBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    project = get_owned_project(project_id, user, db)
+    if body.room_treatment not in ROOM_TREATMENT_CHOICES:
+        return error_response(400, "invalid_room_treatment", "Please choose how the room should look.")
+    if body.lighting not in LIGHTING_CHOICES:
+        return error_response(400, "invalid_lighting", "Please choose a lighting option.")
+    project.room_treatment = body.room_treatment
+    project.lighting = body.lighting
     db.commit()
     db.refresh(project)
     return JSONResponse(content={"project": project_detail(project)})

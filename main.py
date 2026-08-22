@@ -244,16 +244,24 @@ DEFAULT_LIGHTING = "warm"
 LIGHTING_CHOICES = ["warm", "daylight", "studio"]
 LIGHTING_TEXT = {
     "warm": (
-        "Light the room with warm evening interior lighting in soft amber tones, "
-        "so it reads as a finished, inviting home."
+        "Keep the time of day exactly as it appears in the room photograph — "
+        "if the windows show daylight, they must still show daylight; if they "
+        "show night, they must still show night. Do not change what is visible "
+        "outside the windows. Within that, give the interior a warm, inviting "
+        "atmosphere with soft golden tones and gentle shadows, so the room "
+        "feels like a comfortable finished home."
     ),
     "daylight": (
-        "Light the room with bright natural daylight entering from the existing "
-        "windows, consistent with their position in the photograph."
+        "Keep the time of day exactly as it appears in the room photograph. Do "
+        "not change what is visible outside the windows. Light the interior "
+        "brightly and naturally, consistent with the existing windows and the "
+        "light already present in the photograph."
     ),
     "studio": (
-        "Light the room with even, diffused, shadow-free lighting, as in a "
-        "professional interior photograph."
+        "Keep the time of day exactly as it appears in the room photograph. Do "
+        "not change what is visible outside the windows. Light the interior "
+        "evenly and diffusely with soft shadows, as in a professional interior "
+        "photograph."
     ),
 }
 

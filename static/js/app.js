@@ -561,8 +561,8 @@
           `).join("")}
         </div>
         <div style="display:flex;flex-direction:column;gap:10px;margin-top:24px;">
-          <button class="btn btn-primary" id="generate-btn">Generate</button>
-          <button class="btn btn-ghost" id="skip-btn">Skip — let it decide</button>
+          <button class="btn btn-primary" id="generate-btn">Next</button>
+          <button class="btn btn-ghost" id="skip-btn">Skip placement</button>
         </div>
       </div>
     `;

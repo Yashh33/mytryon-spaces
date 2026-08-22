@@ -639,16 +639,32 @@ def marked_items(items: list[Item], ignore_placement: bool) -> list[tuple[int, I
 
 def build_image_manifest(items: list[Item], marked: list[tuple[int, Item]]) -> str:
     """One line per image, in the exact order sent to the model — the whole
-    point being that the numbering here always matches reality."""
+    point being that the numbering here always matches reality. Product
+    lines describe the photo as a design reference only (material, colour,
+    texture, styling), never as already being in the requested
+    configuration — otherwise the model copies the photographed seat count
+    instead of building what was actually asked for."""
     lines = ["Image 1 is a room."]
     n = 2
     if marked:
         lines.append(f"Image {n} is the same room as Image 1 with coloured lines drawn on it.")
         n += 1
     for item in items:
-        lines.append(f"Image {n} is a {item.type} {item.category.lower()} from a showroom.")
+        lines.append(
+            f"Image {n} is a showroom photograph of a {item.category.lower()}. It is a design "
+            "reference for material, colour, texture and styling only — the requested "
+            "configuration and size are stated below and may differ from what this photograph shows."
+        )
         n += 1
     return "\n".join(lines)
+
+
+CONFIG_NOTES_PREAMBLE = (
+    "Build each piece in the configuration stated below, taking only the "
+    "design language from its reference photograph. Where the photograph "
+    "shows a different number of seats, sections or pieces, follow the "
+    "written configuration and extend or rebuild the design accordingly."
+)
 
 
 def build_config_notes(items: list[Item]) -> str:
@@ -667,7 +683,9 @@ def build_config_notes(items: list[Item]) -> str:
             has_multi_piece_sofa = True
     if has_multi_piece_sofa:
         lines.append(MULTI_PIECE_WIDTH_NOTE)
-    return "\n".join(lines)
+    if not lines:
+        return ""
+    return "\n".join([CONFIG_NOTES_PREAMBLE, *lines])
 
 
 def build_prompt(

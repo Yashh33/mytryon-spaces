@@ -31,6 +31,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     func,
+    inspect,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
@@ -42,6 +43,7 @@ logger = logging.getLogger("mytryon")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
 
 # Disk root for uploaded photos and renders: /data on Render (mounted disk),
 # ./data for local dev. Override with DATA_DIR if needed.
@@ -174,7 +176,7 @@ PROMPT_PLACEHOLDERS = [
     },
     {
         "token": "{{IMAGE_MANIFEST}}",
-        "description": 'One line per image, in the exact order sent to the model, e.g. "Image 1 is a room." / "Image 2 is the same room as Image 1 with coloured lines drawn on it." / "Image 3 is a 3+3 sofa from a showroom." The numbering always matches the real send order — without strokes, image 2 becomes the first product.',
+        "description": 'One line per image, in the exact order sent to the model, e.g. "Image 1 is a room." / "Image 2 is the same room as Image 1 with coloured lines drawn on it." / "Image 3 is a showroom photograph of a sofa...". The numbering always matches the real send order — without strokes, image 2 becomes the first product.',
     },
     {
         "token": "{{CONFIG_NOTES}}",
@@ -186,11 +188,11 @@ PROMPT_PLACEHOLDERS = [
     },
     {
         "token": "{{ROOM_TREATMENT}}",
-        "description": 'The salesman\'s "How should the room look?" choice from the /finish step — expands to the full luxury or minimal styling instruction, e.g. "...present the space with refined luxury interior styling and premium finishing."',
+        "description": 'The salesman\'s "How should the room look?" choice from the finishing step — expands to the full luxury or minimal styling instruction, e.g. "...present the space with refined luxury interior styling and premium finishing."',
     },
     {
         "token": "{{LIGHTING}}",
-        "description": 'The salesman\'s lighting choice from the /finish step — warm, daylight, or studio — expands to the full lighting instruction, e.g. "Light the room with bright natural daylight entering from the existing windows..."',
+        "description": 'The salesman\'s lighting choice from the finishing step — warm, daylight, or studio — expands to the full lighting instruction, e.g. "Light the room with bright natural daylight entering from the existing windows..."',
     },
 ]
 
@@ -206,7 +208,7 @@ SIZE_MODE_CHOICES = ["auto", "1024x1024", "1024x1536", "1536x1024"]
 
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 1536
-MAX_ITEMS_PER_PROJECT = 4
+MAX_ITEMS_PER_ATTEMPT = 4
 GENERATION_RETRIES = 2  # in addition to the first attempt
 RETRY_BACKOFF_SECONDS = 2.0
 
@@ -296,25 +298,45 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class Project(Base):
-    __tablename__ = "projects"
+class Customer(Base):
+    __tablename__ = "customers"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    customer_name = Column(String, nullable=False)
-    room_type = Column(String, nullable=False)
-    room_photo_path = Column(String, nullable=False)
-    room_treatment = Column(String, nullable=False, server_default="luxury")
-    lighting = Column(String, nullable=False, server_default="warm")
+    name = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    items = relationship("Item", backref="project", cascade="all, delete-orphan", order_by="Item.id")
-    renders = relationship("Render", backref="project", cascade="all, delete-orphan", order_by="Render.id")
+    rooms = relationship("Room", backref="customer", cascade="all, delete-orphan", order_by="Room.id")
+
+
+class Room(Base):
+    __tablename__ = "rooms"
+    id = Column(Integer, primary_key=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    room_type = Column(String, nullable=False)
+    photo_path = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    attempts = relationship("Attempt", backref="room", cascade="all, delete-orphan", order_by="Attempt.id")
+
+
+class Attempt(Base):
+    __tablename__ = "attempts"
+    id = Column(Integer, primary_key=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
+    room_treatment = Column(String, nullable=False, default=DEFAULT_ROOM_TREATMENT, server_default="luxury")
+    lighting = Column(String, nullable=False, default=DEFAULT_LIGHTING, server_default="warm")
+    ignore_placement = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    is_picked = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    items = relationship("Item", backref="attempt", cascade="all, delete-orphan", order_by="Item.id")
+    renders = relationship("Render", backref="attempt", cascade="all, delete-orphan", order_by="Render.id")
 
 
 class Item(Base):
     __tablename__ = "items"
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    attempt_id = Column(Integer, ForeignKey("attempts.id"), nullable=False)
     category = Column(String, nullable=False)
     type = Column(String, nullable=False)
     width_ft = Column(Float, nullable=False)
@@ -327,7 +349,7 @@ class Item(Base):
 class Render(Base):
     __tablename__ = "renders"
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    attempt_id = Column(Integer, ForeignKey("attempts.id"), nullable=False)
     image_path = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -369,6 +391,67 @@ SEED_USERS = [
 ]
 
 
+def migrate_legacy_projects(db: Session) -> None:
+    """One-time move from the old flat `projects` table to
+    customers -> rooms -> attempts, re-pointing items/renders from
+    project_id to attempt_id. Idempotent and atomic: if `projects` doesn't
+    exist there is nothing to do (either never existed, or a previous run
+    already finished and dropped it); everything here runs in the caller's
+    transaction, so a crash partway leaves the original `projects` table
+    untouched for the next attempt to retry from scratch."""
+    if "projects" not in inspect(engine).get_table_names():
+        return
+
+    db.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS attempt_id INTEGER"))
+    db.execute(text("ALTER TABLE renders ADD COLUMN IF NOT EXISTS attempt_id INTEGER"))
+
+    rows = db.execute(
+        text(
+            "SELECT id, user_id, customer_name, room_type, room_photo_path, "
+            "room_treatment, lighting, created_at FROM projects ORDER BY id"
+        )
+    ).fetchall()
+    logger.info("migrating %d legacy projects to customers/rooms/attempts", len(rows))
+
+    for row in rows:
+        customer = Customer(user_id=row.user_id, name=row.customer_name, created_at=row.created_at)
+        db.add(customer)
+        db.flush()
+
+        room = Room(customer_id=customer.id, room_type=row.room_type, photo_path=row.room_photo_path, created_at=row.created_at)
+        db.add(room)
+        db.flush()
+
+        attempt = Attempt(
+            room_id=room.id,
+            room_treatment=row.room_treatment,
+            lighting=row.lighting,
+            ignore_placement=False,
+            is_picked=False,
+            created_at=row.created_at,
+        )
+        db.add(attempt)
+        db.flush()
+
+        db.execute(text("UPDATE items SET attempt_id = :aid WHERE project_id = :pid"), {"aid": attempt.id, "pid": row.id})
+        db.execute(text("UPDATE renders SET attempt_id = :aid WHERE project_id = :pid"), {"aid": attempt.id, "pid": row.id})
+
+    orphan_items = db.execute(text("SELECT COUNT(*) FROM items WHERE attempt_id IS NULL")).scalar()
+    orphan_renders = db.execute(text("SELECT COUNT(*) FROM renders WHERE attempt_id IS NULL")).scalar()
+    if orphan_items or orphan_renders:
+        raise RuntimeError(f"legacy project migration left {orphan_items} items and {orphan_renders} renders unmigrated")
+
+    db.execute(text("ALTER TABLE items ALTER COLUMN attempt_id SET NOT NULL"))
+    db.execute(text("ALTER TABLE renders ALTER COLUMN attempt_id SET NOT NULL"))
+    db.execute(text("ALTER TABLE items ADD CONSTRAINT items_attempt_id_fkey FOREIGN KEY (attempt_id) REFERENCES attempts(id)"))
+    db.execute(text("ALTER TABLE renders ADD CONSTRAINT renders_attempt_id_fkey FOREIGN KEY (attempt_id) REFERENCES attempts(id)"))
+    db.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS project_id"))
+    db.execute(text("ALTER TABLE renders DROP COLUMN IF EXISTS project_id"))
+    db.execute(text("DROP TABLE projects"))
+
+    logger.info("legacy project migration complete: %d projects migrated", len(rows))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -378,11 +461,10 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_x"))
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_y"))
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS strokes JSON"))
-        # migrate DBs created before the finishing step existed
-        conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_treatment VARCHAR NOT NULL DEFAULT 'luxury'"))
-        conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS lighting VARCHAR NOT NULL DEFAULT 'warm'"))
     db = SessionLocal()
     try:
+        migrate_legacy_projects(db)
+
         if db.query(User).count() == 0:
             for name, mobile, role in SEED_USERS:
                 db.add(
@@ -394,18 +476,19 @@ async def lifespan(app: FastAPI):
                         active=True,
                     )
                 )
-            db.commit()
             logger.info("seeded %d users", len(SEED_USERS))
         if db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first() is None:
             db.add(Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT))
-            db.commit()
             logger.info("seeded default generation prompt")
         if db.query(Setting).filter(Setting.key == IMAGE_QUALITY_KEY).first() is None:
             db.add(Setting(key=IMAGE_QUALITY_KEY, value=DEFAULT_IMAGE_QUALITY))
-            db.commit()
         if db.query(Setting).filter(Setting.key == SIZE_MODE_KEY).first() is None:
             db.add(Setting(key=SIZE_MODE_KEY, value=DEFAULT_SIZE_MODE))
-            db.commit()
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
     yield
@@ -627,7 +710,8 @@ MULTI_PIECE_WIDTH_NOTE = "The stated width refers to the largest single sofa in 
 
 def numbered_items(items: list[Item]) -> list[tuple[int, Item]]:
     """Piece numbers are 1-based position in the list — the same order the
-    product reference photos are sent to the model and the /place chips show."""
+    product reference photos are sent to the model and the placement chips
+    show."""
     return list(enumerate(items, start=1))
 
 
@@ -840,34 +924,39 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 JOBS: dict[str, dict] = {}
 
 
-async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_placement: bool = False) -> None:
+async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_placement: bool = False) -> None:
     db = SessionLocal()
     try:
-        project = db.query(Project).filter(Project.id == project_id, Project.user_id == user_id).first()
-        if project is None:
-            JOBS[job_id] = {"status": "error", "message": "That project could not be found."}
+        attempt = (
+            db.query(Attempt)
+            .join(Room, Attempt.room_id == Room.id)
+            .join(Customer, Room.customer_id == Customer.id)
+            .filter(Attempt.id == attempt_id, Customer.user_id == user_id)
+            .first()
+        )
+        if attempt is None:
+            JOBS[job_id] = {"status": "error", "message": "That attempt could not be found."}
             return
-        if not project.items:
+        if not attempt.items:
             JOBS[job_id] = {"status": "error", "message": "Add at least one piece of furniture first."}
             return
 
-        marked = marked_items(project.items, ignore_placement)
+        room = attempt.room
+        marked = marked_items(attempt.items, ignore_placement)
         template = get_active_prompt(db)
-        prompt = build_prompt(
-            template, project.room_type, project.items, marked, project.room_treatment, project.lighting
-        )
+        prompt = build_prompt(template, room.room_type, attempt.items, marked, attempt.room_treatment, attempt.lighting)
 
         quality = get_setting(db, IMAGE_QUALITY_KEY, DEFAULT_IMAGE_QUALITY)
         size_mode = get_setting(db, SIZE_MODE_KEY, DEFAULT_SIZE_MODE)
 
-        room_path = DATA_ROOT / project.room_photo_path
+        room_path = DATA_ROOT / room.photo_path
         with Image.open(room_path) as room_image:
             size = derive_size(*room_image.size) if size_mode == "auto" else size_mode
 
         image_files: list[tuple[str, bytes, str]] = []
         debug_images: list[dict] = []
 
-        room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{project.room_photo_path}")
+        room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
         image_files.append(room_file)
         debug_images.append(room_debug)
 
@@ -877,7 +966,7 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
             image_files.append(marked_file)
             debug_images.append(marked_debug)
 
-        for item in project.items:
+        for item in attempt.items:
             item_file, item_debug = load_local_image_with_debug(
                 DATA_ROOT / item.photo_path, "product", f"/media/{item.photo_path}"
             )
@@ -886,7 +975,7 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
 
         try:
             result = await asyncio.to_thread(
-                call_image_api, prompt, image_files, size, quality, f"project:{project_id}"
+                call_image_api, prompt, image_files, size, quality, f"attempt:{attempt_id}"
             )
         except GenerationError as exc:
             JOBS[job_id] = {"status": "error", "message": exc.message}
@@ -897,7 +986,7 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
         image.save(RENDERS_DIR / filename, format="JPEG", quality=92)
         relative_path = f"renders/{filename}"
 
-        render = Render(project_id=project.id, image_path=relative_path)
+        render = Render(attempt_id=attempt.id, image_path=relative_path)
         db.add(render)
         db.commit()
         db.refresh(render)
@@ -919,11 +1008,12 @@ async def run_generation_job(job_id: str, project_id: int, user_id: int, ignore_
         JOBS[job_id] = {
             "status": "done",
             "render_id": render.id,
-            "project_id": project.id,
+            "attempt_id": attempt.id,
+            "project_id": attempt.id,  # legacy alias for the static/ frontend
             "image_url": f"/media/{relative_path}",
         }
     except Exception:
-        logger.exception("generation job failed job_id=%s project_id=%s", job_id, project_id)
+        logger.exception("generation job failed job_id=%s attempt_id=%s", job_id, attempt_id)
         JOBS[job_id] = {"status": "error", "message": "Something went wrong generating your image. Please try again."}
     finally:
         db.close()
@@ -969,147 +1059,213 @@ def api_me(user: User = Depends(get_current_user)) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Project routes
+# Ownership helpers
 # ---------------------------------------------------------------------------
 
 
-def project_summary(project: Project) -> dict:
-    latest_render = project.renders[-1] if project.renders else None
+def get_owned_customer(customer_id: int, user: User, db: Session) -> Customer:
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.user_id == user.id).first()
+    if customer is None:
+        raise HTTPException(status_code=404, detail="That customer could not be found.")
+    return customer
+
+
+def get_owned_room(room_id: int, user: User, db: Session) -> Room:
+    room = (
+        db.query(Room)
+        .join(Customer, Room.customer_id == Customer.id)
+        .filter(Room.id == room_id, Customer.user_id == user.id)
+        .first()
+    )
+    if room is None:
+        raise HTTPException(status_code=404, detail="That room could not be found.")
+    return room
+
+
+def get_owned_attempt(attempt_id: int, user: User, db: Session) -> Attempt:
+    attempt = (
+        db.query(Attempt)
+        .join(Room, Attempt.room_id == Room.id)
+        .join(Customer, Room.customer_id == Customer.id)
+        .filter(Attempt.id == attempt_id, Customer.user_id == user.id)
+        .first()
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="That attempt could not be found.")
+    return attempt
+
+
+# ---------------------------------------------------------------------------
+# Serializers
+# ---------------------------------------------------------------------------
+
+
+def item_public(item: Item) -> dict:
     return {
-        "id": project.id,
-        "customer_name": project.customer_name,
-        "room_type": project.room_type,
-        "created_at": project.created_at.isoformat() if project.created_at else None,
-        "thumbnail_url": f"/media/{latest_render.image_path}" if latest_render else f"/media/{project.room_photo_path}",
-        "has_render": latest_render is not None,
+        "id": item.id,
+        "category": item.category,
+        "type": item.type,
+        "width_ft": item.width_ft,
+        "photo_url": f"/media/{item.photo_path}",
+        "strokes": item.strokes or [],
     }
 
 
-def project_detail(project: Project) -> dict:
-    latest_render = project.renders[-1] if project.renders else None
+def render_public(render: Render) -> dict:
     return {
-        "id": project.id,
-        "customer_name": project.customer_name,
-        "room_type": project.room_type,
-        "room_photo_url": f"/media/{project.room_photo_path}",
-        "room_treatment": project.room_treatment,
-        "lighting": project.lighting,
-        "created_at": project.created_at.isoformat() if project.created_at else None,
-        "items": [
-            {
-                "id": item.id,
-                "category": item.category,
-                "type": item.type,
-                "width_ft": item.width_ft,
-                "photo_url": f"/media/{item.photo_path}",
-                "strokes": item.strokes or [],
-            }
-            for item in project.items
-        ],
-        "renders": [
-            {"id": r.id, "image_url": f"/media/{r.image_path}", "created_at": r.created_at.isoformat() if r.created_at else None}
-            for r in project.renders
-        ],
+        "id": render.id,
+        "image_url": f"/media/{render.image_path}",
+        "created_at": render.created_at.isoformat() if render.created_at else None,
+    }
+
+
+def customer_summary(customer: Customer) -> dict:
+    room_count = len(customer.rooms)
+    render_count = sum(len(attempt.renders) for room in customer.rooms for attempt in room.attempts)
+    return {
+        "id": customer.id,
+        "name": customer.name,
+        "created_at": customer.created_at.isoformat() if customer.created_at else None,
+        "room_count": room_count,
+        "render_count": render_count,
+    }
+
+
+def room_summary(room: Room) -> dict:
+    latest_attempt = room.attempts[-1] if room.attempts else None
+    latest_render = latest_attempt.renders[-1] if latest_attempt and latest_attempt.renders else None
+    return {
+        "id": room.id,
+        "customer_id": room.customer_id,
+        "room_type": room.room_type,
+        "photo_url": f"/media/{room.photo_path}",
+        "created_at": room.created_at.isoformat() if room.created_at else None,
+        "attempt_count": len(room.attempts),
+        "thumbnail_url": f"/media/{latest_render.image_path}" if latest_render else f"/media/{room.photo_path}",
+    }
+
+
+def room_detail(room: Room) -> dict:
+    return {
+        "id": room.id,
+        "customer_id": room.customer_id,
+        "customer_name": room.customer.name,
+        "room_type": room.room_type,
+        "photo_url": f"/media/{room.photo_path}",
+        "created_at": room.created_at.isoformat() if room.created_at else None,
+    }
+
+
+def attempt_summary(attempt: Attempt) -> dict:
+    latest_render = attempt.renders[-1] if attempt.renders else None
+    return {
+        "id": attempt.id,
+        "room_id": attempt.room_id,
+        "room_treatment": attempt.room_treatment,
+        "lighting": attempt.lighting,
+        "ignore_placement": attempt.ignore_placement,
+        "is_picked": attempt.is_picked,
+        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+        "item_count": len(attempt.items),
         "latest_render": (
             {"id": latest_render.id, "image_url": f"/media/{latest_render.image_path}"} if latest_render else None
         ),
     }
 
 
-@app.get("/api/projects")
-def api_list_projects(q: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
-    query = db.query(Project).filter(Project.user_id == user.id)
-    if q.strip():
-        query = query.filter(Project.customer_name.ilike(f"%{q.strip()}%"))
-    projects = query.order_by(Project.id.desc()).all()
-    return JSONResponse(content={"projects": [project_summary(p) for p in projects]})
+def attempt_detail(attempt: Attempt) -> dict:
+    latest_render = attempt.renders[-1] if attempt.renders else None
+    return {
+        "id": attempt.id,
+        "room": room_detail(attempt.room),
+        "room_treatment": attempt.room_treatment,
+        "lighting": attempt.lighting,
+        "ignore_placement": attempt.ignore_placement,
+        "is_picked": attempt.is_picked,
+        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+        "items": [item_public(i) for i in attempt.items],
+        "renders": [render_public(r) for r in attempt.renders],
+        "latest_render": (
+            {"id": latest_render.id, "image_url": f"/media/{latest_render.image_path}"} if latest_render else None
+        ),
+    }
 
 
-@app.post("/api/projects")
-async def api_create_project(
-    customer_name: str = Form(...),
-    room_type: str = Form(...),
-    room_photo: UploadFile = File(...),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    if not customer_name.strip():
-        return error_response(400, "missing_customer_name", "Please enter the customer's name.")
-    if room_type not in ROOM_TYPES:
-        return error_response(400, "invalid_room_type", "Please choose a room type.")
-    try:
-        photo_path = await save_validated_upload(room_photo, ROOMS_DIR)
-    except UploadValidationError as exc:
-        return error_response(exc.status_code, exc.error, exc.message)
-
-    project = Project(
-        user_id=user.id,
-        customer_name=customer_name.strip(),
-        room_type=room_type,
-        room_photo_path=photo_path,
-    )
-    db.add(project)
-    db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+# Legacy shapes — exactly what the existing static/ frontend expects. "id" on
+# these is an attempt id, since one legacy "project" == one customer + one
+# room + one attempt.
 
 
-def get_owned_project(project_id: int, user: User, db: Session) -> Project:
-    project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
-    if project is None:
-        raise HTTPException(status_code=404, detail="That project could not be found.")
-    return project
+def legacy_project_summary(attempt: Attempt) -> dict:
+    room = attempt.room
+    latest_render = attempt.renders[-1] if attempt.renders else None
+    return {
+        "id": attempt.id,
+        "customer_name": room.customer.name,
+        "room_type": room.room_type,
+        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+        "thumbnail_url": f"/media/{latest_render.image_path}" if latest_render else f"/media/{room.photo_path}",
+        "has_render": latest_render is not None,
+    }
 
 
-@app.get("/api/projects/{project_id}")
-def api_get_project(project_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    return JSONResponse(content={"project": project_detail(project)})
+def legacy_project_detail(attempt: Attempt) -> dict:
+    room = attempt.room
+    latest_render = attempt.renders[-1] if attempt.renders else None
+    return {
+        "id": attempt.id,
+        "customer_name": room.customer.name,
+        "room_type": room.room_type,
+        "room_photo_url": f"/media/{room.photo_path}",
+        "room_treatment": attempt.room_treatment,
+        "lighting": attempt.lighting,
+        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+        "items": [item_public(i) for i in attempt.items],
+        "renders": [render_public(r) for r in attempt.renders],
+        "latest_render": (
+            {"id": latest_render.id, "image_url": f"/media/{latest_render.image_path}"} if latest_render else None
+        ),
+    }
 
 
-@app.post("/api/projects/{project_id}/items")
-async def api_add_item(
-    project_id: int,
-    category: str = Form(...),
-    type: str = Form(...),
-    width_ft: float = Form(...),
-    photo: UploadFile = File(...),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
+# ---------------------------------------------------------------------------
+# Shared item/stroke/finish/generate logic — used by both the legacy
+# /api/projects/* routes (static/ frontend) and the new /api/attempts/*
+# routes, so the two surfaces can never drift apart.
+# ---------------------------------------------------------------------------
+
+
+async def _add_item_to_attempt(
+    attempt: Attempt, category: str, type_: str, width_ft: float, photo: UploadFile, db: Session
+) -> Attempt | JSONResponse:
     if category not in ITEM_TYPES:
         return error_response(400, "invalid_category", "Please choose a furniture category.")
-    if type not in ITEM_TYPES[category]:
+    if type_ not in ITEM_TYPES[category]:
         return error_response(400, "invalid_type", "Please choose a valid type for that category.")
     if width_ft <= 0:
         return error_response(400, "invalid_width", "Please enter a width in feet.")
-    if len(project.items) >= MAX_ITEMS_PER_PROJECT:
-        return error_response(400, "too_many_items", f"You can add up to {MAX_ITEMS_PER_PROJECT} pieces.")
+    if len(attempt.items) >= MAX_ITEMS_PER_ATTEMPT:
+        return error_response(400, "too_many_items", f"You can add up to {MAX_ITEMS_PER_ATTEMPT} pieces.")
     try:
         photo_path = await save_validated_upload(photo, ITEMS_DIR)
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
 
-    item = Item(project_id=project.id, category=category, type=type, width_ft=width_ft, photo_path=photo_path)
+    item = Item(attempt_id=attempt.id, category=category, type=type_, width_ft=width_ft, photo_path=photo_path)
     db.add(item)
     db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+    db.refresh(attempt)
+    return attempt
 
 
-@app.delete("/api/projects/{project_id}/items/{item_id}")
-def api_delete_item(
-    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
+def _delete_item_from_attempt(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
     db.delete(item)
     db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+    db.refresh(attempt)
+    return attempt
 
 
 class StrokePoint(BaseModel):
@@ -1132,6 +1288,146 @@ def validated_stroke_points(points: list[StrokePoint]) -> list[dict] | None:
     return cleaned
 
 
+def _add_stroke(attempt: Attempt, item_id: int, points: list[StrokePoint], db: Session) -> Attempt | JSONResponse:
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    cleaned = validated_stroke_points(points)
+    if cleaned is None:
+        return error_response(400, "invalid_stroke", "That stroke is outside the photo.")
+    item.strokes = [*(item.strokes or []), cleaned]
+    db.commit()
+    db.refresh(attempt)
+    return attempt
+
+
+def _undo_stroke(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    item.strokes = (item.strokes or [])[:-1]
+    db.commit()
+    db.refresh(attempt)
+    return attempt
+
+
+def _clear_strokes(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    item.strokes = []
+    db.commit()
+    db.refresh(attempt)
+    return attempt
+
+
+def _set_finish(attempt: Attempt, room_treatment: str, lighting: str, db: Session) -> Attempt | JSONResponse:
+    if room_treatment not in ROOM_TREATMENT_CHOICES:
+        return error_response(400, "invalid_room_treatment", "Please choose how the room should look.")
+    if lighting not in LIGHTING_CHOICES:
+        return error_response(400, "invalid_lighting", "Please choose a lighting option.")
+    attempt.room_treatment = room_treatment
+    attempt.lighting = lighting
+    db.commit()
+    db.refresh(attempt)
+    return attempt
+
+
+def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: Session) -> JSONResponse:
+    if not attempt.items:
+        return error_response(400, "no_items", "Add at least one piece of furniture first.")
+    attempt.ignore_placement = ignore_placement
+    db.commit()
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"status": "processing"}
+    asyncio.create_task(run_generation_job(job_id, attempt.id, user.id, ignore_placement))
+    return JSONResponse(content={"job_id": job_id})
+
+
+# ---------------------------------------------------------------------------
+# Legacy project routes — kept byte-for-byte compatible so static/ keeps
+# working unmodified. "project_id" in these paths is an attempt id.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/projects")
+def api_list_projects(q: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    query = (
+        db.query(Attempt)
+        .join(Room, Attempt.room_id == Room.id)
+        .join(Customer, Room.customer_id == Customer.id)
+        .filter(Customer.user_id == user.id)
+    )
+    if q.strip():
+        query = query.filter(Customer.name.ilike(f"%{q.strip()}%"))
+    attempts = query.order_by(Attempt.id.desc()).all()
+    return JSONResponse(content={"projects": [legacy_project_summary(a) for a in attempts]})
+
+
+@app.post("/api/projects")
+async def api_create_project(
+    customer_name: str = Form(...),
+    room_type: str = Form(...),
+    room_photo: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    if not customer_name.strip():
+        return error_response(400, "missing_customer_name", "Please enter the customer's name.")
+    if room_type not in ROOM_TYPES:
+        return error_response(400, "invalid_room_type", "Please choose a room type.")
+    try:
+        photo_path = await save_validated_upload(room_photo, ROOMS_DIR)
+    except UploadValidationError as exc:
+        return error_response(exc.status_code, exc.error, exc.message)
+
+    customer = Customer(user_id=user.id, name=customer_name.strip())
+    db.add(customer)
+    db.flush()
+    room = Room(customer_id=customer.id, room_type=room_type, photo_path=photo_path)
+    db.add(room)
+    db.flush()
+    attempt = Attempt(room_id=room.id, room_treatment=DEFAULT_ROOM_TREATMENT, lighting=DEFAULT_LIGHTING)
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"project": legacy_project_detail(attempt)})
+
+
+@app.get("/api/projects/{project_id}")
+def api_get_project(project_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    attempt = get_owned_attempt(project_id, user, db)
+    return JSONResponse(content={"project": legacy_project_detail(attempt)})
+
+
+@app.post("/api/projects/{project_id}/items")
+async def api_add_item(
+    project_id: int,
+    category: str = Form(...),
+    type: str = Form(...),
+    width_ft: float = Form(...),
+    photo: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    attempt = get_owned_attempt(project_id, user, db)
+    result = await _add_item_to_attempt(attempt, category, type, width_ft, photo, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"project": legacy_project_detail(result)})
+
+
+@app.delete("/api/projects/{project_id}/items/{item_id}")
+def api_delete_item(
+    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(project_id, user, db)
+    result = _delete_item_from_attempt(attempt, item_id, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"project": legacy_project_detail(result)})
+
+
 @app.post("/api/projects/{project_id}/items/{item_id}/strokes")
 def api_add_stroke(
     project_id: int,
@@ -1140,45 +1436,33 @@ def api_add_stroke(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
-    if item is None:
-        return error_response(404, "item_not_found", "That piece could not be found.")
-    points = validated_stroke_points(body.points)
-    if points is None:
-        return error_response(400, "invalid_stroke", "That stroke is outside the photo.")
-    item.strokes = [*(item.strokes or []), points]
-    db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+    attempt = get_owned_attempt(project_id, user, db)
+    result = _add_stroke(attempt, item_id, body.points, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"project": legacy_project_detail(result)})
 
 
 @app.post("/api/projects/{project_id}/items/{item_id}/strokes/undo")
 def api_undo_stroke(
     project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
-    if item is None:
-        return error_response(404, "item_not_found", "That piece could not be found.")
-    item.strokes = (item.strokes or [])[:-1]
-    db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+    attempt = get_owned_attempt(project_id, user, db)
+    result = _undo_stroke(attempt, item_id, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"project": legacy_project_detail(result)})
 
 
 @app.delete("/api/projects/{project_id}/items/{item_id}/strokes")
 def api_clear_strokes(
     project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    item = db.query(Item).filter(Item.id == item_id, Item.project_id == project.id).first()
-    if item is None:
-        return error_response(404, "item_not_found", "That piece could not be found.")
-    item.strokes = []
-    db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+    attempt = get_owned_attempt(project_id, user, db)
+    result = _clear_strokes(attempt, item_id, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"project": legacy_project_detail(result)})
 
 
 class FinishBody(BaseModel):
@@ -1190,16 +1474,11 @@ class FinishBody(BaseModel):
 def api_set_finish(
     project_id: int, body: FinishBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    if body.room_treatment not in ROOM_TREATMENT_CHOICES:
-        return error_response(400, "invalid_room_treatment", "Please choose how the room should look.")
-    if body.lighting not in LIGHTING_CHOICES:
-        return error_response(400, "invalid_lighting", "Please choose a lighting option.")
-    project.room_treatment = body.room_treatment
-    project.lighting = body.lighting
-    db.commit()
-    db.refresh(project)
-    return JSONResponse(content={"project": project_detail(project)})
+    attempt = get_owned_attempt(project_id, user, db)
+    result = _set_finish(attempt, body.room_treatment, body.lighting, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"project": legacy_project_detail(result)})
 
 
 @app.post("/api/projects/{project_id}/generate")
@@ -1209,14 +1488,8 @@ async def api_generate(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    project = get_owned_project(project_id, user, db)
-    if not project.items:
-        return error_response(400, "no_items", "Add at least one piece of furniture first.")
-
-    job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "processing"}
-    asyncio.create_task(run_generation_job(job_id, project.id, user.id, ignore_placement))
-    return JSONResponse(content={"job_id": job_id})
+    attempt = get_owned_attempt(project_id, user, db)
+    return _start_generation(attempt, ignore_placement, user, db)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1225,6 +1498,241 @@ def api_job_status(job_id: str, user: User = Depends(get_current_user)) -> JSONR
     if job is None:
         return error_response(404, "job_not_found", "That job could not be found.")
     return JSONResponse(content=job)
+
+
+# ---------------------------------------------------------------------------
+# Customers
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/customers")
+def api_list_customers(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    customers = db.query(Customer).filter(Customer.user_id == user.id).order_by(Customer.id.desc()).all()
+    return JSONResponse(content={"customers": [customer_summary(c) for c in customers]})
+
+
+class CreateCustomerBody(BaseModel):
+    name: str
+
+
+@app.post("/api/customers")
+def api_create_customer(
+    body: CreateCustomerBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if not body.name.strip():
+        return error_response(400, "missing_name", "Please enter the customer's name.")
+    customer = Customer(user_id=user.id, name=body.name.strip())
+    db.add(customer)
+    db.commit()
+    db.refresh(customer)
+    return JSONResponse(content={"customer": customer_summary(customer)})
+
+
+@app.get("/api/customers/{customer_id}")
+def api_get_customer(
+    customer_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    customer = get_owned_customer(customer_id, user, db)
+    return JSONResponse(
+        content={"customer": customer_summary(customer), "rooms": [room_summary(r) for r in customer.rooms]}
+    )
+
+
+@app.post("/api/customers/{customer_id}/rooms")
+async def api_create_room(
+    customer_id: int,
+    room_type: str = Form(...),
+    photo: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    customer = get_owned_customer(customer_id, user, db)
+    if room_type not in ROOM_TYPES:
+        return error_response(400, "invalid_room_type", "Please choose a room type.")
+    try:
+        photo_path = await save_validated_upload(photo, ROOMS_DIR)
+    except UploadValidationError as exc:
+        return error_response(exc.status_code, exc.error, exc.message)
+
+    room = Room(customer_id=customer.id, room_type=room_type, photo_path=photo_path)
+    db.add(room)
+    db.commit()
+    db.refresh(room)
+    return JSONResponse(content={"room": room_summary(room)})
+
+
+# ---------------------------------------------------------------------------
+# Rooms
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/rooms/{room_id}")
+def api_get_room(room_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    room = get_owned_room(room_id, user, db)
+    attempts = sorted(room.attempts, key=lambda a: a.id, reverse=True)
+    return JSONResponse(content={"room": room_detail(room), "attempts": [attempt_summary(a) for a in attempts]})
+
+
+class CreateAttemptBody(BaseModel):
+    clone_from_attempt_id: int | None = None
+
+
+@app.post("/api/rooms/{room_id}/attempts")
+def api_create_attempt(
+    room_id: int,
+    body: CreateAttemptBody | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    room = get_owned_room(room_id, user, db)
+
+    room_treatment = DEFAULT_ROOM_TREATMENT
+    lighting = DEFAULT_LIGHTING
+    source_items: list[Item] = []
+
+    clone_from_attempt_id = body.clone_from_attempt_id if body else None
+    if clone_from_attempt_id is not None:
+        source = db.query(Attempt).filter(Attempt.id == clone_from_attempt_id, Attempt.room_id == room.id).first()
+        if source is None:
+            return error_response(404, "attempt_not_found", "That attempt could not be found.")
+        room_treatment = source.room_treatment
+        lighting = source.lighting
+        source_items = source.items
+
+    attempt = Attempt(room_id=room.id, room_treatment=room_treatment, lighting=lighting)
+    db.add(attempt)
+    db.flush()
+
+    for item in source_items:
+        db.add(
+            Item(
+                attempt_id=attempt.id,
+                category=item.category,
+                type=item.type,
+                width_ft=item.width_ft,
+                photo_path=item.photo_path,
+                strokes=item.strokes,
+            )
+        )
+
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
+# ---------------------------------------------------------------------------
+# Attempts
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/attempts/{attempt_id}")
+def api_get_attempt(
+    attempt_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
+@app.post("/api/attempts/{attempt_id}/items")
+async def api_add_item_to_attempt(
+    attempt_id: int,
+    category: str = Form(...),
+    type: str = Form(...),
+    width_ft: float = Form(...),
+    photo: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    result = await _add_item_to_attempt(attempt, category, type, width_ft, photo, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.delete("/api/attempts/{attempt_id}/items/{item_id}")
+def api_delete_item_from_attempt(
+    attempt_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    result = _delete_item_from_attempt(attempt, item_id, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.post("/api/attempts/{attempt_id}/items/{item_id}/strokes")
+def api_add_stroke_to_attempt(
+    attempt_id: int,
+    item_id: int,
+    body: StrokeBody,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    result = _add_stroke(attempt, item_id, body.points, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.delete("/api/attempts/{attempt_id}/items/{item_id}/strokes")
+def api_clear_strokes_from_attempt(
+    attempt_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    result = _clear_strokes(attempt, item_id, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.patch("/api/attempts/{attempt_id}")
+def api_patch_attempt(
+    attempt_id: int, body: FinishBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    result = _set_finish(attempt, body.room_treatment, body.lighting, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.post("/api/attempts/{attempt_id}/generate")
+async def api_generate_attempt(
+    attempt_id: int,
+    ignore_placement: bool = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    return _start_generation(attempt, ignore_placement, user, db)
+
+
+# ---------------------------------------------------------------------------
+# Renders
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/renders/{render_id}/pick")
+def api_pick_render(
+    render_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    render = (
+        db.query(Render)
+        .join(Attempt, Render.attempt_id == Attempt.id)
+        .join(Room, Attempt.room_id == Room.id)
+        .join(Customer, Room.customer_id == Customer.id)
+        .filter(Render.id == render_id, Customer.user_id == user.id)
+        .first()
+    )
+    if render is None:
+        return error_response(404, "render_not_found", "That render could not be found.")
+    attempt = render.attempt
+    db.query(Attempt).filter(Attempt.room_id == attempt.room_id).update({Attempt.is_picked: False})
+    attempt.is_picked = True
+    db.commit()
+    return JSONResponse(content={"attempt_id": attempt.id, "render_id": render.id, "is_picked": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1247,7 +1755,12 @@ def api_admin_list_users(q: str = "", admin: User = Depends(require_admin), db: 
     users = query.order_by(User.name).all()
     result = []
     for u in users:
-        count = db.query(Project).filter(Project.user_id == u.id).count()
+        count = (
+            db.query(Room)
+            .join(Customer, Room.customer_id == Customer.id)
+            .filter(Customer.user_id == u.id)
+            .count()
+        )
         result.append({**user_public(u), "project_count": count})
     return JSONResponse(content={"users": result})
 
@@ -1270,22 +1783,72 @@ def api_admin_create_user(
 
 @app.get("/api/admin/users/{user_id}")
 def api_admin_user_detail(user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+    """Legacy shape for the static/ admin detail screen: one flattened
+    "project" card per room, customer name attached, renders aggregated
+    across all of that room's attempts. See /api/admin/user/{id} for the
+    real customers -> rooms -> renders hierarchy."""
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         return error_response(404, "user_not_found", "That salesman could not be found.")
-    projects = db.query(Project).filter(Project.user_id == user_id).order_by(Project.id.desc()).all()
-    return JSONResponse(
-        content={
-            "user": user_public(target),
-            "project_count": len(projects),
-            "projects": [
+    rooms = (
+        db.query(Room)
+        .join(Customer, Room.customer_id == Customer.id)
+        .filter(Customer.user_id == user_id)
+        .order_by(Room.id.desc())
+        .all()
+    )
+    projects_payload = []
+    for room in rooms:
+        all_renders = sorted((r for attempt in room.attempts for r in attempt.renders), key=lambda r: r.id)
+        latest_render = all_renders[-1] if all_renders else None
+        projects_payload.append(
+            {
+                "id": room.id,
+                "customer_name": room.customer.name,
+                "room_type": room.room_type,
+                "created_at": room.created_at.isoformat() if room.created_at else None,
+                "thumbnail_url": f"/media/{latest_render.image_path}" if latest_render else f"/media/{room.photo_path}",
+                "has_render": latest_render is not None,
+                "renders": [f"/media/{r.image_path}" for r in all_renders],
+            }
+        )
+    return JSONResponse(content={"user": user_public(target), "project_count": len(rooms), "projects": projects_payload})
+
+
+@app.get("/api/admin/user/{user_id}")
+def api_admin_user_detail_v2(
+    user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """The real hierarchy: customers -> rooms -> renders (aggregated across
+    each room's attempts)."""
+    target = db.query(User).filter(User.id == user_id).first()
+    if target is None:
+        return error_response(404, "user_not_found", "That salesman could not be found.")
+    customers = db.query(Customer).filter(Customer.user_id == user_id).order_by(Customer.id.desc()).all()
+    customers_payload = []
+    for c in customers:
+        rooms_payload = []
+        for room in c.rooms:
+            renders = [f"/media/{r.image_path}" for attempt in room.attempts for r in attempt.renders]
+            rooms_payload.append(
                 {
-                    **project_summary(p),
-                    "renders": [f"/media/{r.image_path}" for r in p.renders],
+                    "id": room.id,
+                    "room_type": room.room_type,
+                    "photo_url": f"/media/{room.photo_path}",
+                    "created_at": room.created_at.isoformat() if room.created_at else None,
+                    "renders": renders,
                 }
-                for p in projects
-            ],
-        }
+            )
+        customers_payload.append(
+            {
+                "id": c.id,
+                "name": c.name,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "rooms": rooms_payload,
+            }
+        )
+    return JSONResponse(
+        content={"user": user_public(target), "customer_count": len(customers), "customers": customers_payload}
     )
 
 
@@ -1402,12 +1965,14 @@ def api_debug_generation(render_id: int, admin: User = Depends(require_admin), d
     debug_row = db.query(GenerationDebug).filter(GenerationDebug.render_id == render_id).first()
     if debug_row is None:
         return error_response(404, "no_debug_data", "No debug data was recorded for this render.")
-    project = render.project
+    attempt = render.attempt
+    room = attempt.room if attempt else None
     return JSONResponse(
         content={
             "render_id": render.id,
-            "project_id": render.project_id,
-            "customer_name": project.customer_name if project else None,
+            "attempt_id": render.attempt_id,
+            "project_id": render.attempt_id,  # legacy alias
+            "customer_name": room.customer.name if room else None,
             "output_image_url": f"/media/{render.image_path}",
             "created_at": render.created_at.isoformat() if render.created_at else None,
             "prompt": debug_row.prompt,
@@ -1430,12 +1995,29 @@ def debug_latest(admin: User = Depends(require_admin), db: Session = Depends(get
 
 
 # ---------------------------------------------------------------------------
+# React frontend — served at /app, SPA fallback to index.html. The existing
+# static/ app keeps serving from its current routes untouched, below.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/app")
+@app.get("/app/{full_path:path}")
+async def serve_react_app(full_path: str = "") -> Response:
+    if not FRONTEND_DIST_DIR.is_dir():
+        raise HTTPException(status_code=404, detail="Frontend build not found. Run `npm run build` in frontend/.")
+    candidate = FRONTEND_DIST_DIR / full_path
+    if full_path and candidate.is_file():
+        return FileResponse(str(candidate))
+    return FileResponse(str(FRONTEND_DIST_DIR / "index.html"))
+
+
+# ---------------------------------------------------------------------------
 # Static frontend — one page shell, client-side routing.
 # ---------------------------------------------------------------------------
 
 
 @app.get("/{full_path:path}")
 async def spa(full_path: str) -> Response:
-    if full_path.startswith(("api/", "media/", "static/")):
+    if full_path.startswith(("api/", "media/", "static/", "app/")):
         raise HTTPException(status_code=404)
     return FileResponse(str(STATIC_DIR / "index.html"))

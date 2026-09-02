@@ -1566,6 +1566,26 @@ async def api_create_room(
 # ---------------------------------------------------------------------------
 
 
+@app.post("/api/rooms/{room_id}/photo")
+async def api_update_room_photo(
+    room_id: int,
+    photo: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """Replaces the room's shared photo (used by every attempt under it —
+    e.g. when the salesman revisits mid-construction with a newer photo)."""
+    room = get_owned_room(room_id, user, db)
+    try:
+        photo_path = await save_validated_upload(photo, ROOMS_DIR)
+    except UploadValidationError as exc:
+        return error_response(exc.status_code, exc.error, exc.message)
+    room.photo_path = photo_path
+    db.commit()
+    db.refresh(room)
+    return JSONResponse(content={"room": room_detail(room)})
+
+
 @app.get("/api/rooms/{room_id}")
 def api_get_room(room_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     room = get_owned_room(room_id, user, db)
@@ -1671,6 +1691,17 @@ def api_add_stroke_to_attempt(
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
     result = _add_stroke(attempt, item_id, body.points, db)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.post("/api/attempts/{attempt_id}/items/{item_id}/strokes/undo")
+def api_undo_stroke_from_attempt(
+    attempt_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    result = _undo_stroke(attempt, item_id, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})

@@ -42,7 +42,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger("mytryon")
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
 FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
 
 # Disk root for uploaded photos and renders: /data on Render (mounted disk),
@@ -495,7 +494,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.mount("/media", StaticFiles(directory=str(DATA_ROOT)), name="media")
 
 
@@ -1009,7 +1007,6 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_
             "status": "done",
             "render_id": render.id,
             "attempt_id": attempt.id,
-            "project_id": attempt.id,  # legacy alias for the static/ frontend
             "image_url": f"/media/{relative_path}",
         }
     except Exception:
@@ -1191,47 +1188,9 @@ def attempt_detail(attempt: Attempt) -> dict:
     }
 
 
-# Legacy shapes — exactly what the existing static/ frontend expects. "id" on
-# these is an attempt id, since one legacy "project" == one customer + one
-# room + one attempt.
-
-
-def legacy_project_summary(attempt: Attempt) -> dict:
-    room = attempt.room
-    latest_render = attempt.renders[-1] if attempt.renders else None
-    return {
-        "id": attempt.id,
-        "customer_name": room.customer.name,
-        "room_type": room.room_type,
-        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
-        "thumbnail_url": f"/media/{latest_render.image_path}" if latest_render else f"/media/{room.photo_path}",
-        "has_render": latest_render is not None,
-    }
-
-
-def legacy_project_detail(attempt: Attempt) -> dict:
-    room = attempt.room
-    latest_render = attempt.renders[-1] if attempt.renders else None
-    return {
-        "id": attempt.id,
-        "customer_name": room.customer.name,
-        "room_type": room.room_type,
-        "room_photo_url": f"/media/{room.photo_path}",
-        "room_treatment": attempt.room_treatment,
-        "lighting": attempt.lighting,
-        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
-        "items": [item_public(i) for i in attempt.items],
-        "renders": [render_public(r) for r in attempt.renders],
-        "latest_render": (
-            {"id": latest_render.id, "image_url": f"/media/{latest_render.image_path}"} if latest_render else None
-        ),
-    }
-
-
 # ---------------------------------------------------------------------------
-# Shared item/stroke/finish/generate logic — used by both the legacy
-# /api/projects/* routes (static/ frontend) and the new /api/attempts/*
-# routes, so the two surfaces can never drift apart.
+# Shared item/stroke/finish/generate logic, used by the /api/attempts/*
+# routes below.
 # ---------------------------------------------------------------------------
 
 
@@ -1344,152 +1303,9 @@ def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: 
     return JSONResponse(content={"job_id": job_id})
 
 
-# ---------------------------------------------------------------------------
-# Legacy project routes — kept byte-for-byte compatible so static/ keeps
-# working unmodified. "project_id" in these paths is an attempt id.
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/projects")
-def api_list_projects(q: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
-    query = (
-        db.query(Attempt)
-        .join(Room, Attempt.room_id == Room.id)
-        .join(Customer, Room.customer_id == Customer.id)
-        .filter(Customer.user_id == user.id)
-    )
-    if q.strip():
-        query = query.filter(Customer.name.ilike(f"%{q.strip()}%"))
-    attempts = query.order_by(Attempt.id.desc()).all()
-    return JSONResponse(content={"projects": [legacy_project_summary(a) for a in attempts]})
-
-
-@app.post("/api/projects")
-async def api_create_project(
-    customer_name: str = Form(...),
-    room_type: str = Form(...),
-    room_photo: UploadFile = File(...),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    if not customer_name.strip():
-        return error_response(400, "missing_customer_name", "Please enter the customer's name.")
-    if room_type not in ROOM_TYPES:
-        return error_response(400, "invalid_room_type", "Please choose a room type.")
-    try:
-        photo_path = await save_validated_upload(room_photo, ROOMS_DIR)
-    except UploadValidationError as exc:
-        return error_response(exc.status_code, exc.error, exc.message)
-
-    customer = Customer(user_id=user.id, name=customer_name.strip())
-    db.add(customer)
-    db.flush()
-    room = Room(customer_id=customer.id, room_type=room_type, photo_path=photo_path)
-    db.add(room)
-    db.flush()
-    attempt = Attempt(room_id=room.id, room_treatment=DEFAULT_ROOM_TREATMENT, lighting=DEFAULT_LIGHTING)
-    db.add(attempt)
-    db.commit()
-    db.refresh(attempt)
-    return JSONResponse(content={"project": legacy_project_detail(attempt)})
-
-
-@app.get("/api/projects/{project_id}")
-def api_get_project(project_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    return JSONResponse(content={"project": legacy_project_detail(attempt)})
-
-
-@app.post("/api/projects/{project_id}/items")
-async def api_add_item(
-    project_id: int,
-    category: str = Form(...),
-    type: str = Form(...),
-    width_ft: float = Form(...),
-    photo: UploadFile = File(...),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    result = await _add_item_to_attempt(attempt, category, type, width_ft, photo, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"project": legacy_project_detail(result)})
-
-
-@app.delete("/api/projects/{project_id}/items/{item_id}")
-def api_delete_item(
-    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    result = _delete_item_from_attempt(attempt, item_id, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"project": legacy_project_detail(result)})
-
-
-@app.post("/api/projects/{project_id}/items/{item_id}/strokes")
-def api_add_stroke(
-    project_id: int,
-    item_id: int,
-    body: StrokeBody,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    result = _add_stroke(attempt, item_id, body.points, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"project": legacy_project_detail(result)})
-
-
-@app.post("/api/projects/{project_id}/items/{item_id}/strokes/undo")
-def api_undo_stroke(
-    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    result = _undo_stroke(attempt, item_id, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"project": legacy_project_detail(result)})
-
-
-@app.delete("/api/projects/{project_id}/items/{item_id}/strokes")
-def api_clear_strokes(
-    project_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    result = _clear_strokes(attempt, item_id, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"project": legacy_project_detail(result)})
-
-
 class FinishBody(BaseModel):
     room_treatment: str
     lighting: str
-
-
-@app.post("/api/projects/{project_id}/finish")
-def api_set_finish(
-    project_id: int, body: FinishBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    result = _set_finish(attempt, body.room_treatment, body.lighting, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"project": legacy_project_detail(result)})
-
-
-@app.post("/api/projects/{project_id}/generate")
-async def api_generate(
-    project_id: int,
-    ignore_placement: bool = False,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    attempt = get_owned_attempt(project_id, user, db)
-    return _start_generation(attempt, ignore_placement, user, db)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2002,7 +1818,6 @@ def api_debug_generation(render_id: int, admin: User = Depends(require_admin), d
         content={
             "render_id": render.id,
             "attempt_id": render.attempt_id,
-            "project_id": render.attempt_id,  # legacy alias
             "customer_name": room.customer.name if room else None,
             "output_image_url": f"/media/{render.image_path}",
             "created_at": render.created_at.isoformat() if render.created_at else None,
@@ -2026,29 +1841,18 @@ def debug_latest(admin: User = Depends(require_admin), db: Session = Depends(get
 
 
 # ---------------------------------------------------------------------------
-# React frontend — served at /app, SPA fallback to index.html. The existing
-# static/ app keeps serving from its current routes untouched, below.
+# React frontend — served at /, SPA fallback to index.html for client-side
+# routing on any path that isn't a real built asset.
 # ---------------------------------------------------------------------------
 
 
-@app.get("/app")
-@app.get("/app/{full_path:path}")
+@app.get("/{full_path:path}")
 async def serve_react_app(full_path: str = "") -> Response:
+    if full_path.startswith(("api/", "media/")):
+        raise HTTPException(status_code=404)
     if not FRONTEND_DIST_DIR.is_dir():
         raise HTTPException(status_code=404, detail="Frontend build not found. Run `npm run build` in frontend/.")
     candidate = FRONTEND_DIST_DIR / full_path
     if full_path and candidate.is_file():
         return FileResponse(str(candidate))
     return FileResponse(str(FRONTEND_DIST_DIR / "index.html"))
-
-
-# ---------------------------------------------------------------------------
-# Static frontend — one page shell, client-side routing.
-# ---------------------------------------------------------------------------
-
-
-@app.get("/{full_path:path}")
-async def spa(full_path: str) -> Response:
-    if full_path.startswith(("api/", "media/", "static/", "app/")):
-        raise HTTPException(status_code=404)
-    return FileResponse(str(STATIC_DIR / "index.html"))

@@ -1,4 +1,14 @@
+import { useEffect } from "react";
+
 export function BottomSheet({ title, onClose, children }) {
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <div
       className="sheet-backdrop"

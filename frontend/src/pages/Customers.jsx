@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
-import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
+import { ErrorBlock, RowSkeleton } from "../components/StateBlock.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { initials } from "../utils.js";
 
@@ -81,7 +81,7 @@ export default function Customers() {
         onChange={(e) => setQuery(e.target.value)}
       />
 
-      {customers === null && !error ? <Loading /> : null}
+      {customers === null && !error ? <RowSkeleton /> : null}
       {error ? <ErrorBlock message={error} onRetry={load} /> : null}
       {customers !== null ? (
         filtered.length ? (

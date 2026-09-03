@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
-import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
+import { ErrorBlock, RoomCardSkeleton } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { formatShortDate } from "../utils.js";
 
@@ -36,13 +36,9 @@ export default function Customer() {
     }
     setSharing(true);
     try {
-      const roomDetails = await Promise.all(rooms.map((r) => api.get(`/api/rooms/${r.id}`)));
-      const targets = [];
-      roomDetails.forEach(({ room, attempts }) => {
-        const picked = attempts.find((a) => a.is_picked && a.latest_render);
-        const best = picked || attempts.find((a) => a.latest_render);
-        if (best) targets.push({ url: best.latest_render.image_url, name: room.room_type });
-      });
+      const targets = rooms
+        .filter((r) => r.has_render)
+        .map((r) => ({ url: r.thumbnail_url, name: r.room_type }));
       if (!targets.length) {
         toast("No renders yet to send.");
         return;
@@ -76,18 +72,24 @@ export default function Customer() {
     }
   }
 
-  if (!data && !error) return <div className="screen"><Loading /></div>;
-  if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
+  if (error) return <div className="screen"><TopBar backTo="/" /><ErrorBlock message={error} onRetry={load} /></div>;
 
-  const { customer, rooms } = data;
+  const customer = data?.customer;
+  const rooms = data?.rooms;
 
   return (
     <div className="screen">
       <TopBar backTo="/" />
       <div className="eyebrow">Customer</div>
-      <h1 style={{ marginBottom: 18 }}>{customer.name}</h1>
+      {customer ? (
+        <h1 style={{ marginBottom: 18 }}>{customer.name}</h1>
+      ) : (
+        <div className="skel skel-line w-60" style={{ height: 28, marginBottom: 18 }} />
+      )}
 
-      {rooms.length ? (
+      {rooms == null ? (
+        <RoomCardSkeleton />
+      ) : rooms.length ? (
         rooms.map((r) => (
           <Link key={r.id} to={`/room/${r.id}`} className="room-card">
             <img className="thumb" src={r.thumbnail_url} alt="" loading="lazy" />
@@ -110,7 +112,13 @@ export default function Customer() {
         + Add a room
       </Link>
 
-      <button type="button" className="btn btn-whatsapp" style={{ marginTop: 18 }} disabled={sharing} onClick={handleSendAll}>
+      <button
+        type="button"
+        className="btn btn-whatsapp"
+        style={{ marginTop: 18 }}
+        disabled={sharing || rooms == null}
+        onClick={handleSendAll}
+      >
         {sharing ? "Preparing…" : "Send all to WhatsApp"}
       </button>
     </div>

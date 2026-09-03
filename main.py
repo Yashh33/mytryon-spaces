@@ -1128,6 +1128,11 @@ def customer_summary(customer: Customer) -> dict:
     }
 
 
+def thumbnail_url_from(render_path: str | None, fallback_photo_path: str | None) -> str | None:
+    path = render_path or fallback_photo_path
+    return f"/media/{path}" if path else None
+
+
 def room_summary(room: Room) -> dict:
     latest_attempt = room.attempts[-1] if room.attempts else None
     latest_render = latest_attempt.renders[-1] if latest_attempt and latest_attempt.renders else None
@@ -1323,8 +1328,74 @@ def api_job_status(job_id: str, user: User = Depends(get_current_user)) -> JSONR
 
 @app.get("/api/customers")
 def api_list_customers(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
-    customers = db.query(Customer).filter(Customer.user_id == user.id).order_by(Customer.id.desc()).all()
-    return JSONResponse(content={"customers": [customer_summary(c) for c in customers]})
+    rows = db.execute(
+        text(
+            """
+            WITH my_rooms AS (
+                SELECT r.id, r.customer_id, r.photo_path
+                FROM rooms r
+                JOIN customers c ON c.id = r.customer_id
+                WHERE c.user_id = :user_id
+            ),
+            counts AS (
+                SELECT
+                    mr.customer_id,
+                    COUNT(DISTINCT mr.id) AS room_count,
+                    COUNT(rd.id) AS render_count
+                FROM my_rooms mr
+                LEFT JOIN attempts a ON a.room_id = mr.id
+                LEFT JOIN renders rd ON rd.attempt_id = a.id
+                GROUP BY mr.customer_id
+            ),
+            ranked_renders AS (
+                SELECT
+                    mr.customer_id,
+                    rd.image_path,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mr.customer_id
+                        ORDER BY a.is_picked DESC, rd.created_at DESC, rd.id DESC
+                    ) AS rn
+                FROM my_rooms mr
+                JOIN attempts a ON a.room_id = mr.id
+                JOIN renders rd ON rd.attempt_id = a.id
+            ),
+            fallback_room AS (
+                SELECT DISTINCT ON (mr.customer_id)
+                    mr.customer_id, mr.photo_path
+                FROM my_rooms mr
+                ORDER BY mr.customer_id, mr.id DESC
+            )
+            SELECT
+                c.id,
+                c.name,
+                c.created_at,
+                COALESCE(counts.room_count, 0) AS room_count,
+                COALESCE(counts.render_count, 0) AS render_count,
+                ranked_renders.image_path AS render_thumbnail_path,
+                fallback_room.photo_path AS fallback_thumbnail_path
+            FROM customers c
+            LEFT JOIN counts ON counts.customer_id = c.id
+            LEFT JOIN ranked_renders ON ranked_renders.customer_id = c.id AND ranked_renders.rn = 1
+            LEFT JOIN fallback_room ON fallback_room.customer_id = c.id
+            WHERE c.user_id = :user_id
+            ORDER BY c.id DESC
+            """
+        ),
+        {"user_id": user.id},
+    ).mappings().all()
+
+    customers = [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "room_count": row["room_count"],
+            "render_count": row["render_count"],
+            "thumbnail_url": thumbnail_url_from(row["render_thumbnail_path"], row["fallback_thumbnail_path"]),
+        }
+        for row in rows
+    ]
+    return JSONResponse(content={"customers": customers})
 
 
 class CreateCustomerBody(BaseModel):
@@ -1349,9 +1420,77 @@ def api_get_customer(
     customer_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     customer = get_owned_customer(customer_id, user, db)
-    return JSONResponse(
-        content={"customer": customer_summary(customer), "rooms": [room_summary(r) for r in customer.rooms]}
-    )
+
+    room_rows = db.execute(
+        text(
+            """
+            WITH room_counts AS (
+                SELECT
+                    r.id AS room_id,
+                    COUNT(DISTINCT a.id) AS attempt_count,
+                    COUNT(rd.id) AS render_count
+                FROM rooms r
+                LEFT JOIN attempts a ON a.room_id = r.id
+                LEFT JOIN renders rd ON rd.attempt_id = a.id
+                WHERE r.customer_id = :customer_id
+                GROUP BY r.id
+            ),
+            ranked_renders AS (
+                SELECT
+                    r.id AS room_id,
+                    rd.image_path,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY r.id
+                        ORDER BY a.is_picked DESC, rd.created_at DESC, rd.id DESC
+                    ) AS rn
+                FROM rooms r
+                JOIN attempts a ON a.room_id = r.id
+                JOIN renders rd ON rd.attempt_id = a.id
+                WHERE r.customer_id = :customer_id
+            )
+            SELECT
+                r.id,
+                r.customer_id,
+                r.room_type,
+                r.photo_path,
+                r.created_at,
+                COALESCE(room_counts.attempt_count, 0) AS attempt_count,
+                COALESCE(room_counts.render_count, 0) AS render_count,
+                ranked_renders.image_path AS render_thumbnail_path
+            FROM rooms r
+            LEFT JOIN room_counts ON room_counts.room_id = r.id
+            LEFT JOIN ranked_renders ON ranked_renders.room_id = r.id AND ranked_renders.rn = 1
+            WHERE r.customer_id = :customer_id
+            ORDER BY r.id
+            """
+        ),
+        {"customer_id": customer.id},
+    ).mappings().all()
+
+    rooms = [
+        {
+            "id": row["id"],
+            "customer_id": row["customer_id"],
+            "room_type": row["room_type"],
+            "photo_url": f"/media/{row['photo_path']}",
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "attempt_count": row["attempt_count"],
+            "render_count": row["render_count"],
+            "has_render": row["render_thumbnail_path"] is not None,
+            "thumbnail_url": thumbnail_url_from(row["render_thumbnail_path"], row["photo_path"]),
+        }
+        for row in room_rows
+    ]
+
+    customer_data = {
+        "id": customer.id,
+        "name": customer.name,
+        "created_at": customer.created_at.isoformat() if customer.created_at else None,
+        "room_count": len(rooms),
+        "render_count": sum(r["render_count"] for r in rooms),
+    }
+
+    return JSONResponse(content={"customer": customer_data, "rooms": rooms})
 
 
 @app.post("/api/customers/{customer_id}/rooms")

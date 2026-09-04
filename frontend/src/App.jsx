@@ -16,6 +16,10 @@ import Adjust from "./pages/Adjust.jsx";
 import Admin from "./pages/Admin.jsx";
 import AdminUser from "./pages/AdminUser.jsx";
 import AdminPrompt from "./pages/AdminPrompt.jsx";
+import AdminUsage from "./pages/AdminUsage.jsx";
+import Super from "./pages/Super.jsx";
+
+const OWNER_ROLES = ["owner", "superadmin"];
 
 export default function App() {
   return (
@@ -106,7 +110,7 @@ export default function App() {
           <Route
             path="/admin"
             element={
-              <RequireAuth adminOnly>
+              <RequireAuth roles={OWNER_ROLES}>
                 <Admin />
               </RequireAuth>
             }
@@ -114,7 +118,7 @@ export default function App() {
           <Route
             path="/admin/user/:id"
             element={
-              <RequireAuth adminOnly>
+              <RequireAuth roles={OWNER_ROLES}>
                 <AdminUser />
               </RequireAuth>
             }
@@ -122,8 +126,24 @@ export default function App() {
           <Route
             path="/admin/prompt"
             element={
-              <RequireAuth adminOnly>
+              <RequireAuth roles={OWNER_ROLES}>
                 <AdminPrompt />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/usage"
+            element={
+              <RequireAuth roles={OWNER_ROLES}>
+                <AdminUsage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/super"
+            element={
+              <RequireAuth roles={["superadmin"]}>
+                <Super />
               </RequireAuth>
             }
           />

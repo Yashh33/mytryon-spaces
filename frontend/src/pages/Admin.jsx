@@ -38,9 +38,14 @@ export default function Admin() {
       <TopBar
         backTo="/"
         right={
-          <Link to="/admin/prompt" className="link-btn">
-            Edit prompt &#8250;
-          </Link>
+          <div style={{ display: "flex", gap: 14 }}>
+            <Link to="/admin/usage" className="link-btn">
+              Usage &#8250;
+            </Link>
+            <Link to="/admin/prompt" className="link-btn">
+              Edit prompt &#8250;
+            </Link>
+          </div>
         }
       />
       <div className="eyebrow">Admin</div>

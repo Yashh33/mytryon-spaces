@@ -5,7 +5,9 @@ import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
 import { ErrorBlock, RowSkeleton } from "../components/StateBlock.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { initials } from "../utils.js";
+import { initials, formatDate } from "../utils.js";
+
+const OWNER_ROLES = ["owner", "superadmin"];
 
 export default function Customers() {
   const { user, logout } = useAuth();
@@ -15,6 +17,7 @@ export default function Customers() {
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [credits, setCredits] = useState(null);
   const menuRef = useRef(null);
 
   async function load() {
@@ -29,7 +32,14 @@ export default function Customers() {
 
   useEffect(() => {
     load();
+    api
+      .get("/api/shop/credits")
+      .then(setCredits)
+      .catch(() => {});
   }, []);
+
+  const isOwnerRole = OWNER_ROLES.includes(user.role);
+  const showLowCreditStrip = isOwnerRole && credits && credits.balance < credits.monthly_credits * 0.1;
 
   useEffect(() => {
     if (!menuOpen) return undefined;
@@ -55,9 +65,20 @@ export default function Customers() {
           </button>
           {menuOpen ? (
             <div className="menu-dropdown">
-              {user.role === "admin" ? (
+              {credits ? (
+                <div className="menu-credits">
+                  <div className="amount">{credits.balance.toLocaleString()} credits left</div>
+                  <div className="reset">RESETS {formatDate(credits.cycle_ends_on).toUpperCase()}</div>
+                </div>
+              ) : null}
+              {isOwnerRole ? (
                 <Link to="/admin" onClick={() => setMenuOpen(false)}>
                   Admin
+                </Link>
+              ) : null}
+              {user.role === "superadmin" ? (
+                <Link to="/super" onClick={() => setMenuOpen(false)}>
+                  Shops
                 </Link>
               ) : null}
               <button type="button" onClick={logout} style={{ color: "#C0392B" }}>
@@ -67,6 +88,13 @@ export default function Customers() {
           ) : null}
         </div>
       </div>
+
+      {showLowCreditStrip ? (
+        <div className="credit-warning-strip">
+          <div className="amount">{credits.balance.toLocaleString()} credits left</div>
+          <div className="note">Contact support to top up this month's credit pool.</div>
+        </div>
+      ) : null}
 
       <button type="button" className="btn btn-primary" onClick={() => setShowAdd(true)}>
         + New customer

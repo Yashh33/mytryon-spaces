@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import calendar
 import io
 import logging
 import mimetypes
@@ -8,6 +9,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import bcrypt
@@ -195,13 +197,17 @@ PROMPT_PLACEHOLDERS = [
     },
 ]
 
-IMAGE_QUALITY_KEY = "image_quality"
-DEFAULT_IMAGE_QUALITY = "low"
-IMAGE_QUALITY_CHOICES = ["low", "medium", "high"]
+IMAGE_QUALITY = "medium"
 
-SIZE_MODE_KEY = "size_mode"
-DEFAULT_SIZE_MODE = "auto"
-SIZE_MODE_CHOICES = ["auto", "1024x1024", "1024x1536", "1536x1024"]
+# ---------------------------------------------------------------------------
+
+CREDITS_PER_GENERATION = 30
+SUPERADMIN_MOBILE = "9016233480"
+
+# Published gpt-image-2 rates, dollars per 1M tokens.
+IMAGE_INPUT_RATE_PER_M = 8.0
+TEXT_INPUT_RATE_PER_M = 5.0
+IMAGE_OUTPUT_RATE_PER_M = 30.0
 
 # ---------------------------------------------------------------------------
 
@@ -286,13 +292,24 @@ class Base(DeclarativeBase):
     pass
 
 
+class Shop(Base):
+    __tablename__ = "shops"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    monthly_credits = Column(Integer, nullable=False, default=15000, server_default="15000")
+    cycle_start_day = Column(Integer, nullable=False, default=1, server_default="1")
+    active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)  # null only for superadmin
     name = Column(String, nullable=False)
     mobile = Column(String, nullable=False, unique=True)
     password_hash = Column(String, nullable=False)
-    role = Column(String, nullable=False, default="salesman")  # 'salesman' | 'admin'
+    role = Column(String, nullable=False, default="salesman")  # 'superadmin' | 'owner' | 'salesman'
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -375,6 +392,31 @@ class GenerationDebug(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class CreditLedger(Base):
+    """Append-only spend/allocation history. A shop's balance is always
+    SUM(delta) over rows in the current billing cycle — never a stored
+    running total. A successful generation is recorded as two rows: the
+    -30 hold inserted the moment the job starts (so concurrent jobs see
+    the reduced balance immediately, and so the accounting-relevant
+    fields — delta/reason/shop/user/attempt — are never touched again
+    once written), and a zero-delta row added on completion carrying the
+    real token/cost telemetry (unknown until the OpenAI call returns)."""
+
+    __tablename__ = "credit_ledger"
+    id = Column(Integer, primary_key=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    attempt_id = Column(Integer, ForeignKey("attempts.id"), nullable=True)
+    render_id = Column(Integer, ForeignKey("renders.id"), nullable=True)
+    delta = Column(Integer, nullable=False)  # negative = spend
+    reason = Column(String, nullable=False)  # 'generation' | 'refund' | 'allocation' | 'adjustment'
+    tokens_in = Column(Integer, nullable=True)
+    tokens_out = Column(Integer, nullable=True)
+    usd_cost = Column(Float, nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -451,6 +493,42 @@ def migrate_legacy_projects(db: Session) -> None:
     logger.info("legacy project migration complete: %d projects migrated", len(rows))
 
 
+def migrate_to_shops(db: Session) -> None:
+    """One-time multi-tenant setup: creates the initial 'Reflection
+    Lifestyle' shop, assigns every existing shop-less user to it,
+    promotes the existing admin to owner, creates the superadmin account,
+    and records the opening credit allocation. Idempotent: no-ops once
+    any shop exists."""
+    db.flush()
+    if db.query(Shop).count() > 0:
+        return
+
+    shop = Shop(name="Reflection Lifestyle", monthly_credits=15000, cycle_start_day=1, active=True)
+    db.add(shop)
+    db.flush()
+
+    for u in db.query(User).filter(User.shop_id.is_(None)).all():
+        u.shop_id = shop.id
+        if u.role == "admin":
+            u.role = "owner"
+
+    if db.query(User).filter(User.mobile == SUPERADMIN_MOBILE).first() is None:
+        db.add(
+            User(
+                shop_id=None,
+                name="Yash",
+                mobile=SUPERADMIN_MOBILE,
+                password_hash=hash_password(uuid.uuid4().hex),
+                role="superadmin",
+                active=True,
+            )
+        )
+
+    db.add(CreditLedger(shop_id=shop.id, user_id=None, delta=shop.monthly_credits, reason="allocation"))
+    db.flush()
+    logger.info("multi-tenant migration complete: created shop %r", shop.name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -460,6 +538,22 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_x"))
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_y"))
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS strokes JSON"))
+        # migrate DBs created before multi-tenant shops existed: add the
+        # column additively (users predates shops; create_all only creates
+        # brand-new tables, it won't alter this existing one).
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS shop_id INTEGER"))
+        conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_shop_id_fkey') THEN
+                        ALTER TABLE users ADD CONSTRAINT users_shop_id_fkey FOREIGN KEY (shop_id) REFERENCES shops(id);
+                    END IF;
+                END $$;
+                """
+            )
+        )
     db = SessionLocal()
     try:
         migrate_legacy_projects(db)
@@ -479,10 +573,9 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first() is None:
             db.add(Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT))
             logger.info("seeded default generation prompt")
-        if db.query(Setting).filter(Setting.key == IMAGE_QUALITY_KEY).first() is None:
-            db.add(Setting(key=IMAGE_QUALITY_KEY, value=DEFAULT_IMAGE_QUALITY))
-        if db.query(Setting).filter(Setting.key == SIZE_MODE_KEY).first() is None:
-            db.add(Setting(key=SIZE_MODE_KEY, value=DEFAULT_SIZE_MODE))
+        db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
+
+        migrate_to_shops(db)
 
         db.commit()
     except Exception:
@@ -536,9 +629,21 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admins only.")
+def require_owner(user: User = Depends(get_current_user)) -> User:
+    if user.role != "owner" or user.shop_id is None:
+        raise HTTPException(status_code=403, detail="Owners only.")
+    return user
+
+
+def require_owner_or_superadmin(user: User = Depends(get_current_user)) -> User:
+    if user.role not in ("owner", "superadmin"):
+        raise HTTPException(status_code=403, detail="Owners only.")
+    return user
+
+
+def require_superadmin(user: User = Depends(get_current_user)) -> User:
+    if user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Superadmin only.")
     return user
 
 
@@ -676,6 +781,59 @@ def set_setting(db: Session, key: str, value: str) -> Setting:
 
 def get_active_prompt(db: Session) -> str:
     return get_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
+
+
+# ---------------------------------------------------------------------------
+# Credits
+# ---------------------------------------------------------------------------
+
+
+def _clamp_day(year: int, month: int, day: int) -> int:
+    return min(day, calendar.monthrange(year, month)[1])
+
+
+def cycle_window(shop: Shop, now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Returns the [start, end) UTC window of the billing cycle containing
+    `now`, based on the shop's cycle_start_day. Clamped to the last day of
+    a short month (e.g. day 31 in February lands on the 28th/29th)."""
+    now = now or datetime.now(timezone.utc)
+    start_day_this_month = _clamp_day(now.year, now.month, shop.cycle_start_day)
+    if now.day >= start_day_this_month:
+        start_year, start_month = now.year, now.month
+    else:
+        start_month = now.month - 1 or 12
+        start_year = now.year if now.month > 1 else now.year - 1
+    start = datetime(start_year, start_month, _clamp_day(start_year, start_month, shop.cycle_start_day), tzinfo=timezone.utc)
+    end_month = start_month + 1
+    end_year = start_year
+    if end_month > 12:
+        end_month = 1
+        end_year += 1
+    end = datetime(end_year, end_month, _clamp_day(end_year, end_month, shop.cycle_start_day), tzinfo=timezone.utc)
+    return start, end
+
+
+def shop_balance(db: Session, shop: Shop, now: datetime | None = None) -> int:
+    start, end = cycle_window(shop, now)
+    total = db.query(func.coalesce(func.sum(CreditLedger.delta), 0)).filter(
+        CreditLedger.shop_id == shop.id,
+        CreditLedger.created_at >= start,
+        CreditLedger.created_at < end,
+    ).scalar()
+    return int(total or 0)
+
+
+def compute_usd_cost(usage: dict | None) -> float | None:
+    if not usage:
+        return None
+    in_details = usage.get("input_tokens_details") or {}
+    out_details = usage.get("output_tokens_details") or {}
+    image_in = in_details.get("image_tokens", 0) or 0
+    text_in = in_details.get("text_tokens", 0) or 0
+    image_out = out_details.get("image_tokens", 0) or 0
+    cost = (image_in * IMAGE_INPUT_RATE_PER_M + text_in * TEXT_INPUT_RATE_PER_M) / 1_000_000
+    cost += (image_out * IMAGE_OUTPUT_RATE_PER_M) / 1_000_000
+    return round(cost, 6)
 
 
 PLACEMENT_BLOCK_RE = re.compile(r"\{\{#PLACEMENT\}\}(.*?)\{\{/PLACEMENT\}\}", re.DOTALL)
@@ -922,7 +1080,12 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 JOBS: dict[str, dict] = {}
 
 
-async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_placement: bool = False) -> None:
+def refund_generation_credits(db: Session, shop_id: int, user_id: int, attempt_id: int | None) -> None:
+    db.add(CreditLedger(shop_id=shop_id, user_id=user_id, attempt_id=attempt_id, delta=CREDITS_PER_GENERATION, reason="refund"))
+    db.commit()
+
+
+async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id: int, ignore_placement: bool = False) -> None:
     db = SessionLocal()
     try:
         attempt = (
@@ -934,9 +1097,11 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_
         )
         if attempt is None:
             JOBS[job_id] = {"status": "error", "message": "That attempt could not be found."}
+            refund_generation_credits(db, shop_id, user_id, None)
             return
         if not attempt.items:
             JOBS[job_id] = {"status": "error", "message": "Add at least one piece of furniture first."}
+            refund_generation_credits(db, shop_id, user_id, attempt.id)
             return
 
         room = attempt.room
@@ -944,12 +1109,9 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_
         template = get_active_prompt(db)
         prompt = build_prompt(template, room.room_type, attempt.items, marked, attempt.room_treatment, attempt.lighting)
 
-        quality = get_setting(db, IMAGE_QUALITY_KEY, DEFAULT_IMAGE_QUALITY)
-        size_mode = get_setting(db, SIZE_MODE_KEY, DEFAULT_SIZE_MODE)
-
         room_path = DATA_ROOT / room.photo_path
         with Image.open(room_path) as room_image:
-            size = derive_size(*room_image.size) if size_mode == "auto" else size_mode
+            size = derive_size(*room_image.size)
 
         image_files: list[tuple[str, bytes, str]] = []
         debug_images: list[dict] = []
@@ -973,10 +1135,11 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_
 
         try:
             result = await asyncio.to_thread(
-                call_image_api, prompt, image_files, size, quality, f"attempt:{attempt_id}"
+                call_image_api, prompt, image_files, size, IMAGE_QUALITY, f"attempt:{attempt_id}"
             )
         except GenerationError as exc:
             JOBS[job_id] = {"status": "error", "message": exc.message}
+            refund_generation_credits(db, shop_id, user_id, attempt.id)
             return
 
         filename = f"{uuid.uuid4().hex}.jpg"
@@ -994,11 +1157,25 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_
                 render_id=render.id,
                 prompt=prompt,
                 model=MODEL_NAME,
-                quality=quality,
+                quality=IMAGE_QUALITY,
                 size=size,
                 elapsed_s=result["elapsed_s"],
                 usage=result["usage"],
                 images=debug_images,
+            )
+        )
+        usage = result["usage"]
+        db.add(
+            CreditLedger(
+                shop_id=shop_id,
+                user_id=user_id,
+                attempt_id=attempt.id,
+                render_id=render.id,
+                delta=0,
+                reason="generation",
+                tokens_in=usage.get("input_tokens") if usage else None,
+                tokens_out=usage.get("output_tokens") if usage else None,
+                usd_cost=compute_usd_cost(usage),
             )
         )
         db.commit()
@@ -1012,6 +1189,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, ignore_
     except Exception:
         logger.exception("generation job failed job_id=%s attempt_id=%s", job_id, attempt_id)
         JOBS[job_id] = {"status": "error", "message": "Something went wrong generating your image. Please try again."}
+        db.rollback()
+        refund_generation_credits(db, shop_id, user_id, attempt_id)
     finally:
         db.close()
 
@@ -1300,11 +1479,22 @@ def _set_finish(attempt: Attempt, room_treatment: str, lighting: str, db: Sessio
 def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: Session) -> JSONResponse:
     if not attempt.items:
         return error_response(400, "no_items", "Add at least one piece of furniture first.")
+    shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
+    if shop is None:
+        return error_response(400, "no_shop", "Your account isn't assigned to a shop.")
+    if shop_balance(db, shop) < CREDITS_PER_GENERATION:
+        return error_response(
+            402,
+            "insufficient_credits",
+            "This month's credit pool is finished. Please contact the showroom owner to top up.",
+        )
     attempt.ignore_placement = ignore_placement
+    db.commit()
+    db.add(CreditLedger(shop_id=shop.id, user_id=user.id, attempt_id=attempt.id, delta=-CREDITS_PER_GENERATION, reason="generation"))
     db.commit()
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "processing"}
-    asyncio.create_task(run_generation_job(job_id, attempt.id, user.id, ignore_placement))
+    asyncio.create_task(run_generation_job(job_id, attempt.id, user.id, shop.id, ignore_placement))
     return JSONResponse(content={"job_id": job_id})
 
 
@@ -1722,6 +1912,199 @@ def api_pick_render(
 
 
 # ---------------------------------------------------------------------------
+# Shop credits
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/shop/credits")
+def api_shop_credits(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    if user.shop_id is None:
+        return error_response(400, "no_shop", "Your account isn't assigned to a shop.")
+    shop = db.query(Shop).filter(Shop.id == user.shop_id).first()
+    _, cycle_end = cycle_window(shop)
+    return JSONResponse(
+        content={
+            "balance": shop_balance(db, shop),
+            "monthly_credits": shop.monthly_credits,
+            "cycle_ends_on": cycle_end.date().isoformat(),
+        }
+    )
+
+
+@app.get("/api/admin/shop/usage")
+def api_admin_shop_usage(
+    owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if owner.shop_id is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
+    shop = db.query(Shop).filter(Shop.id == owner.shop_id).first()
+    start, end = cycle_window(shop)
+
+    per_salesman = db.execute(
+        text(
+            """
+            SELECT
+                u.id AS user_id,
+                u.name,
+                COUNT(*) FILTER (WHERE cl.reason = 'generation' AND cl.render_id IS NOT NULL) AS generations,
+                COALESCE(-SUM(cl.delta) FILTER (WHERE cl.reason IN ('generation', 'refund')), 0) AS credits_spent,
+                COALESCE(SUM(cl.usd_cost) FILTER (WHERE cl.reason = 'generation'), 0) AS usd_cost
+            FROM users u
+            LEFT JOIN credit_ledger cl
+                ON cl.user_id = u.id AND cl.shop_id = :shop_id AND cl.created_at >= :start AND cl.created_at < :end
+            WHERE u.shop_id = :shop_id AND u.role = 'salesman'
+            GROUP BY u.id, u.name
+            ORDER BY credits_spent DESC, u.name
+            """
+        ),
+        {"shop_id": shop.id, "start": start, "end": end},
+    ).mappings().all()
+
+    daily = db.execute(
+        text(
+            """
+            SELECT
+                date_trunc('day', cl.created_at) AS day,
+                COUNT(*) FILTER (WHERE cl.reason = 'generation' AND cl.render_id IS NOT NULL) AS generations,
+                COALESCE(-SUM(cl.delta) FILTER (WHERE cl.reason IN ('generation', 'refund')), 0) AS credits_spent
+            FROM credit_ledger cl
+            WHERE cl.shop_id = :shop_id AND cl.created_at >= :start AND cl.created_at < :end
+            GROUP BY day
+            ORDER BY day
+            """
+        ),
+        {"shop_id": shop.id, "start": start, "end": end},
+    ).mappings().all()
+
+    return JSONResponse(
+        content={
+            "cycle_start": start.date().isoformat(),
+            "cycle_end": end.date().isoformat(),
+            "salesmen": [
+                {
+                    "user_id": r["user_id"],
+                    "name": r["name"],
+                    "generations": r["generations"],
+                    "credits_spent": r["credits_spent"],
+                    "usd_cost": float(r["usd_cost"]),
+                }
+                for r in per_salesman
+            ],
+            "daily": [
+                {"date": r["day"].date().isoformat(), "generations": r["generations"], "credits_spent": r["credits_spent"]}
+                for r in daily
+            ],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Superadmin — shops
+# ---------------------------------------------------------------------------
+
+
+def shop_public(db: Session, shop: Shop) -> dict:
+    return {
+        "id": shop.id,
+        "name": shop.name,
+        "monthly_credits": shop.monthly_credits,
+        "cycle_start_day": shop.cycle_start_day,
+        "active": shop.active,
+        "balance": shop_balance(db, shop),
+        "salesman_count": db.query(User).filter(User.shop_id == shop.id, User.role == "salesman").count(),
+        "created_at": shop.created_at.isoformat() if shop.created_at else None,
+    }
+
+
+@app.get("/api/super/shops")
+def api_super_list_shops(
+    superadmin: User = Depends(require_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    shops = db.query(Shop).order_by(Shop.id).all()
+    return JSONResponse(content={"shops": [shop_public(db, s) for s in shops]})
+
+
+class CreateShopBody(BaseModel):
+    name: str
+    monthly_credits: int = 15000
+    cycle_start_day: int = 1
+
+
+@app.post("/api/super/shops")
+def api_super_create_shop(
+    body: CreateShopBody, superadmin: User = Depends(require_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if not body.name.strip():
+        return error_response(400, "missing_name", "Please enter a shop name.")
+    if body.monthly_credits < 0:
+        return error_response(400, "invalid_credits", "Monthly credits can't be negative.")
+    if not (1 <= body.cycle_start_day <= 28):
+        return error_response(400, "invalid_cycle_day", "Cycle start day must be between 1 and 28.")
+    shop = Shop(name=body.name.strip(), monthly_credits=body.monthly_credits, cycle_start_day=body.cycle_start_day, active=True)
+    db.add(shop)
+    db.commit()
+    db.refresh(shop)
+    db.add(CreditLedger(shop_id=shop.id, user_id=None, delta=shop.monthly_credits, reason="allocation"))
+    db.commit()
+    return JSONResponse(content={"shop": shop_public(db, shop)})
+
+
+class UpdateShopBody(BaseModel):
+    name: str | None = None
+    monthly_credits: int | None = None
+    active: bool | None = None
+
+
+@app.patch("/api/super/shops/{shop_id}")
+def api_super_update_shop(
+    shop_id: int, body: UpdateShopBody, superadmin: User = Depends(require_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    shop = db.query(Shop).filter(Shop.id == shop_id).first()
+    if shop is None:
+        return error_response(404, "shop_not_found", "That shop could not be found.")
+    if body.name is not None:
+        if not body.name.strip():
+            return error_response(400, "missing_name", "Please enter a shop name.")
+        shop.name = body.name.strip()
+    if body.monthly_credits is not None:
+        if body.monthly_credits < 0:
+            return error_response(400, "invalid_credits", "Monthly credits can't be negative.")
+        shop.monthly_credits = body.monthly_credits
+    if body.active is not None:
+        shop.active = body.active
+    db.commit()
+    db.refresh(shop)
+    return JSONResponse(content={"shop": shop_public(db, shop)})
+
+
+class AdjustCreditsBody(BaseModel):
+    delta: int
+    note: str = ""
+
+
+@app.post("/api/super/shops/{shop_id}/credits")
+def api_super_adjust_credits(
+    shop_id: int, body: AdjustCreditsBody, superadmin: User = Depends(require_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    shop = db.query(Shop).filter(Shop.id == shop_id).first()
+    if shop is None:
+        return error_response(404, "shop_not_found", "That shop could not be found.")
+    if body.delta == 0:
+        return error_response(400, "zero_delta", "Enter a non-zero adjustment.")
+    db.add(
+        CreditLedger(
+            shop_id=shop.id,
+            user_id=superadmin.id,
+            delta=body.delta,
+            reason="adjustment",
+            note=body.note.strip() or None,
+        )
+    )
+    db.commit()
+    return JSONResponse(content={"shop": shop_public(db, shop)})
+
+
+# ---------------------------------------------------------------------------
 # Admin routes
 # ---------------------------------------------------------------------------
 
@@ -1733,8 +2116,8 @@ class CreateSalesmanBody(BaseModel):
 
 
 @app.get("/api/admin/users")
-def api_admin_list_users(q: str = "", admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
-    query = db.query(User).filter(User.role == "salesman")
+def api_admin_list_users(q: str = "", owner: User = Depends(require_owner), db: Session = Depends(get_db)) -> JSONResponse:
+    query = db.query(User).filter(User.role == "salesman", User.shop_id == owner.shop_id)
     if q.strip():
         like = f"%{q.strip()}%"
         query = query.filter((User.name.ilike(like)) | (User.mobile.ilike(like)))
@@ -1753,14 +2136,21 @@ def api_admin_list_users(q: str = "", admin: User = Depends(require_admin), db: 
 
 @app.post("/api/admin/users")
 def api_admin_create_user(
-    body: CreateSalesmanBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    body: CreateSalesmanBody, owner: User = Depends(require_owner), db: Session = Depends(get_db)
 ) -> JSONResponse:
     mobile = body.mobile.strip()
     if not body.name.strip() or not mobile or not body.password:
         return error_response(400, "missing_fields", "Please fill in every field.")
     if db.query(User).filter(User.mobile == mobile).first() is not None:
         return error_response(409, "mobile_taken", "That mobile number is already registered.")
-    user = User(name=body.name.strip(), mobile=mobile, password_hash=hash_password(body.password), role="salesman", active=True)
+    user = User(
+        shop_id=owner.shop_id,
+        name=body.name.strip(),
+        mobile=mobile,
+        password_hash=hash_password(body.password),
+        role="salesman",
+        active=True,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -1768,12 +2158,12 @@ def api_admin_create_user(
 
 
 @app.get("/api/admin/users/{user_id}")
-def api_admin_user_detail(user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+def api_admin_user_detail(user_id: int, owner: User = Depends(require_owner), db: Session = Depends(get_db)) -> JSONResponse:
     """Legacy shape for the static/ admin detail screen: one flattened
     "project" card per room, customer name attached, renders aggregated
     across all of that room's attempts. See /api/admin/user/{id} for the
     real customers -> rooms -> renders hierarchy."""
-    target = db.query(User).filter(User.id == user_id).first()
+    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
     if target is None:
         return error_response(404, "user_not_found", "That salesman could not be found.")
     rooms = (
@@ -1803,11 +2193,11 @@ def api_admin_user_detail(user_id: int, admin: User = Depends(require_admin), db
 
 @app.get("/api/admin/user/{user_id}")
 def api_admin_user_detail_v2(
-    user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    user_id: int, owner: User = Depends(require_owner), db: Session = Depends(get_db)
 ) -> JSONResponse:
     """The real hierarchy: customers -> rooms -> renders (aggregated across
     each room's attempts)."""
-    target = db.query(User).filter(User.id == user_id).first()
+    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
     if target is None:
         return error_response(404, "user_not_found", "That salesman could not be found.")
     customers = db.query(Customer).filter(Customer.user_id == user_id).order_by(Customer.id.desc()).all()
@@ -1844,9 +2234,9 @@ class ResetPasswordBody(BaseModel):
 
 @app.post("/api/admin/users/{user_id}/reset-password")
 def api_admin_reset_password(
-    user_id: int, body: ResetPasswordBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    user_id: int, body: ResetPasswordBody, owner: User = Depends(require_owner), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    target = db.query(User).filter(User.id == user_id).first()
+    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
     if target is None:
         return error_response(404, "user_not_found", "That salesman could not be found.")
     if not body.password or len(body.password) < 4:
@@ -1857,8 +2247,8 @@ def api_admin_reset_password(
 
 
 @app.post("/api/admin/users/{user_id}/toggle-active")
-def api_admin_toggle_active(user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
-    target = db.query(User).filter(User.id == user_id).first()
+def api_admin_toggle_active(user_id: int, owner: User = Depends(require_owner), db: Session = Depends(get_db)) -> JSONResponse:
+    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
     if target is None:
         return error_response(404, "user_not_found", "That salesman could not be found.")
     target.active = not target.active
@@ -1877,15 +2267,11 @@ def prompt_setting_response(db: Session, setting: Setting | None) -> dict:
         "default_prompt": DEFAULT_GENERATION_PROMPT,
         "updated_at": setting.updated_at.isoformat() if setting and setting.updated_at else None,
         "placeholders": PROMPT_PLACEHOLDERS,
-        "image_quality": get_setting(db, IMAGE_QUALITY_KEY, DEFAULT_IMAGE_QUALITY),
-        "image_quality_choices": IMAGE_QUALITY_CHOICES,
-        "size_mode": get_setting(db, SIZE_MODE_KEY, DEFAULT_SIZE_MODE),
-        "size_mode_choices": SIZE_MODE_CHOICES,
     }
 
 
 @app.get("/api/admin/prompt")
-def api_admin_get_prompt(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+def api_admin_get_prompt(owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)) -> JSONResponse:
     setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
     return JSONResponse(content=prompt_setting_response(db, setting))
 
@@ -1896,7 +2282,7 @@ class PromptBody(BaseModel):
 
 @app.post("/api/admin/prompt")
 def api_admin_save_prompt(
-    body: PromptBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    body: PromptBody, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
     if not body.prompt.strip():
         return error_response(400, "empty_prompt", "The prompt can't be empty.")
@@ -1905,37 +2291,11 @@ def api_admin_save_prompt(
 
 
 @app.post("/api/admin/prompt/reset")
-def api_admin_reset_prompt(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+def api_admin_reset_prompt(
+    owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
     setting = set_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
     return JSONResponse(content=prompt_setting_response(db, setting))
-
-
-class ImageQualityBody(BaseModel):
-    value: str
-
-
-@app.post("/api/admin/settings/image-quality")
-def api_admin_set_image_quality(
-    body: ImageQualityBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
-) -> JSONResponse:
-    if body.value not in IMAGE_QUALITY_CHOICES:
-        return error_response(400, "invalid_quality", "That isn't a valid image quality.")
-    set_setting(db, IMAGE_QUALITY_KEY, body.value)
-    return JSONResponse(content={"image_quality": body.value})
-
-
-class SizeModeBody(BaseModel):
-    value: str
-
-
-@app.post("/api/admin/settings/size-mode")
-def api_admin_set_size_mode(
-    body: SizeModeBody, admin: User = Depends(require_admin), db: Session = Depends(get_db)
-) -> JSONResponse:
-    if body.value not in SIZE_MODE_CHOICES:
-        return error_response(400, "invalid_size_mode", "That isn't a valid size mode.")
-    set_setting(db, SIZE_MODE_KEY, body.value)
-    return JSONResponse(content={"size_mode": body.value})
 
 
 # ---------------------------------------------------------------------------
@@ -1944,7 +2304,9 @@ def api_admin_set_size_mode(
 
 
 @app.get("/api/debug/generation/{render_id}")
-def api_debug_generation(render_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> JSONResponse:
+def api_debug_generation(
+    render_id: int, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
     render = db.query(Render).filter(Render.id == render_id).first()
     if render is None:
         return error_response(404, "render_not_found", "That render could not be found.")
@@ -1972,7 +2334,7 @@ def api_debug_generation(render_id: int, admin: User = Depends(require_admin), d
 
 
 @app.get("/debug/latest")
-def debug_latest(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> Response:
+def debug_latest(owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)) -> Response:
     debug_row = db.query(GenerationDebug).order_by(GenerationDebug.id.desc()).first()
     if debug_row is None:
         raise HTTPException(status_code=404, detail="No generations have been recorded yet.")

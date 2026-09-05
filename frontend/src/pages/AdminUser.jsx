@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
@@ -14,11 +14,29 @@ export default function AdminUser() {
   const shopId = searchParams.get("shop_id");
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [toggling, setToggling] = useState(false);
   const toast = useToast();
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    function onDocClick(e) {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    }
+    function onKeyDown(e) {
+      if (e.key === "Escape") setMenuOpen(false);
+    }
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
 
   const backTo = withQuery("/admin", { shop_id: shopId });
 
@@ -38,6 +56,7 @@ export default function AdminUser() {
   }, [id, shopId]);
 
   async function handleToggleActive() {
+    setMenuOpen(false);
     setToggling(true);
     try {
       await api.post(withQuery(`/api/admin/users/${id}/toggle-active`, { shop_id: shopId }));
@@ -56,7 +75,51 @@ export default function AdminUser() {
 
   return (
     <div className="screen">
-      <TopBar backTo={backTo} />
+      <TopBar
+        backTo={backTo}
+        right={
+          <div style={{ position: "relative" }} ref={menuRef}>
+            <button type="button" className="menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Actions">
+              &#8942;
+            </button>
+            {menuOpen ? (
+              <div className="menu-dropdown">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShowEdit(true);
+                  }}
+                >
+                  Edit details
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShowReset(true);
+                  }}
+                >
+                  Reset password
+                </button>
+                <button type="button" disabled={toggling} onClick={handleToggleActive} style={{ color: "#C0392B" }}>
+                  {user.active ? "Deactivate" : "Activate"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShowDelete(true);
+                  }}
+                  style={{ color: "#C0392B" }}
+                >
+                  Delete salesman
+                </button>
+              </div>
+            ) : null}
+          </div>
+        }
+      />
       <h1>{user.name}</h1>
       <div className="mono muted" style={{ marginTop: 4 }}>
         {user.mobile} &middot; {customer_count} customer{customer_count === 1 ? "" : "s"}
@@ -99,22 +162,6 @@ export default function AdminUser() {
       ) : (
         <div className="empty-state">No customers yet.</div>
       )}
-
-      <hr className="divider" />
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <button type="button" className="btn btn-ghost" onClick={() => setShowEdit(true)}>
-          Edit details
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => setShowReset(true)}>
-          Reset password
-        </button>
-        <button type="button" className="btn btn-danger" disabled={toggling} onClick={handleToggleActive}>
-          {user.active ? "Deactivate" : "Activate"}
-        </button>
-        <button type="button" className="btn btn-danger" onClick={() => setShowDelete(true)}>
-          Delete salesman
-        </button>
-      </div>
 
       {showEdit ? (
         <EditDetailsSheet

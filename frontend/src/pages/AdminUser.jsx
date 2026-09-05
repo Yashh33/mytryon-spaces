@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
+import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
@@ -8,6 +9,7 @@ import { BottomSheet } from "../components/BottomSheet.jsx";
 import { formatDate, withQuery } from "../utils.js";
 
 export default function AdminUser() {
+  const { user: viewer } = useAuth();
   const { id } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -72,55 +74,62 @@ export default function AdminUser() {
   if (error) return <div className="screen"><TopBar backTo={backTo} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   const { user, customer_count, customers } = data;
+  // Owners can only manage salesmen — never themselves or another owner.
+  // Only a superadmin can act on an owner-role account.
+  const canManage = viewer.role === "superadmin" || user.role === "salesman";
 
   return (
     <div className="screen">
       <TopBar
         backTo={backTo}
         right={
-          <div style={{ position: "relative" }} ref={menuRef}>
-            <button type="button" className="menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Actions">
-              &#8942;
-            </button>
-            {menuOpen ? (
-              <div className="menu-dropdown">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setShowEdit(true);
-                  }}
-                >
-                  Edit details
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setShowReset(true);
-                  }}
-                >
-                  Reset password
-                </button>
-                <button type="button" disabled={toggling} onClick={handleToggleActive} style={{ color: "#C0392B" }}>
-                  {user.active ? "Deactivate" : "Activate"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setShowDelete(true);
-                  }}
-                  style={{ color: "#C0392B" }}
-                >
-                  Delete salesman
-                </button>
-              </div>
-            ) : null}
-          </div>
+          canManage ? (
+            <div style={{ position: "relative" }} ref={menuRef}>
+              <button type="button" className="menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Actions">
+                &#8942;
+              </button>
+              {menuOpen ? (
+                <div className="menu-dropdown">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setShowEdit(true);
+                    }}
+                  >
+                    Edit details
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setShowReset(true);
+                    }}
+                  >
+                    Reset password
+                  </button>
+                  <button type="button" disabled={toggling} onClick={handleToggleActive} style={{ color: "#C0392B" }}>
+                    {user.active ? "Deactivate" : "Activate"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setShowDelete(true);
+                    }}
+                    style={{ color: "#C0392B" }}
+                  >
+                    Delete salesman
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null
         }
       />
-      <h1>{user.name}</h1>
+      <h1>
+        {user.name} {user.role === "owner" ? <span className="badge-owner">Owner</span> : null}
+      </h1>
       <div className="mono muted" style={{ marginTop: 4 }}>
         {user.mobile} &middot; {customer_count} customer{customer_count === 1 ? "" : "s"}
       </div>

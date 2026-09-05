@@ -230,6 +230,10 @@ h2 { font-size: 19px; }
   font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em;
   background: #EFE7DF; color: var(--muted); border-radius: 5px; padding: 2px 6px; font-weight: 700;
 }
+.badge-owner {
+  font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em;
+  background: var(--tint); color: var(--orange-d); border-radius: 5px; padding: 2px 6px; font-weight: 700;
+}
 .chevron { color: var(--muted); font-size: 16px; }
 
 /* Cards grid (rooms, attempts) */

@@ -2202,11 +2202,12 @@ def api_admin_list_users(
     resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
     if resolved_shop_id is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
-    query = db.query(User).filter(User.role == "salesman", User.shop_id == resolved_shop_id)
+    query = db.query(User).filter(User.role.in_(["salesman", "owner"]), User.shop_id == resolved_shop_id)
     if q.strip():
         like = f"%{q.strip()}%"
         query = query.filter((User.name.ilike(like)) | (User.mobile.ilike(like)))
     users = query.order_by(User.name).all()
+    users.sort(key=lambda u: 0 if u.role == "owner" else 1)
     result = []
     for u in users:
         count = (
@@ -2246,12 +2247,30 @@ def api_admin_create_user(
 
 
 def get_admin_target_user(user_id: int, owner: User, shop_id: int | None, db: Session) -> User | JSONResponse:
+    """For viewing only (the list and the detail screen) — includes both
+    salesmen and owners, since owners now appear in the salesmen list too."""
     resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
     if resolved_shop_id is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
-    target = db.query(User).filter(User.id == user_id, User.shop_id == resolved_shop_id, User.role == "salesman").first()
+    target = (
+        db.query(User)
+        .filter(User.id == user_id, User.shop_id == resolved_shop_id, User.role.in_(["salesman", "owner"]))
+        .first()
+    )
     if target is None:
         return error_response(404, "user_not_found", "That salesman could not be found.")
+    return target
+
+
+def get_admin_mutable_target(user_id: int, owner: User, shop_id: int | None, db: Session) -> User | JSONResponse:
+    """For edit/reset-password/deactivate/delete — an owner can only ever
+    manage salesmen (never themselves or another owner); only a
+    superadmin can act on an owner-role account."""
+    target = get_admin_target_user(user_id, owner, shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
+    if target.role != "salesman" and owner.role != "superadmin":
+        return error_response(403, "owners_only", "You can't manage another owner's account.")
     return target
 
 
@@ -2337,7 +2356,7 @@ class ResetPasswordBody(BaseModel):
 def api_admin_reset_password(
     user_id: int, body: ResetPasswordBody, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    target = get_admin_target_user(user_id, owner, body.shop_id, db)
+    target = get_admin_mutable_target(user_id, owner, body.shop_id, db)
     if isinstance(target, JSONResponse):
         return target
     if not body.password or len(body.password) < 4:
@@ -2351,7 +2370,7 @@ def api_admin_reset_password(
 def api_admin_toggle_active(
     user_id: int, shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    target = get_admin_target_user(user_id, owner, shop_id, db)
+    target = get_admin_mutable_target(user_id, owner, shop_id, db)
     if isinstance(target, JSONResponse):
         return target
     target.active = not target.active
@@ -2372,7 +2391,7 @@ def api_admin_update_user(
     owner: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    target = get_admin_target_user(user_id, owner, body.shop_id, db)
+    target = get_admin_mutable_target(user_id, owner, body.shop_id, db)
     if isinstance(target, JSONResponse):
         return target
     mobile = body.mobile.strip()
@@ -2392,12 +2411,16 @@ def api_admin_delete_user(
     user_id: int, shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
     resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
-    target = get_admin_target_user(user_id, owner, shop_id, db)
+    target = get_admin_mutable_target(user_id, owner, shop_id, db)
     if isinstance(target, JSONResponse):
         return target
-    shop_owner = db.query(User).filter(User.shop_id == resolved_shop_id, User.role == "owner").first()
+    shop_owner = (
+        db.query(User)
+        .filter(User.shop_id == resolved_shop_id, User.role == "owner", User.id != target.id)
+        .first()
+    )
     if shop_owner is None:
-        return error_response(400, "no_owner", "This shop has no owner to reassign customers to.")
+        return error_response(400, "no_owner", "This shop has no other owner to reassign customers to.")
     db.query(Customer).filter(Customer.user_id == target.id).update(
         {Customer.user_id: shop_owner.id}, synchronize_session=False
     )

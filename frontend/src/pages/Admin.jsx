@@ -81,7 +81,9 @@ export default function Admin() {
                 <div className="avatar">{initials(u.name)}</div>
                 <div className="info">
                   <div className="name">
-                    {u.name} {u.active ? "" : <span className="badge-inactive">Inactive</span>}
+                    {u.name}
+                    {u.role === "owner" ? <span className="badge-owner">Owner</span> : null}
+                    {u.active ? "" : <span className="badge-inactive">Inactive</span>}
                   </div>
                   <div className="sub">{u.mobile}</div>
                 </div>

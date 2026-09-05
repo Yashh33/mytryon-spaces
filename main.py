@@ -202,7 +202,6 @@ IMAGE_QUALITY = "medium"
 # ---------------------------------------------------------------------------
 
 CREDITS_PER_GENERATION = 30
-SUPERADMIN_MOBILE = "9016233480"
 
 # Published gpt-image-2 rates, dollars per 1M tokens.
 IMAGE_INPUT_RATE_PER_M = 8.0
@@ -307,7 +306,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)  # null only for superadmin
     name = Column(String, nullable=False)
-    mobile = Column(String, nullable=False, unique=True)
+    mobile = Column(String, nullable=True, unique=True)  # null only for superadmin (no login identifier)
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="salesman")  # 'superadmin' | 'owner' | 'salesman'
     active = Column(Boolean, nullable=False, default=True)
@@ -405,7 +404,7 @@ class CreditLedger(Base):
     __tablename__ = "credit_ledger"
     id = Column(Integer, primary_key=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     attempt_id = Column(Integer, ForeignKey("attempts.id"), nullable=True)
     render_id = Column(Integer, ForeignKey("renders.id"), nullable=True)
     delta = Column(Integer, nullable=False)  # negative = spend
@@ -512,12 +511,12 @@ def migrate_to_shops(db: Session) -> None:
         if u.role == "admin":
             u.role = "owner"
 
-    if db.query(User).filter(User.mobile == SUPERADMIN_MOBILE).first() is None:
+    if db.query(User).filter(User.role == "superadmin").first() is None:
         db.add(
             User(
                 shop_id=None,
                 name="Yash",
-                mobile=SUPERADMIN_MOBILE,
+                mobile=None,
                 password_hash=hash_password(uuid.uuid4().hex),
                 role="superadmin",
                 active=True,
@@ -554,6 +553,42 @@ async def lifespan(app: FastAPI):
                 """
             )
         )
+        # the superadmin has no mobile number (no identifier — /super/login
+        # takes a password only); mobile predates this, so relax it and
+        # backfill in one guarded, idempotent block.
+        conn.execute(text("ALTER TABLE users ALTER COLUMN mobile DROP NOT NULL"))
+        conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_mobile_required_unless_superadmin') THEN
+                        ALTER TABLE users ADD CONSTRAINT users_mobile_required_unless_superadmin
+                            CHECK (role = 'superadmin' OR mobile IS NOT NULL);
+                    END IF;
+                END $$;
+                """
+            )
+        )
+        # deleting a salesman keeps their credit_ledger rows (accounting
+        # history), just with user_id nulled rather than blocking the delete.
+        conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'credit_ledger_user_id_fkey' AND confdeltype != 'n'
+                    ) THEN
+                        ALTER TABLE credit_ledger DROP CONSTRAINT credit_ledger_user_id_fkey;
+                        ALTER TABLE credit_ledger ADD CONSTRAINT credit_ledger_user_id_fkey
+                            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
+                    END IF;
+                END $$;
+                """
+            )
+        )
     db = SessionLocal()
     try:
         migrate_legacy_projects(db)
@@ -576,6 +611,12 @@ async def lifespan(app: FastAPI):
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
 
         migrate_to_shops(db)
+
+        # the superadmin used to have a login mobile; it isn't one anymore
+        # (/super/login takes a password only) — clear it once, idempotently.
+        db.query(User).filter(User.role == "superadmin", User.mobile.isnot(None)).update(
+            {User.mobile: None}, synchronize_session=False
+        )
 
         db.commit()
     except Exception:
@@ -645,6 +686,15 @@ def require_superadmin(user: User = Depends(get_current_user)) -> User:
     if user.role != "superadmin":
         raise HTTPException(status_code=403, detail="Superadmin only.")
     return user
+
+
+def resolve_admin_shop_id(user: User, shop_id: int | None) -> int | None:
+    """Owners always operate on their own shop (the query param, if any,
+    is ignored); a superadmin operates on whichever shop_id they passed,
+    or none at all — callers should then prompt them to pick a shop."""
+    if user.role == "owner":
+        return user.shop_id
+    return shop_id
 
 
 def user_public(user: User) -> dict:
@@ -1205,11 +1255,7 @@ class LoginBody(BaseModel):
     password: str
 
 
-@app.post("/api/login")
-def api_login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
-    user = db.query(User).filter(User.mobile == body.mobile.strip()).first()
-    if user is None or not user.active or not verify_password(body.password, user.password_hash):
-        return error_response(401, "invalid_credentials", "That mobile number or password is incorrect.")
+def session_response(user: User) -> JSONResponse:
     token = make_session_token(user.id)
     response = JSONResponse(content={"user": user_public(user)})
     response.set_cookie(
@@ -1220,6 +1266,26 @@ def api_login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
         samesite="lax",
     )
     return response
+
+
+@app.post("/api/login")
+def api_login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
+    user = db.query(User).filter(User.mobile == body.mobile.strip(), User.role != "superadmin").first()
+    if user is None or not user.active or not verify_password(body.password, user.password_hash):
+        return error_response(401, "invalid_credentials", "That mobile number or password is incorrect.")
+    return session_response(user)
+
+
+class SuperLoginBody(BaseModel):
+    password: str
+
+
+@app.post("/api/super/login")
+def api_super_login(body: SuperLoginBody, db: Session = Depends(get_db)) -> JSONResponse:
+    for user in db.query(User).filter(User.role == "superadmin", User.active.is_(True)).all():
+        if verify_password(body.password, user.password_hash):
+            return session_response(user)
+    return error_response(401, "invalid_credentials", "That password is incorrect.")
 
 
 @app.post("/api/logout")
@@ -1933,11 +1999,14 @@ def api_shop_credits(user: User = Depends(get_current_user), db: Session = Depen
 
 @app.get("/api/admin/shop/usage")
 def api_admin_shop_usage(
-    owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+    shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    if owner.shop_id is None:
+    resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
+    if resolved_shop_id is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
-    shop = db.query(Shop).filter(Shop.id == owner.shop_id).first()
+    shop = db.query(Shop).filter(Shop.id == resolved_shop_id).first()
+    if shop is None:
+        return error_response(404, "shop_not_found", "That shop could not be found.")
     start, end = cycle_window(shop)
 
     per_salesman = db.execute(
@@ -2022,6 +2091,16 @@ def api_super_list_shops(
 ) -> JSONResponse:
     shops = db.query(Shop).order_by(Shop.id).all()
     return JSONResponse(content={"shops": [shop_public(db, s) for s in shops]})
+
+
+@app.get("/api/super/shops/{shop_id}")
+def api_super_get_shop(
+    shop_id: int, superadmin: User = Depends(require_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    shop = db.query(Shop).filter(Shop.id == shop_id).first()
+    if shop is None:
+        return error_response(404, "shop_not_found", "That shop could not be found.")
+    return JSONResponse(content={"shop": shop_public(db, shop)})
 
 
 class CreateShopBody(BaseModel):
@@ -2113,11 +2192,17 @@ class CreateSalesmanBody(BaseModel):
     name: str
     mobile: str
     password: str
+    shop_id: int | None = None
 
 
 @app.get("/api/admin/users")
-def api_admin_list_users(q: str = "", owner: User = Depends(require_owner), db: Session = Depends(get_db)) -> JSONResponse:
-    query = db.query(User).filter(User.role == "salesman", User.shop_id == owner.shop_id)
+def api_admin_list_users(
+    q: str = "", shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
+    if resolved_shop_id is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
+    query = db.query(User).filter(User.role == "salesman", User.shop_id == resolved_shop_id)
     if q.strip():
         like = f"%{q.strip()}%"
         query = query.filter((User.name.ilike(like)) | (User.mobile.ilike(like)))
@@ -2136,15 +2221,18 @@ def api_admin_list_users(q: str = "", owner: User = Depends(require_owner), db: 
 
 @app.post("/api/admin/users")
 def api_admin_create_user(
-    body: CreateSalesmanBody, owner: User = Depends(require_owner), db: Session = Depends(get_db)
+    body: CreateSalesmanBody, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
+    resolved_shop_id = resolve_admin_shop_id(owner, body.shop_id)
+    if resolved_shop_id is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
     mobile = body.mobile.strip()
     if not body.name.strip() or not mobile or not body.password:
         return error_response(400, "missing_fields", "Please fill in every field.")
     if db.query(User).filter(User.mobile == mobile).first() is not None:
         return error_response(409, "mobile_taken", "That mobile number is already registered.")
     user = User(
-        shop_id=owner.shop_id,
+        shop_id=resolved_shop_id,
         name=body.name.strip(),
         mobile=mobile,
         password_hash=hash_password(body.password),
@@ -2157,15 +2245,27 @@ def api_admin_create_user(
     return JSONResponse(content={"user": user_public(user)})
 
 
+def get_admin_target_user(user_id: int, owner: User, shop_id: int | None, db: Session) -> User | JSONResponse:
+    resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
+    if resolved_shop_id is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
+    target = db.query(User).filter(User.id == user_id, User.shop_id == resolved_shop_id, User.role == "salesman").first()
+    if target is None:
+        return error_response(404, "user_not_found", "That salesman could not be found.")
+    return target
+
+
 @app.get("/api/admin/users/{user_id}")
-def api_admin_user_detail(user_id: int, owner: User = Depends(require_owner), db: Session = Depends(get_db)) -> JSONResponse:
+def api_admin_user_detail(
+    user_id: int, shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
     """Legacy shape for the static/ admin detail screen: one flattened
     "project" card per room, customer name attached, renders aggregated
     across all of that room's attempts. See /api/admin/user/{id} for the
     real customers -> rooms -> renders hierarchy."""
-    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
-    if target is None:
-        return error_response(404, "user_not_found", "That salesman could not be found.")
+    target = get_admin_target_user(user_id, owner, shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
     rooms = (
         db.query(Room)
         .join(Customer, Room.customer_id == Customer.id)
@@ -2193,13 +2293,13 @@ def api_admin_user_detail(user_id: int, owner: User = Depends(require_owner), db
 
 @app.get("/api/admin/user/{user_id}")
 def api_admin_user_detail_v2(
-    user_id: int, owner: User = Depends(require_owner), db: Session = Depends(get_db)
+    user_id: int, shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
     """The real hierarchy: customers -> rooms -> renders (aggregated across
     each room's attempts)."""
-    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
-    if target is None:
-        return error_response(404, "user_not_found", "That salesman could not be found.")
+    target = get_admin_target_user(user_id, owner, shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
     customers = db.query(Customer).filter(Customer.user_id == user_id).order_by(Customer.id.desc()).all()
     customers_payload = []
     for c in customers:
@@ -2230,15 +2330,16 @@ def api_admin_user_detail_v2(
 
 class ResetPasswordBody(BaseModel):
     password: str
+    shop_id: int | None = None
 
 
 @app.post("/api/admin/users/{user_id}/reset-password")
 def api_admin_reset_password(
-    user_id: int, body: ResetPasswordBody, owner: User = Depends(require_owner), db: Session = Depends(get_db)
+    user_id: int, body: ResetPasswordBody, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
-    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
-    if target is None:
-        return error_response(404, "user_not_found", "That salesman could not be found.")
+    target = get_admin_target_user(user_id, owner, body.shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
     if not body.password or len(body.password) < 4:
         return error_response(400, "weak_password", "Please choose a longer password.")
     target.password_hash = hash_password(body.password)
@@ -2247,13 +2348,62 @@ def api_admin_reset_password(
 
 
 @app.post("/api/admin/users/{user_id}/toggle-active")
-def api_admin_toggle_active(user_id: int, owner: User = Depends(require_owner), db: Session = Depends(get_db)) -> JSONResponse:
-    target = db.query(User).filter(User.id == user_id, User.shop_id == owner.shop_id).first()
-    if target is None:
-        return error_response(404, "user_not_found", "That salesman could not be found.")
+def api_admin_toggle_active(
+    user_id: int, shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    target = get_admin_target_user(user_id, owner, shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
     target.active = not target.active
     db.commit()
     return JSONResponse(content={"user": user_public(target)})
+
+
+class UpdateSalesmanBody(BaseModel):
+    name: str
+    mobile: str
+    shop_id: int | None = None
+
+
+@app.patch("/api/admin/users/{user_id}")
+def api_admin_update_user(
+    user_id: int,
+    body: UpdateSalesmanBody,
+    owner: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    target = get_admin_target_user(user_id, owner, body.shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
+    mobile = body.mobile.strip()
+    if not body.name.strip() or not mobile:
+        return error_response(400, "missing_fields", "Please fill in every field.")
+    if db.query(User).filter(User.mobile == mobile, User.id != target.id).first() is not None:
+        return error_response(409, "mobile_taken", "That mobile number is already registered to someone else.")
+    target.name = body.name.strip()
+    target.mobile = mobile
+    db.commit()
+    db.refresh(target)
+    return JSONResponse(content={"user": user_public(target)})
+
+
+@app.delete("/api/admin/users/{user_id}")
+def api_admin_delete_user(
+    user_id: int, shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    resolved_shop_id = resolve_admin_shop_id(owner, shop_id)
+    target = get_admin_target_user(user_id, owner, shop_id, db)
+    if isinstance(target, JSONResponse):
+        return target
+    shop_owner = db.query(User).filter(User.shop_id == resolved_shop_id, User.role == "owner").first()
+    if shop_owner is None:
+        return error_response(400, "no_owner", "This shop has no owner to reassign customers to.")
+    db.query(Customer).filter(Customer.user_id == target.id).update(
+        {Customer.user_id: shop_owner.id}, synchronize_session=False
+    )
+    db.delete(target)
+    db.commit()
+    return JSONResponse(content={"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -2271,19 +2421,26 @@ def prompt_setting_response(db: Session, setting: Setting | None) -> dict:
 
 
 @app.get("/api/admin/prompt")
-def api_admin_get_prompt(owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)) -> JSONResponse:
+def api_admin_get_prompt(
+    shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    if resolve_admin_shop_id(owner, shop_id) is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
     setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
     return JSONResponse(content=prompt_setting_response(db, setting))
 
 
 class PromptBody(BaseModel):
     prompt: str
+    shop_id: int | None = None
 
 
 @app.post("/api/admin/prompt")
 def api_admin_save_prompt(
     body: PromptBody, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
+    if resolve_admin_shop_id(owner, body.shop_id) is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
     if not body.prompt.strip():
         return error_response(400, "empty_prompt", "The prompt can't be empty.")
     setting = set_setting(db, PROMPT_SETTING_KEY, body.prompt)
@@ -2292,8 +2449,10 @@ def api_admin_save_prompt(
 
 @app.post("/api/admin/prompt/reset")
 def api_admin_reset_prompt(
-    owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+    shop_id: int | None = None, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
 ) -> JSONResponse:
+    if resolve_admin_shop_id(owner, shop_id) is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
     setting = set_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
     return JSONResponse(content=prompt_setting_response(db, setting))
 

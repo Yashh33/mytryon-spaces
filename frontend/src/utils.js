@@ -67,3 +67,13 @@ export function formatBytes(n) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
   return (n / 1024 / 1024).toFixed(2) + " MB";
 }
+
+/** Appends non-empty params as a query string, e.g. withQuery("/api/x", { shop_id: "3" }) -> "/api/x?shop_id=3". */
+export function withQuery(path, params) {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v !== undefined && v !== null && v !== "") usp.set(k, v);
+  }
+  const qs = usp.toString();
+  return qs ? `${path}?${qs}` : path;
+}

@@ -1,22 +1,33 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
+import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { initials } from "../utils.js";
+import { initials, withQuery } from "../utils.js";
 
 export default function Admin() {
+  const { user } = useAuth();
+  const [searchParams] = useSearchParams();
+  const shopId = searchParams.get("shop_id");
   const [users, setUsers] = useState(null);
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
   const [showAdd, setShowAdd] = useState(false);
 
+  const isSuperadmin = user.role === "superadmin";
+  const needsShopRedirect = isSuperadmin && !shopId;
+
+  const backTo = isSuperadmin ? `/super/shop/${shopId}` : "/";
+  const withShop = (path) => withQuery(path, { shop_id: shopId });
+
   async function load() {
+    if (needsShopRedirect) return;
     setError(null);
     try {
-      const data = await api.get("/api/admin/users");
+      const data = await api.get(withQuery("/api/admin/users", { shop_id: shopId }));
       setUsers(data.users);
     } catch (err) {
       setError(err.message);
@@ -25,7 +36,12 @@ export default function Admin() {
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shopId]);
+
+  if (needsShopRedirect) {
+    return <Navigate to="/super" replace />;
+  }
 
   const filtered = (users || []).filter((u) => {
     const q = query.trim().toLowerCase();
@@ -36,13 +52,13 @@ export default function Admin() {
   return (
     <div className="screen">
       <TopBar
-        backTo="/"
+        backTo={backTo}
         right={
           <div style={{ display: "flex", gap: 14 }}>
-            <Link to="/admin/usage" className="link-btn">
+            <Link to={withShop("/admin/usage")} className="link-btn">
               Usage &#8250;
             </Link>
-            <Link to="/admin/prompt" className="link-btn">
+            <Link to={withShop("/admin/prompt")} className="link-btn">
               Edit prompt &#8250;
             </Link>
           </div>
@@ -61,7 +77,7 @@ export default function Admin() {
         filtered.length ? (
           <div className="row-list">
             {filtered.map((u) => (
-              <Link key={u.id} to={`/admin/user/${u.id}`} className={"row-item" + (u.active ? "" : " inactive")}>
+              <Link key={u.id} to={withShop(`/admin/user/${u.id}`)} className={"row-item" + (u.active ? "" : " inactive")}>
                 <div className="avatar">{initials(u.name)}</div>
                 <div className="info">
                   <div className="name">
@@ -84,6 +100,7 @@ export default function Admin() {
 
       {showAdd ? (
         <AddSalesmanSheet
+          shopId={shopId}
           onClose={() => setShowAdd(false)}
           onCreated={() => {
             setShowAdd(false);
@@ -95,7 +112,7 @@ export default function Admin() {
   );
 }
 
-function AddSalesmanSheet({ onClose, onCreated }) {
+function AddSalesmanSheet({ shopId, onClose, onCreated }) {
   const [name, setName] = useState("");
   const [mobile, setMobile] = useState("");
   const [password, setPassword] = useState("");
@@ -109,7 +126,9 @@ function AddSalesmanSheet({ onClose, onCreated }) {
     }
     setSubmitting(true);
     try {
-      await api.post("/api/admin/users", { json: { name: name.trim(), mobile: mobile.trim(), password } });
+      await api.post("/api/admin/users", {
+        json: { name: name.trim(), mobile: mobile.trim(), password, shop_id: shopId ? Number(shopId) : null },
+      });
       onCreated();
     } catch (err) {
       toast(err.message);

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
@@ -10,7 +11,6 @@ export default function Super() {
   const [shops, setShops] = useState(null);
   const [error, setError] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [editingShop, setEditingShop] = useState(null);
   const toast = useToast();
 
   async function load() {
@@ -53,13 +53,13 @@ export default function Super() {
             {shops.map((s) => (
               <div key={s.id} className={"row-item" + (s.active ? "" : " inactive")}>
                 <div className="avatar">{initials(s.name)}</div>
-                <div className="info" style={{ cursor: "pointer" }} onClick={() => setEditingShop(s)}>
+                <Link to={`/super/shop/${s.id}`} className="info">
                   <div className="name">{s.name}</div>
                   <div className="sub">
                     {s.balance.toLocaleString()} / {s.monthly_credits.toLocaleString()} credits &middot; {s.salesman_count}{" "}
                     salesm{s.salesman_count === 1 ? "an" : "en"}
                   </div>
-                </div>
+                </Link>
                 <button
                   type="button"
                   className={"toggle-pill" + (s.active ? " on" : "")}
@@ -84,17 +84,6 @@ export default function Super() {
           onClose={() => setShowAdd(false)}
           onCreated={() => {
             setShowAdd(false);
-            load();
-          }}
-        />
-      ) : null}
-
-      {editingShop ? (
-        <EditShopSheet
-          shop={editingShop}
-          onClose={() => setEditingShop(null)}
-          onSaved={() => {
-            setEditingShop(null);
             load();
           }}
         />
@@ -158,7 +147,7 @@ function AddShopSheet({ onClose, onCreated }) {
   );
 }
 
-function EditShopSheet({ shop, onClose, onSaved }) {
+export function EditShopSheet({ shop, onClose, onSaved }) {
   const [monthlyCredits, setMonthlyCredits] = useState(String(shop.monthly_credits));
   const [savingAllowance, setSavingAllowance] = useState(false);
   const [delta, setDelta] = useState("");

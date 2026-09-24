@@ -2,6 +2,7 @@ import asyncio
 import base64
 import calendar
 import io
+import json
 import logging
 import mimetypes
 import os
@@ -19,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from openai import BadRequestError, OpenAI, RateLimitError
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 from sqlalchemy import (
     Boolean,
@@ -36,6 +37,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 load_dotenv()
@@ -52,8 +54,7 @@ DATA_ROOT = Path(os.environ.get("DATA_DIR") or ("/data" if Path("/data").is_dir(
 ROOMS_DIR = DATA_ROOT / "rooms"
 ITEMS_DIR = DATA_ROOT / "items"
 RENDERS_DIR = DATA_ROOT / "renders"
-DEBUG_DIR = DATA_ROOT / "debug"
-for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR, DEBUG_DIR):
+for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 MODEL_NAME = "gpt-image-2"
@@ -131,30 +132,6 @@ THIS REQUEST
 Room type: {{ROOM_TYPE}}
 Pieces, in the same order as the product reference photographs:
 {{PIECES}}
-
-{{#PLACEMENT}}
-PLACEMENT ANNOTATION
-Two versions of the room are provided. The first is the clean
-photograph and is the canvas you must render. The second is the same
-photograph with hand-drawn coloured lines added.
-
-Each coloured line traces where the correspondingly coloured piece
-should sit: the line follows that piece's footprint on the floor and
-indicates its position, its extent and the direction it faces. For an
-L-shaped or sectional piece, the bend in the line shows where the
-piece turns and which way each section runs.
-
-Treat the lines as a rough hand sketch, not a precise boundary. Match
-the intent — placement, orientation and approximate size — while
-keeping the piece's true proportions.
-
-The lines are annotation only. They are not objects, rugs, cables or
-markings in the room. Do not render the lines, their colour or any
-trace of them in your output. Render the clean room with the
-furniture placed as the lines indicate.
-
-Colour key: {{STROKE_MAP}}
-{{/PLACEMENT}}
 """
 
 PROMPT_SETTING_KEY = "generation_prompt"
@@ -168,16 +145,8 @@ PROMPT_PLACEHOLDERS = [
         "description": 'One line per added piece, in the same order the product photos are sent to the model, formatted as "- Sofa (L-shape), 7 ft wide".',
     },
     {
-        "token": "{{STROKE_MAP}}",
-        "description": 'Inside the {{#PLACEMENT}}…{{/PLACEMENT}} block only: one line per piece with hand-drawn strokes, e.g. "Orange — L-shape sofa, 7 ft".',
-    },
-    {
-        "token": "{{#PLACEMENT}} … {{/PLACEMENT}}",
-        "description": "Wraps the placement-annotation section. Only appears in the prompt sent to the model when at least one piece has been drawn on in the /place screen — removed entirely otherwise, so it's safe to reword or move but keep both tags.",
-    },
-    {
         "token": "{{IMAGE_MANIFEST}}",
-        "description": 'One line per image, in the exact order sent to the model, e.g. "Image 1 is a room." / "Image 2 is the same room as Image 1 with coloured lines drawn on it." / "Image 3 is a showroom photograph of a sofa...". The numbering always matches the real send order — without strokes, image 2 becomes the first product.',
+        "description": 'One line per image, in the exact order sent to the model: "Image 1 is a room." then one line per product photo, in the order pieces were added, e.g. "Image 2 is a showroom photograph of a sofa...".',
     },
     {
         "token": "{{CONFIG_NOTES}}",
@@ -198,6 +167,97 @@ PROMPT_PLACEHOLDERS = [
 ]
 
 IMAGE_QUALITY = "medium"
+
+# ---------------------------------------------------------------------------
+# VISION LAYOUT — a salesman input aid only. The room photo is sent to a
+# cheap vision-capable text model on upload to produce a rough top-down
+# floor-plan description; the salesman positions furniture blocks against
+# it. This JSON is NEVER sent to the image generation model — testing
+# showed doing so makes the render worse. The live prompt lives in the
+# `settings` table (key "vision_prompt"), editable with no redeploy; this
+# constant is only the seed value on first run.
+#
+# Model chosen by checking a live client.models.list() call rather than
+# guessing: "gpt-5-nano" is the cheapest vision-capable ($0.05/1M input,
+# $0.40/1M output) text model currently offered — cheaper than
+# gpt-4.1-nano ($0.10) and gpt-5.4-nano ($0.20), and confirmed to accept
+# image input ("Input modalities: text, image").
+# ---------------------------------------------------------------------------
+VISION_MODEL_NAME = "gpt-5-nano"
+VISION_PROMPT_SETTING_KEY = "vision_prompt"
+DEFAULT_VISION_PROMPT = """\
+You are analysing a photograph of a room. Your output will be used to
+draw a simple top-down floor plan, which a furniture salesman will then
+use to position furniture in this room. Accuracy about walls, openings
+and obstructions matters more than detail — a missed doorway or pillar
+leads to furniture being placed where it cannot physically go.
+
+Describe the room's layout from the camera's point of view. Be precise
+and conservative: never guess or invent features.
+
+Conventions:
+- "far wall" is the wall directly facing the camera.
+- "left wall" and "right wall" are as seen from the camera.
+- Positions along the far wall: "left third", "centre", "right third".
+- Positions along a side wall: "far third" (near the far wall),
+  "middle third", "near third" (near the camera).
+
+For each wall use one of three confidence states:
+  "clear"       — you can see the wall well and are confident about it
+  "partial"     — you can see part of it, or something is on it that you
+                  cannot identify
+  "not_visible"
+
+Never return an empty features list for a wall marked "clear" unless you
+are confident the wall is genuinely blank. If you see something on a wall
+but cannot identify it, list it with type "unknown" and describe what you
+see.
+
+Pay particular attention to:
+- Tall rectangular shapes on side walls — usually doorways, sometimes
+  covered with plastic sheeting during construction.
+- Any opening at the edge of the frame.
+- Structural obstructions that limit where furniture can stand:
+  projecting pillars, columns, beams coming down to the floor, wall
+  recesses or alcoves, and steps or level changes.
+- Wall planes at different depths. A wall surface in the foreground that
+  is closer to the camera than the wall behind it is a projecting pillar
+  or a wall return, not a flat wall. The giveaway is a vertical edge
+  running floor to ceiling with a visible corner, and a recessed area
+  behind it. Report the projecting mass as an obstruction of type
+  "pillar" or "column", and set room_shape to "irregular" with a note.
+
+Feature types: window, door, doorway, opening, balcony door, pillar,
+column, recess, step, unknown. If you see something that limits furniture
+placement and none of these types fit, use "other" and describe it
+plainly in notes.
+
+Return only JSON in exactly this shape:
+
+{
+  "camera_position": "near end, left | centre | right of the room",
+  "room_shape": "rectangular | L-shaped | irregular",
+  "shape_notes": "if not a plain rectangle, describe what makes it so",
+  "depth_vs_width": "deeper than wide | about square | wider than deep",
+  "far_wall": {
+    "confidence": "clear | partial | not_visible",
+    "features": [
+      { "type": "...", "position": "...",
+        "size": "small | medium | large", "notes": "..." }
+    ]
+  },
+  "left_wall":  { "confidence": "...", "features": [] },
+  "right_wall": { "confidence": "...", "features": [] },
+  "near_wall":  { "confidence": "...", "features": [] },
+  "floor_state": "finished | unfinished",
+  "obstructions": [
+    { "type": "...", "location": "describe where it stands",
+      "notes": "..." }
+  ],
+  "clutter": ["short list of loose items on the floor"],
+  "uncertain": ["anything you were not sure about, and why"]
+}
+"""
 
 # ---------------------------------------------------------------------------
 
@@ -226,6 +286,11 @@ ITEM_TYPES = {
     "Chair": ["Single", "Pair"],
     "Bed": ["Single", "Queen", "King"],
 }
+L_SHAPE_TYPES = {"L-shape", "Curved"}
+
+
+def derive_item_shape(type_: str) -> str:
+    return "L" if type_ in L_SHAPE_TYPES else "rect"
 
 DEFAULT_ROOM_TREATMENT = "luxury"
 ROOM_TREATMENT_CHOICES = ["luxury", "minimal"]
@@ -329,6 +394,11 @@ class Room(Base):
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
     room_type = Column(String, nullable=False)
     photo_path = Column(String, nullable=False)
+    # vision-generated top-down layout description — a salesman input aid
+    # only, never sent to the image model (testing showed doing so makes
+    # the render worse).
+    layout_json = Column(JSONB, nullable=True)
+    layout_status = Column(String, nullable=False, default="pending", server_default="pending")  # pending|ready|failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     attempts = relationship("Attempt", backref="room", cascade="all, delete-orphan", order_by="Attempt.id")
@@ -356,9 +426,12 @@ class Item(Base):
     type = Column(String, nullable=False)
     width_ft = Column(Float, nullable=False)
     photo_path = Column(String, nullable=False)
-    # list of strokes, each a list of {"x": 0-1, "y": 0-1} points normalised
-    # to the room photo's width/height. Nullable; empty/None means no drawing.
-    strokes = Column(JSON, nullable=True)
+    shape = Column(String, nullable=False)  # 'rect' | 'L' — derived from category/type, never chosen directly
+    # normalised (0-1) block placement on the room's floor plan — a salesman
+    # input aid only, never sent to the image model. A 'rect' placement is
+    # {x,y,w,h,rotation}; an 'L' placement is {long, short, corner} where
+    # long/short are each rects. See validate_placement() below.
+    placement = Column(JSONB, nullable=True)
 
 
 class Render(Base):
@@ -532,11 +605,28 @@ def migrate_to_shops(db: Session) -> None:
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
-        # migrate DBs created before free-hand placement drawing existed:
-        # drop the old pin columns, add the new strokes column, additively.
+        # migrate DBs created before free-hand placement drawing existed.
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_x"))
         conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_y"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS strokes JSON"))
+        # migrate DBs created before vision-generated layouts and structured
+        # furniture blocks existed: drop the old free-hand strokes column
+        # (existing items lose their strokes — attempts keep their renders),
+        # add shape (backfilled from category/type, same rule as
+        # derive_item_shape) and placement.
+        conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS strokes"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS shape TEXT"))
+        conn.execute(
+            text(
+                "UPDATE items SET shape = CASE WHEN type IN ('L-shape', 'Curved') THEN 'L' ELSE 'rect' END "
+                "WHERE shape IS NULL"
+            )
+        )
+        conn.execute(text("ALTER TABLE items ALTER COLUMN shape SET NOT NULL"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS placement JSONB"))
+        # rooms get a vision-generated layout, pending until the background
+        # job (or a manual edit) fills it in.
+        conn.execute(text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS layout_json JSONB"))
+        conn.execute(text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS layout_status TEXT NOT NULL DEFAULT 'pending'"))
         # migrate DBs created before multi-tenant shops existed: add the
         # column additively (users predates shops; create_all only creates
         # brand-new tables, it won't alter this existing one).
@@ -608,7 +698,24 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first() is None:
             db.add(Setting(key=PROMPT_SETTING_KEY, value=DEFAULT_GENERATION_PROMPT))
             logger.info("seeded default generation prompt")
+        if db.query(Setting).filter(Setting.key == VISION_PROMPT_SETTING_KEY).first() is None:
+            db.add(Setting(key=VISION_PROMPT_SETTING_KEY, value=DEFAULT_VISION_PROMPT))
+            logger.info("seeded default vision prompt")
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
+
+        # one-time cleanup: a previously-saved custom generation prompt may
+        # still contain the old placement-annotation block / stroke-map
+        # token. build_prompt() no longer substitutes either — left in
+        # place they'd leak into the model call as literal, un-substituted
+        # "{{#PLACEMENT}}"/"{{STROKE_MAP}}" text.
+        saved_prompt = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+        if saved_prompt is not None and (
+            "{{#PLACEMENT}}" in saved_prompt.value or "{{STROKE_MAP}}" in saved_prompt.value
+        ):
+            cleaned = re.sub(r"\{\{#PLACEMENT\}\}.*?\{\{/PLACEMENT\}\}", "", saved_prompt.value, flags=re.DOTALL)
+            cleaned = cleaned.replace("{{STROKE_MAP}}", "")
+            saved_prompt.value = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
+            logger.info("stripped stale placement/stroke-map syntax from saved generation prompt")
 
         migrate_to_shops(db)
 
@@ -768,23 +875,6 @@ def load_local_image_with_debug(path: Path, role: str, url: str) -> tuple[tuple[
     return file_tuple, descriptor
 
 
-def save_marked_copy_with_debug(image: Image.Image) -> tuple[tuple[str, bytes, str], dict]:
-    """Saves the marked copy to DEBUG_DIR (never discarded, for the debug
-    view) and returns both the OpenAI-bound file tuple and its descriptor."""
-    filename = f"{uuid.uuid4().hex}.jpg"
-    buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=92)
-    data = buf.getvalue()
-    (DEBUG_DIR / filename).write_bytes(data)
-    url = f"/media/debug/{filename}"
-    file_tuple = ("marked-copy.jpg", data, "image/jpeg")
-    descriptor = {
-        "filename": "marked-copy.jpg", "role": "marked_copy", "width": image.width, "height": image.height,
-        "size_bytes": len(data), "url": url,
-    }
-    return file_tuple, descriptor
-
-
 def derive_size(width: int, height: int) -> str:
     if width > height:
         return "1536x1024"
@@ -831,6 +921,65 @@ def set_setting(db: Session, key: str, value: str) -> Setting:
 
 def get_active_prompt(db: Session) -> str:
     return get_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
+
+
+def get_active_vision_prompt(db: Session) -> str:
+    return get_setting(db, VISION_PROMPT_SETTING_KEY, DEFAULT_VISION_PROMPT)
+
+
+# ---------------------------------------------------------------------------
+# Vision layout — fired in the background on room-photo upload, never
+# awaited by the upload response. A salesman input aid only, never sent to
+# the image generation model.
+# ---------------------------------------------------------------------------
+
+
+async def run_vision_job(room_id: int) -> None:
+    db = SessionLocal()
+    try:
+        room = db.query(Room).filter(Room.id == room_id).first()
+        if room is None:
+            return
+        prompt = get_active_vision_prompt(db)
+        room_path = DATA_ROOT / room.photo_path
+        try:
+            data = room_path.read_bytes()
+            mime_type, _ = mimetypes.guess_type(room_path.name)
+            b64 = base64.b64encode(data).decode("ascii")
+
+            def call_vision_api():
+                return client.chat.completions.create(
+                    model=VISION_MODEL_NAME,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type or 'image/jpeg'};base64,{b64}"},
+                                },
+                            ],
+                        }
+                    ],
+                    response_format={"type": "json_object"},
+                )
+
+            result = await asyncio.to_thread(call_vision_api)
+            layout = json.loads(result.choices[0].message.content)
+        except Exception:
+            logger.exception("vision layout job failed room_id=%s", room_id)
+            room.layout_status = "failed"
+            db.commit()
+            return
+
+        room.layout_json = layout
+        room.layout_status = "ready"
+        db.commit()
+    except Exception:
+        logger.exception("vision layout job crashed room_id=%s", room_id)
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -886,11 +1035,7 @@ def compute_usd_cost(usage: dict | None) -> float | None:
     return round(cost, 6)
 
 
-PLACEMENT_BLOCK_RE = re.compile(r"\{\{#PLACEMENT\}\}(.*?)\{\{/PLACEMENT\}\}", re.DOTALL)
 CONFIG_NOTES_BLOCK_RE = re.compile(r"\{\{#CONFIG_NOTES\}\}(.*?)\{\{/CONFIG_NOTES\}\}", re.DOTALL)
-
-STROKE_COLORS = ["#F07522", "#2563EB", "#16A34A", "#9333EA"]
-STROKE_COLOR_NAMES = ["Orange", "Blue", "Green", "Purple"]
 
 # Definitions for {{CONFIG_NOTES}}, keyed by (category, type) since "Single"
 # means different things for a Chair and a Bed. Only types with an entry
@@ -914,31 +1059,16 @@ MULTI_PIECE_SOFA_TYPES = {"3+2", "3+3", "3+2+1"}
 MULTI_PIECE_WIDTH_NOTE = "The stated width refers to the largest single sofa in the set, not the combined width of all pieces."
 
 
-def numbered_items(items: list[Item]) -> list[tuple[int, Item]]:
-    """Piece numbers are 1-based position in the list — the same order the
-    product reference photos are sent to the model and the placement chips
-    show."""
-    return list(enumerate(items, start=1))
-
-
-def marked_items(items: list[Item], ignore_placement: bool) -> list[tuple[int, Item]]:
-    if ignore_placement:
-        return []
-    return [(n, item) for n, item in numbered_items(items) if item.strokes]
-
-
-def build_image_manifest(items: list[Item], marked: list[tuple[int, Item]]) -> str:
+def build_image_manifest(items: list[Item]) -> str:
     """One line per image, in the exact order sent to the model — the whole
-    point being that the numbering here always matches reality. Product
-    lines describe the photo as a design reference only (material, colour,
-    texture, styling), never as already being in the requested
+    point being that the numbering here always matches reality: the clean
+    room photo, then each product photo in the order pieces were added.
+    Product lines describe the photo as a design reference only (material,
+    colour, texture, styling), never as already being in the requested
     configuration — otherwise the model copies the photographed seat count
     instead of building what was actually asked for."""
     lines = ["Image 1 is a room."]
     n = 2
-    if marked:
-        lines.append(f"Image {n} is the same room as Image 1 with coloured lines drawn on it.")
-        n += 1
     for item in items:
         lines.append(
             f"Image {n} is a showroom photograph of a {item.category.lower()}. It is a design "
@@ -982,28 +1112,14 @@ def build_prompt(
     template: str,
     room_type: str,
     items: list[Item],
-    marked: list[tuple[int, Item]],
     room_treatment: str,
     lighting: str,
 ) -> str:
     pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
-    image_manifest = build_image_manifest(items, marked)
+    image_manifest = build_image_manifest(items)
     config_notes = build_config_notes(items)
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
-
-    if marked:
-        stroke_map = "\n".join(
-            f"{STROKE_COLOR_NAMES[(n - 1) % len(STROKE_COLOR_NAMES)]} — {item.type} {item.category.lower()}, {item.width_ft:g} ft"
-            for n, item in marked
-        )
-
-        def unwrap_placement(match: re.Match) -> str:
-            return match.group(1).replace("{{STROKE_MAP}}", stroke_map)
-
-        template = PLACEMENT_BLOCK_RE.sub(unwrap_placement, template)
-    else:
-        template = PLACEMENT_BLOCK_RE.sub("", template)
 
     if config_notes:
         def unwrap_config_notes(match: re.Match) -> str:
@@ -1022,29 +1138,6 @@ def build_prompt(
         .replace("{{LIGHTING}}", lighting_text)
     )
     return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
-
-
-def build_marked_room_image(room_photo_path: Path, marked: list[tuple[int, Item]]) -> Image.Image | None:
-    """Draws each piece's hand-drawn strokes, in that piece's colour, on a
-    copy of the room photo. The original file is never touched; this copy
-    exists only in memory for the duration of one generation call."""
-    if not marked:
-        return None
-    image = Image.open(room_photo_path).convert("RGB").copy()
-    draw = ImageDraw.Draw(image)
-    stroke_width = max(3, int(image.width * 0.015))
-    radius = stroke_width / 2
-    for number, item in marked:
-        color = STROKE_COLORS[(number - 1) % len(STROKE_COLORS)]
-        for stroke in item.strokes or []:
-            points = [(p["x"] * image.width, p["y"] * image.height) for p in stroke]
-            if len(points) >= 2:
-                draw.line(points, fill=color, width=stroke_width, joint="curve")
-            # rounded caps/joins: cap every vertex (including single-point
-            # "dot" strokes) with a filled circle of the same width
-            for x, y in points:
-                draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=color)
-    return image
 
 
 def call_image_api(
@@ -1135,7 +1228,7 @@ def refund_generation_credits(db: Session, shop_id: int, user_id: int, attempt_i
     db.commit()
 
 
-async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id: int, ignore_placement: bool = False) -> None:
+async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id: int) -> None:
     db = SessionLocal()
     try:
         attempt = (
@@ -1155,9 +1248,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             return
 
         room = attempt.room
-        marked = marked_items(attempt.items, ignore_placement)
         template = get_active_prompt(db)
-        prompt = build_prompt(template, room.room_type, attempt.items, marked, attempt.room_treatment, attempt.lighting)
+        prompt = build_prompt(template, room.room_type, attempt.items, attempt.room_treatment, attempt.lighting)
 
         room_path = DATA_ROOT / room.photo_path
         with Image.open(room_path) as room_image:
@@ -1169,12 +1261,6 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
         image_files.append(room_file)
         debug_images.append(room_debug)
-
-        marked_image = build_marked_room_image(room_path, marked)
-        if marked_image is not None:
-            marked_file, marked_debug = save_marked_copy_with_debug(marked_image)
-            image_files.append(marked_file)
-            debug_images.append(marked_debug)
 
         for item in attempt.items:
             item_file, item_debug = load_local_image_with_debug(
@@ -1349,7 +1435,8 @@ def item_public(item: Item) -> dict:
         "type": item.type,
         "width_ft": item.width_ft,
         "photo_url": f"/media/{item.photo_path}",
-        "strokes": item.strokes or [],
+        "shape": item.shape,
+        "placement": item.placement,
     }
 
 
@@ -1400,6 +1487,8 @@ def room_detail(room: Room) -> dict:
         "room_type": room.room_type,
         "photo_url": f"/media/{room.photo_path}",
         "created_at": room.created_at.isoformat() if room.created_at else None,
+        "layout_json": room.layout_json,
+        "layout_status": room.layout_status,
     }
 
 
@@ -1460,7 +1549,14 @@ async def _add_item_to_attempt(
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
 
-    item = Item(attempt_id=attempt.id, category=category, type=type_, width_ft=width_ft, photo_path=photo_path)
+    item = Item(
+        attempt_id=attempt.id,
+        category=category,
+        type=type_,
+        width_ft=width_ft,
+        photo_path=photo_path,
+        shape=derive_item_shape(type_),
+    )
     db.add(item)
     db.commit()
     db.refresh(attempt)
@@ -1477,54 +1573,67 @@ def _delete_item_from_attempt(attempt: Attempt, item_id: int, db: Session) -> At
     return attempt
 
 
-class StrokePoint(BaseModel):
-    x: float
-    y: float
+class PlacementBody(BaseModel):
+    placement: dict
 
 
-class StrokeBody(BaseModel):
-    points: list[StrokePoint]
+ROTATION_CHOICES = {0, 90, 180, 270}
 
 
-def validated_stroke_points(points: list[StrokePoint]) -> list[dict] | None:
-    if not points:
+def _validate_rect_placement(rect: object) -> dict | None:
+    if not isinstance(rect, dict):
         return None
-    cleaned = []
-    for p in points:
-        if not (0 <= p.x <= 1) or not (0 <= p.y <= 1):
+    try:
+        x, y, w, h, rotation = rect["x"], rect["y"], rect["w"], rect["h"], rect["rotation"]
+    except (KeyError, TypeError):
+        return None
+    for v in (x, y, w, h):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 <= v <= 1):
             return None
-        cleaned.append({"x": p.x, "y": p.y})
-    return cleaned
+    if isinstance(rotation, bool) or rotation not in ROTATION_CHOICES:
+        return None
+    return {"x": float(x), "y": float(y), "w": float(w), "h": float(h), "rotation": int(rotation)}
 
 
-def _add_stroke(attempt: Attempt, item_id: int, points: list[StrokePoint], db: Session) -> Attempt | JSONResponse:
+def validate_placement(shape: str, placement: object) -> dict | None:
+    """Structurally validates a block placement against the item's derived
+    shape: a 'rect' placement is {x,y,w,h,rotation}; an 'L' placement is
+    {long, short, corner} where long/short are each rects. Coordinates are
+    normalised 0-1 and rotation is one of the four cardinal directions."""
+    if not isinstance(placement, dict):
+        return None
+    if shape == "rect":
+        return _validate_rect_placement(placement)
+    if shape == "L":
+        corner = placement.get("corner")
+        if not isinstance(corner, str) or not corner.strip():
+            return None
+        long_rect = _validate_rect_placement(placement.get("long"))
+        short_rect = _validate_rect_placement(placement.get("short"))
+        if long_rect is None or short_rect is None:
+            return None
+        return {"long": long_rect, "short": short_rect, "corner": corner.strip()}
+    return None
+
+
+def _set_item_placement(attempt: Attempt, item_id: int, placement: dict, db: Session) -> Attempt | JSONResponse:
     item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    cleaned = validated_stroke_points(points)
-    if cleaned is None:
-        return error_response(400, "invalid_stroke", "That stroke is outside the photo.")
-    item.strokes = [*(item.strokes or []), cleaned]
+    validated = validate_placement(item.shape, placement)
+    if validated is None:
+        return error_response(400, "invalid_placement", "That placement isn't valid for this piece's shape.")
+    item.placement = validated
     db.commit()
     db.refresh(attempt)
     return attempt
 
 
-def _undo_stroke(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
+def _clear_item_placement(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
     item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    item.strokes = (item.strokes or [])[:-1]
-    db.commit()
-    db.refresh(attempt)
-    return attempt
-
-
-def _clear_strokes(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
-    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
-    if item is None:
-        return error_response(404, "item_not_found", "That piece could not be found.")
-    item.strokes = []
+    item.placement = None
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -1560,7 +1669,7 @@ def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: 
     db.commit()
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "processing"}
-    asyncio.create_task(run_generation_job(job_id, attempt.id, user.id, shop.id, ignore_placement))
+    asyncio.create_task(run_generation_job(job_id, attempt.id, user.id, shop.id))
     return JSONResponse(content={"job_id": job_id})
 
 
@@ -1769,6 +1878,7 @@ async def api_create_room(
     db.add(room)
     db.commit()
     db.refresh(room)
+    asyncio.create_task(run_vision_job(room.id))
     return JSONResponse(content={"room": room_summary(room)})
 
 
@@ -1792,8 +1902,11 @@ async def api_update_room_photo(
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
     room.photo_path = photo_path
+    room.layout_json = None
+    room.layout_status = "pending"
     db.commit()
     db.refresh(room)
+    asyncio.create_task(run_vision_job(room.id))
     return JSONResponse(content={"room": room_detail(room)})
 
 
@@ -1802,6 +1915,25 @@ def api_get_room(room_id: int, user: User = Depends(get_current_user), db: Sessi
     room = get_owned_room(room_id, user, db)
     attempts = sorted(room.attempts, key=lambda a: a.id, reverse=True)
     return JSONResponse(content={"room": room_detail(room), "attempts": [attempt_summary(a) for a in attempts]})
+
+
+class UpdateRoomLayoutBody(BaseModel):
+    layout_json: dict
+
+
+@app.patch("/api/rooms/{room_id}/layout")
+def api_update_room_layout(
+    room_id: int, body: UpdateRoomLayoutBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """Lets the salesman correct a vision layout that missed a feature —
+    always sets status to 'ready' since a human has now confirmed it,
+    whether the original vision call succeeded or failed."""
+    room = get_owned_room(room_id, user, db)
+    room.layout_json = body.layout_json
+    room.layout_status = "ready"
+    db.commit()
+    db.refresh(room)
+    return JSONResponse(content={"room": room_detail(room)})
 
 
 class CreateAttemptBody(BaseModel):
@@ -1842,7 +1974,8 @@ def api_create_attempt(
                 type=item.type,
                 width_ft=item.width_ft,
                 photo_path=item.photo_path,
-                strokes=item.strokes,
+                shape=item.shape,
+                placement=item.placement,
             )
         )
 
@@ -1892,38 +2025,27 @@ def api_delete_item_from_attempt(
     return JSONResponse(content={"attempt": attempt_detail(result)})
 
 
-@app.post("/api/attempts/{attempt_id}/items/{item_id}/strokes")
-def api_add_stroke_to_attempt(
+@app.post("/api/attempts/{attempt_id}/items/{item_id}/placement")
+def api_set_item_placement(
     attempt_id: int,
     item_id: int,
-    body: StrokeBody,
+    body: PlacementBody,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    result = _add_stroke(attempt, item_id, body.points, db)
+    result = _set_item_placement(attempt, item_id, body.placement, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})
 
 
-@app.post("/api/attempts/{attempt_id}/items/{item_id}/strokes/undo")
-def api_undo_stroke_from_attempt(
+@app.delete("/api/attempts/{attempt_id}/items/{item_id}/placement")
+def api_clear_item_placement(
     attempt_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    result = _undo_stroke(attempt, item_id, db)
-    if isinstance(result, JSONResponse):
-        return result
-    return JSONResponse(content={"attempt": attempt_detail(result)})
-
-
-@app.delete("/api/attempts/{attempt_id}/items/{item_id}/strokes")
-def api_clear_strokes_from_attempt(
-    attempt_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> JSONResponse:
-    attempt = get_owned_attempt(attempt_id, user, db)
-    result = _clear_strokes(attempt, item_id, db)
+    result = _clear_item_placement(attempt, item_id, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})

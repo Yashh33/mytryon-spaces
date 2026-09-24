@@ -1,14 +1,43 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { BottomSheet } from "../components/BottomSheet.jsx";
+import { FloorPlan } from "../components/FloorPlan.jsx";
+import {
+  ADDABLE_FEATURE_TYPES,
+  FAR_NEAR_POSITIONS,
+  SIDE_POSITIONS,
+  WALL_KEY,
+  clearSubPlacement,
+  defaultBlocksFurniture,
+  defaultLFor,
+  defaultRectFor,
+  flipLPlacement,
+  itemsToBlocks,
+  loadSubPlacement,
+  nextRotation,
+  rotateLPlacement,
+  saveSubPlacement,
+} from "../placement.js";
 
-const STROKE_COLORS = ["#F07522", "#2563EB", "#16A34A", "#9333EA"];
-
-function clamp01(v) {
-  return Math.min(1, Math.max(0, v));
+function emptyLayout() {
+  return {
+    camera_position: "near end, centre",
+    room_shape: "rectangular",
+    shape_notes: "",
+    depth_vs_width: "about square",
+    far_wall: { confidence: "not_visible", features: [] },
+    left_wall: { confidence: "not_visible", features: [] },
+    right_wall: { confidence: "not_visible", features: [] },
+    near_wall: { confidence: "not_visible", features: [] },
+    floor_state: "finished",
+    obstructions: [],
+    clutter: [],
+    uncertain: [],
+  };
 }
 
 export default function Place() {
@@ -17,30 +46,21 @@ export default function Place() {
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
   const [error, setError] = useState(null);
-  const [selectedId, setSelectedId] = useState(null);
-
-  const imgRef = useRef(null);
-  const canvasRef = useRef(null);
-  const activeStrokeRef = useRef(null);
-  const activePointerIdRef = useRef(null);
-  const attemptRef = useRef(null);
-  const selectedIdRef = useRef(null);
-
-  useEffect(() => {
-    attemptRef.current = attempt;
-  }, [attempt]);
-  useEffect(() => {
-    selectedIdRef.current = selectedId;
-  }, [selectedId]);
+  const [blocks, setBlocks] = useState([]);
+  const [selectedKey, setSelectedKey] = useState(null);
+  const [showAddFeature, setShowAddFeature] = useState(false);
+  const [addObstructionMode, setAddObstructionMode] = useState(false);
 
   async function load() {
     setError(null);
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
-      if (data.attempt.items.length) {
-        setSelectedId((prev) => (prev && data.attempt.items.some((it) => it.id === prev) ? prev : data.attempt.items[0].id));
-      }
+      setBlocks(
+        itemsToBlocks(data.attempt.items).map((b) =>
+          b.persisted ? b : { ...b, placement: loadSubPlacement(id, b.itemId, b.subIndex) }
+        )
+      );
     } catch (err) {
       setError(err.message);
     }
@@ -51,201 +71,231 @@ export default function Place() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  function drawPath(ctx, points, rect, color, width) {
-    if (!points.length) return;
-    if (points.length === 1) {
-      const p = points[0];
-      ctx.beginPath();
-      ctx.arc(p.x * rect.width, p.y * rect.height, width / 2, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
+  // Poll while the vision layout job is still running in the background.
+  useEffect(() => {
+    if (!attempt || attempt.room.layout_status !== "pending") return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const data = await api.get(`/api/rooms/${attempt.room.id}`);
+        setAttempt((prev) => (prev ? { ...prev, room: { ...prev.room, ...data.room } } : prev));
+      } catch {
+        // transient — keep polling
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt?.room?.id, attempt?.room?.layout_status]);
+
+  const room = attempt?.room;
+  const selectedBlock = blocks.find((b) => b.key === selectedKey) || null;
+  const pendingKey = selectedBlock && !selectedBlock.placement ? selectedBlock.key : null;
+
+  function updateBlock(key, patch) {
+    setBlocks((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
+  }
+
+  async function persistPlacement(block, placement) {
+    if (!block.persisted) {
+      saveSubPlacement(id, block.itemId, block.subIndex, placement);
       return;
     }
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    points.forEach((p, i) => {
-      const px = p.x * rect.width;
-      const py = p.y * rect.height;
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    });
-    ctx.stroke();
-  }
-
-  function redraw() {
-    const img = imgRef.current;
-    const canvas = canvasRef.current;
-    const current = attemptRef.current;
-    if (!img || !canvas || !current) return;
-    const rect = img.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, rect.width, rect.height);
-    const strokeWidth = rect.width * 0.015;
-    current.items.forEach((it, i) => {
-      const color = STROKE_COLORS[i % STROKE_COLORS.length];
-      (it.strokes || []).forEach((stroke) => drawPath(ctx, stroke, rect, color, strokeWidth));
-    });
-    if (activeStrokeRef.current && activeStrokeRef.current.length) {
-      const idx = current.items.findIndex((it) => it.id === selectedIdRef.current);
-      drawPath(ctx, activeStrokeRef.current, rect, STROKE_COLORS[(idx < 0 ? 0 : idx) % STROKE_COLORS.length], strokeWidth);
-    }
-  }
-
-  function sizeCanvas() {
-    const img = imgRef.current;
-    const canvas = canvasRef.current;
-    if (!img || !canvas) return;
-    const rect = img.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(rect.width * dpr);
-    canvas.height = Math.round(rect.height * dpr);
-    canvas.style.width = rect.width + "px";
-    canvas.style.height = rect.height + "px";
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  function setupCanvas() {
-    sizeCanvas();
-    redraw();
-  }
-
-  useEffect(() => {
-    if (!attempt) return undefined;
-    const img = imgRef.current;
-    function onImgLoad() {
-      setupCanvas();
-    }
-    if (img.complete) setupCanvas();
-    else img.addEventListener("load", onImgLoad, { once: true });
-
-    window.addEventListener("resize", setupCanvas);
-    return () => {
-      img.removeEventListener("load", onImgLoad);
-      window.removeEventListener("resize", setupCanvas);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt]);
-
-  async function addStroke(itemId, points) {
     try {
-      const data = await api.post(`/api/attempts/${id}/items/${itemId}/strokes`, { json: { points } });
-      setAttempt(data.attempt);
-    } catch (err) {
-      toast(err.message);
-      redraw();
-    }
-  }
-
-  async function handleUndo() {
-    if (selectedId == null) return;
-    try {
-      const data = await api.post(`/api/attempts/${id}/items/${selectedId}/strokes/undo`);
-      setAttempt(data.attempt);
+      await api.post(`/api/attempts/${id}/items/${block.itemId}/placement`, { json: { placement } });
     } catch (err) {
       toast(err.message);
     }
   }
 
-  async function handleClear() {
-    if (selectedId == null) return;
+  async function removePlacement(block) {
+    if (!block.persisted) {
+      clearSubPlacement(id, block.itemId, block.subIndex);
+      return;
+    }
     try {
-      const data = await api.del(`/api/attempts/${id}/items/${selectedId}/strokes`);
-      setAttempt(data.attempt);
+      await api.del(`/api/attempts/${id}/items/${block.itemId}/placement`);
     } catch (err) {
       toast(err.message);
     }
   }
 
-  function handlePointerDown(e) {
-    if (selectedIdRef.current == null) return;
-    activePointerIdRef.current = e.pointerId;
-    canvasRef.current.setPointerCapture(e.pointerId);
-    const rect = imgRef.current.getBoundingClientRect();
-    activeStrokeRef.current = [
-      {
-        x: clamp01((e.clientX - rect.left) / rect.width),
-        y: clamp01((e.clientY - rect.top) / rect.height),
+  function handleSelectBlock(key) {
+    setSelectedKey(key);
+  }
+
+  function handleDropPendingAt(key, x, y) {
+    const block = blocks.find((b) => b.key === key);
+    if (!block) return;
+    let placement;
+    if (block.shape === "L") {
+      const base = defaultLFor(block.widthFt);
+      const dx = x - base.long.x - base.long.w / 2;
+      const dy = y - base.long.y - base.long.h / 2;
+      placement = {
+        ...base,
+        long: { ...base.long, x: base.long.x + dx, y: base.long.y + dy },
+        short: { ...base.short, x: base.short.x + dx, y: base.short.y + dy },
+      };
+    } else {
+      const base = defaultRectFor(block.widthFt);
+      placement = { ...base, x: x - base.w / 2, y: y - base.h / 2 };
+    }
+    updateBlock(key, { placement });
+    persistPlacement(block, placement);
+  }
+
+  function handleMoveBlock(key, placement) {
+    updateBlock(key, { placement });
+  }
+
+  function handleCommitBlock(key, placement) {
+    const block = blocks.find((b) => b.key === key);
+    if (block) persistPlacement(block, placement);
+  }
+
+  function handleRotateBlock(key) {
+    const block = blocks.find((b) => b.key === key);
+    if (!block || !block.placement) return;
+    const placement =
+      block.shape === "L" ? rotateLPlacement(block.placement) : { ...block.placement, rotation: nextRotation(block.placement.rotation) };
+    updateBlock(key, { placement });
+    persistPlacement(block, placement);
+  }
+
+  function handleFlipBlock(key) {
+    const block = blocks.find((b) => b.key === key);
+    if (!block || !block.placement) return;
+    const placement = flipLPlacement(block.placement);
+    updateBlock(key, { placement });
+    persistPlacement(block, placement);
+  }
+
+  function handleRemoveBlock(key) {
+    const block = blocks.find((b) => b.key === key);
+    if (!block) return;
+    updateBlock(key, { placement: null });
+    setSelectedKey(null);
+    removePlacement(block);
+  }
+
+  async function updateLayout(mutate) {
+    const current = room.layout_json || emptyLayout();
+    const updated = mutate(current);
+    try {
+      const data = await api.patch(`/api/rooms/${room.id}/layout`, { json: { layout_json: updated } });
+      setAttempt((prev) => ({ ...prev, room: { ...prev.room, ...data.room } }));
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  function handleAddObstructionAt(x, y) {
+    setAddObstructionMode(false);
+    updateLayout((layout) => ({
+      ...layout,
+      obstructions: [...(layout.obstructions || []), { type: "pillar", location: "added on the plan", notes: "", x, y }],
+    }));
+  }
+
+  function handleTapFeature(wall, index) {
+    const key = WALL_KEY[wall];
+    updateLayout((layout) => ({
+      ...layout,
+      [key]: { ...layout[key], features: (layout[key]?.features || []).filter((_, i) => i !== index) },
+    }));
+  }
+
+  function handleTapObstruction(index) {
+    updateLayout((layout) => ({
+      ...layout,
+      obstructions: (layout.obstructions || []).filter((_, i) => i !== index),
+    }));
+  }
+
+  function handleAddFeature({ wall, type, position }) {
+    const key = WALL_KEY[wall];
+    updateLayout((layout) => ({
+      ...layout,
+      [key]: {
+        confidence: layout[key]?.confidence || "clear",
+        features: [
+          ...(layout[key]?.features || []),
+          { type, position, size: "medium", notes: "", blocks_furniture: defaultBlocksFurniture(type) },
+        ],
       },
-    ];
-    redraw();
+    }));
+    setShowAddFeature(false);
   }
 
-  function handlePointerMove(e) {
-    if (activeStrokeRef.current == null || e.pointerId !== activePointerIdRef.current) return;
-    const rect = imgRef.current.getBoundingClientRect();
-    const x = clamp01((e.clientX - rect.left) / rect.width);
-    const y = clamp01((e.clientY - rect.top) / rect.height);
-    const last = activeStrokeRef.current[activeStrokeRef.current.length - 1];
-    const dx = (x - last.x) * rect.width;
-    const dy = (y - last.y) * rect.height;
-    if (Math.hypot(dx, dy) < 2) return;
-    activeStrokeRef.current.push({ x, y });
-    redraw();
-  }
-
-  function handlePointerUp(e) {
-    if (activeStrokeRef.current == null || e.pointerId !== activePointerIdRef.current) return;
-    const points = activeStrokeRef.current;
-    activeStrokeRef.current = null;
-    activePointerIdRef.current = null;
-    addStroke(selectedIdRef.current, points);
-  }
-
-  function handlePointerCancel() {
-    activeStrokeRef.current = null;
-    activePointerIdRef.current = null;
-    redraw();
-  }
-
-  if (!attempt && !error) return <div className="screen"><Loading /></div>;
-  if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
+  if (!attempt && !error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><Loading /></div>;
+  if (error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   return (
     <div className="screen">
       <TopBar backTo={`/attempt/${id}/furniture`} />
       <div className="eyebrow">Step 3 of 4</div>
-      <h1 style={{ marginBottom: 14 }}>Where does each piece go?</h1>
-
-      <div className="place-photo-wrap">
-        <img ref={imgRef} src={attempt.room.photo_url} alt="Room" draggable="false" />
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerCancel}
-        />
+      <h1 style={{ marginBottom: 4 }}>Where does each piece go?</h1>
+      <div className="hint-line" style={{ marginBottom: 12 }}>
+        {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <button type="button" className="btn btn-ghost btn-small" style={{ flex: 1 }} onClick={handleUndo}>
-          Undo
-        </button>
-        <button type="button" className="btn btn-ghost btn-small" style={{ flex: 1 }} onClick={handleClear}>
-          Clear
-        </button>
-      </div>
+      {room.layout_status === "pending" ? (
+        <div className="floor-plan-skeleton">
+          <div className="skel" style={{ position: "absolute", inset: 0, borderRadius: 12 }} />
+          <div className="floor-plan-skeleton-label">
+            <span className="spinner-inline" /> Reading the room…
+          </div>
+        </div>
+      ) : (
+        <div className="floor-plan-wrap">
+          {room.layout_status === "failed" ? (
+            <div className="floor-plan-failed-note">The room layout couldn&rsquo;t be read. You can still add walls and pieces by hand.</div>
+          ) : null}
+          <FloorPlan
+            room={room}
+            blocks={blocks}
+            selectedKey={selectedKey}
+            onSelectBlock={handleSelectBlock}
+            onMoveBlock={handleMoveBlock}
+            onCommitBlock={handleCommitBlock}
+            onRotateBlock={handleRotateBlock}
+            onFlipBlock={handleFlipBlock}
+            onRemoveBlock={handleRemoveBlock}
+            onDropPendingAt={handleDropPendingAt}
+            pendingKey={pendingKey}
+            addObstructionMode={addObstructionMode}
+            onAddObstructionAt={handleAddObstructionAt}
+            onTapFeature={handleTapFeature}
+            onTapObstruction={handleTapObstruction}
+          />
+        </div>
+      )}
 
-      <div className="hint-line" style={{ textAlign: "center" }}>
-        Select a piece, then draw where it goes
-      </div>
-
-      <div className="chips" style={{ marginTop: 14 }}>
-        {attempt.items.map((it, i) => (
+      {room.layout_status !== "pending" ? (
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button type="button" className="btn btn-ghost btn-small" style={{ flex: 1 }} onClick={() => setShowAddFeature(true)}>
+            + Add feature
+          </button>
           <button
-            key={it.id}
             type="button"
-            className={"chip" + (it.id === selectedId ? " selected" : "")}
-            onClick={() => setSelectedId(it.id)}
+            className={"btn btn-small" + (addObstructionMode ? " btn-primary" : " btn-ghost")}
+            style={{ flex: 1 }}
+            onClick={() => setAddObstructionMode((v) => !v)}
           >
-            <span className="chip-dot" style={{ background: STROKE_COLORS[i % STROKE_COLORS.length] }} />
-            {i + 1} &middot; {it.category}
+            {addObstructionMode ? "Tap the plan…" : "+ Add obstruction"}
+          </button>
+        </div>
+      ) : null}
+
+      <div className="chips" style={{ marginTop: 16 }}>
+        {blocks.map((b) => (
+          <button
+            key={b.key}
+            type="button"
+            className={"chip" + (b.key === selectedKey ? " selected" : "") + (b.placement ? " chip-placed" : "")}
+            onClick={() => handleSelectBlock(b.key)}
+          >
+            <span className="chip-dot" style={{ background: b.color }} />
+            {b.number} &middot; {b.label}
           </button>
         ))}
       </div>
@@ -258,6 +308,59 @@ export default function Place() {
           Skip placement
         </button>
       </div>
+
+      {showAddFeature ? <AddFeatureSheet onClose={() => setShowAddFeature(false)} onAdd={handleAddFeature} /> : null}
     </div>
+  );
+}
+
+function AddFeatureSheet({ onClose, onAdd }) {
+  const [wall, setWall] = useState("far");
+  const [type, setType] = useState("window");
+  const isSide = wall === "left" || wall === "right";
+  const positions = isSide ? SIDE_POSITIONS : FAR_NEAR_POSITIONS;
+  const [position, setPosition] = useState(positions[1]);
+
+  function handleWallChange(next) {
+    setWall(next);
+    const nextPositions = next === "left" || next === "right" ? SIDE_POSITIONS : FAR_NEAR_POSITIONS;
+    setPosition(nextPositions[1]);
+  }
+
+  return (
+    <BottomSheet title="Add feature" onClose={onClose}>
+      <div className="field">
+        <label>Wall</label>
+        <select value={wall} onChange={(e) => handleWallChange(e.target.value)}>
+          <option value="far">Far wall</option>
+          <option value="left">Left wall</option>
+          <option value="right">Right wall</option>
+          <option value="near">Near wall</option>
+        </select>
+      </div>
+      <div className="field">
+        <label>Type</label>
+        <select value={type} onChange={(e) => setType(e.target.value)}>
+          {ADDABLE_FEATURE_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <label>Position</label>
+        <select value={position} onChange={(e) => setPosition(e.target.value)}>
+          {positions.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button type="button" className="btn btn-primary" onClick={() => onAdd({ wall, type, position })}>
+        Add feature
+      </button>
+    </BottomSheet>
   );
 }

@@ -149,6 +149,14 @@ PROMPT_PLACEHOLDERS = [
         "description": 'One line per image, in the exact order sent to the model: "Image 1 is a room." then one line per product photo, in the order pieces were added, e.g. "Image 2 is a showroom photograph of a sofa...".',
     },
     {
+        "token": "{{PLACEMENT}}",
+        "description": "Plain-English placement instructions generated from where the salesman positioned each piece's block on the layout, e.g. \"It stands against the far wall, back flat against that wall, in the centre of that wall. Its seats face toward the camera.\" Numbered per piece, bound to that piece's Image number, with neighbour and feature notes where relevant. Falls back to a single generic line when placement was skipped or nothing was placed.",
+    },
+    {
+        "token": "{{ROOM_LAYOUT}}",
+        "description": 'A short, confident summary of the vision-generated room layout — depth, and what stands on the far/left/right walls — for placement context only, e.g. "The room is deeper than wide. Far wall: with a medium window at the centre. ..." Falls back to a single camera-position line when no layout is available yet.',
+    },
+    {
         "token": "{{CONFIG_NOTES}}",
         "description": 'Definitions for only the piece configurations actually selected in this request — e.g. what "3+3" or "L-shape" means — one line per matching type. Empty when nothing selected has a definition; works unwrapped or inside {{#CONFIG_NOTES}}…{{/CONFIG_NOTES}}.',
     },
@@ -1108,16 +1116,336 @@ def build_config_notes(items: list[Item]) -> str:
     return "\n".join([CONFIG_NOTES_PREAMBLE, *lines])
 
 
+# ---------------------------------------------------------------------------
+# {{PLACEMENT}} — converts each item's block placement (see validate_placement
+# above) into plain-English placement instructions. A block's WALL is
+# resolved from its rotation-implied "back edge": rotation 0 means the back
+# is the top edge (against the far wall if within WALL_TOLERANCE), 90 the
+# left edge, 180 the bottom edge (near wall), 270 the right edge. This is
+# deterministic even for a block sitting in a corner near two walls at once,
+# since only the back edge's wall is ever tested.
+# ---------------------------------------------------------------------------
+
+WALL_TOLERANCE = 0.06
+WALL_FOR_ROTATION = {0: "far", 90: "left", 180: "near", 270: "right"}
+FACING_FOR_ROTATION = {
+    0: "toward the camera",
+    90: "right, into the room",
+    180: "toward the far wall",
+    270: "left, into the room",
+}
+FAR_NEAR_POSITION_THIRDS = ("left third", "centre", "right third")
+SIDE_POSITION_THIRDS = ("far third", "middle third", "near third")
+FEATURE_POSITION_INDEX = {
+    "left third": 0, "centre": 1, "right third": 2,
+    "far third": 0, "middle third": 1, "near third": 2,
+}
+WALL_LAYOUT_KEY = {"far": "far_wall", "left": "left_wall", "right": "right_wall", "near": "near_wall"}
+NO_PLACEMENT_LINE = "Place the furniture where a professional interior stylist would position it in this room."
+
+
+def _third_index(value: float) -> int:
+    if value < 1 / 3:
+        return 0
+    if value < 2 / 3:
+        return 1
+    return 2
+
+
+def _rect_back_edge_distance(rect: dict, candidate_wall: str) -> float:
+    if candidate_wall == "far":
+        return rect["y"]
+    if candidate_wall == "near":
+        return 1 - (rect["y"] + rect["h"])
+    if candidate_wall == "left":
+        return rect["x"]
+    return 1 - (rect["x"] + rect["w"])  # "right"
+
+
+def resolve_rect_wall(rect: dict) -> tuple[str | None, str]:
+    """Returns (wall_if_against, rotation_implied_candidate_wall)."""
+    candidate = WALL_FOR_ROTATION[rect["rotation"]]
+    against = _rect_back_edge_distance(rect, candidate) <= WALL_TOLERANCE
+    return (candidate if against else None), candidate
+
+
+def resolve_wall_position(rect: dict, wall: str) -> str:
+    if wall in ("far", "near"):
+        mid = rect["x"] + rect["w"] / 2
+        return FAR_NEAR_POSITION_THIRDS[_third_index(mid)]
+    mid = rect["y"] + rect["h"] / 2
+    return SIDE_POSITION_THIRDS[_third_index(mid)]
+
+
+def resolve_free_area(rect: dict) -> str:
+    x_label = ("left", "centre", "right")[_third_index(rect["x"] + rect["w"] / 2)]
+    y_label = ("far", "middle", "near")[_third_index(rect["y"] + rect["h"] / 2)]
+    if y_label == "middle" and x_label == "centre":
+        return "the centre of the room"
+    if y_label == "middle":
+        return f"the {x_label} of the room"
+    if x_label == "centre":
+        return f"the {y_label} of the room"
+    return f"the {y_label}-{x_label} of the room"
+
+
+def _rect_span(rect: dict, wall: str) -> tuple[float, float]:
+    if wall in ("far", "near"):
+        return rect["x"], rect["x"] + rect["w"]
+    return rect["y"], rect["y"] + rect["h"]
+
+
+def _occupied_thirds(start: float, end: float) -> set[int]:
+    indices = {_third_index(start), _third_index(end)}
+    if end > start:
+        indices.add(_third_index((start + end) / 2))
+    return indices
+
+
+def resolve_rect_placement(rect: dict) -> dict:
+    wall, _candidate = resolve_rect_wall(rect)
+    facing = FACING_FOR_ROTATION[rect["rotation"]]
+    if wall:
+        position = resolve_wall_position(rect, wall)
+        sentence = (
+            f"It stands against the {wall} wall, back flat against that wall, "
+            f"in the {position} of that wall. Its seats face {facing}."
+        )
+        start, end = _rect_span(rect, wall)
+        sort_key = start
+    else:
+        sentence = f"It stands in {resolve_free_area(rect)}, clear of the walls. Its seats face {facing}."
+        start = end = sort_key = None
+    return {"wall": wall, "sentence": sentence, "span": (start, end), "sort_key": sort_key}
+
+
+def _direction_from_corner(corner: str, wall_candidate: str) -> str:
+    depth_word, _, side_word = corner.partition("-")
+    if wall_candidate in ("far", "near"):
+        return "right" if side_word == "left" else "left"
+    return "toward the camera" if depth_word == "far" else "toward the far wall"
+
+
+def _l_arm_line(lead: str, wall_candidate: str, against: bool, direction: str, include_back_flat: bool) -> str:
+    if against:
+        if include_back_flat:
+            return f"{lead} runs along the {wall_candidate} wall, back flat against that wall, extending {direction} from the corner."
+        return f"{lead} runs from that corner {direction}."
+    if include_back_flat:
+        return f"{lead} runs extending {direction} from the corner, parallel to the {wall_candidate} wall but standing clear of it."
+    return f"{lead} runs from that corner {direction}, parallel to the {wall_candidate} wall but standing clear of it."
+
+
+def resolve_l_placement(placement: dict) -> dict:
+    long_rect, short_rect, corner = placement["long"], placement["short"], placement["corner"]
+    long_wall, long_candidate = resolve_rect_wall(long_rect)
+    short_wall, short_candidate = resolve_rect_wall(short_rect)
+    long_direction = _direction_from_corner(corner, long_candidate)
+    short_direction = _direction_from_corner(corner, short_candidate)
+
+    sentence = " ".join(
+        [
+            f"The corner of the L sits in the {corner} of the room.",
+            _l_arm_line("Its long arm", long_candidate, long_wall is not None, long_direction, True),
+            _l_arm_line("Its short arm", short_candidate, short_wall is not None, short_direction, False),
+            f"The seats on the long arm face {FACING_FOR_ROTATION[long_rect['rotation']]}.",
+            f"The seats on the short arm face {FACING_FOR_ROTATION[short_rect['rotation']]}.",
+        ]
+    )
+    # the long arm anchors NEIGHBOURS/FEATURES grouping, since it's the one
+    # that runs the full length of a wall
+    if long_wall:
+        start, end = _rect_span(long_rect, long_wall)
+        sort_key = start
+    else:
+        start = end = sort_key = None
+    return {"wall": long_wall, "sentence": sentence, "span": (start, end), "sort_key": sort_key}
+
+
+def _feature_label(feature: dict) -> str:
+    feature_type = feature.get("type") or "feature"
+    if feature_type in ("unknown", "other"):
+        notes = (feature.get("notes") or "").strip()
+        return notes if notes else "feature"
+    return feature_type
+
+
+def _feature_clauses_for(span: tuple[float, float], wall_data: dict | None) -> list[str]:
+    features = (wall_data or {}).get("features") or []
+    if not features or span[0] is None:
+        return []
+    occupied = _occupied_thirds(*span)
+    clauses = []
+    for feature in features:
+        idx = FEATURE_POSITION_INDEX.get(feature.get("position"))
+        if idx is None:
+            continue
+        label = _feature_label(feature)
+        if idx in occupied:
+            clauses.append(f"It does not obstruct the {label}.")
+        elif min(abs(idx - o) for o in occupied) == 1:
+            clauses.append(f"It stops before reaching the {label}, leaving it fully visible.")
+    return clauses
+
+
+def _format_piece_list(numbers: list[int]) -> str:
+    labels = [str(n) for n in numbers]
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f" and {labels[-1]}"
+
+
+def build_placement_text(items: list[Item], layout_json: dict | None, ignore_placement: bool) -> str:
+    placed = [item for item in items if item.placement]
+    if ignore_placement or not placed:
+        return NO_PLACEMENT_LINE + "\n"
+
+    resolved = []
+    for item in items:
+        if not item.placement:
+            resolved.append({"wall": None, "sentence": NO_PLACEMENT_LINE, "span": (None, None), "sort_key": None})
+        elif item.shape == "L":
+            resolved.append(resolve_l_placement(item.placement))
+        else:
+            resolved.append(resolve_rect_placement(item.placement))
+
+    wall_groups: dict[str, list[int]] = {}
+    for idx, r in enumerate(resolved):
+        if r["wall"]:
+            wall_groups.setdefault(r["wall"], []).append(idx)
+
+    neighbour_clause: list[str | None] = [None] * len(items)
+    for wall, idxs in wall_groups.items():
+        ordered = sorted(idxs, key=lambda i: resolved[i]["sort_key"])
+        for pos in range(1, len(ordered)):
+            prev_piece_number = ordered[pos - 1] + 1
+            if wall in ("far", "near"):
+                neighbour_clause[ordered[pos]] = f"immediately to the right of Piece {prev_piece_number}, with a small gap between them."
+            else:
+                neighbour_clause[ordered[pos]] = f"beyond Piece {prev_piece_number}, toward the camera."
+
+    feature_clauses: list[list[str]] = []
+    for r in resolved:
+        wall = r["wall"]
+        wall_data = (layout_json or {}).get(WALL_LAYOUT_KEY[wall]) if wall else None
+        feature_clauses.append(_feature_clauses_for(r["span"], wall_data) if wall else [])
+
+    lines: list[str] = []
+    counter = 1
+    for idx, item in enumerate(items):
+        piece_number = idx + 1
+        image_number = idx + 2  # Image 1 is the room; products follow in add order
+        lines.append(f"Piece {piece_number} — {item.category} ({item.type}), {item.width_ft:g} ft, from Image {image_number}.")
+        lines.append(f"{counter}. {resolved[idx]['sentence']}")
+        counter += 1
+        extra_parts = []
+        if neighbour_clause[idx]:
+            extra_parts.append(neighbour_clause[idx])
+        extra_parts.extend(feature_clauses[idx])
+        if extra_parts:
+            combined = " ".join(extra_parts)
+            combined = combined[0].upper() + combined[1:]
+            lines.append(f"{counter}. {combined}")
+            counter += 1
+        lines.append("")
+
+    for wall, idxs in wall_groups.items():
+        if len(idxs) < 2:
+            continue
+        ordered = sorted(idxs, key=lambda i: resolved[i]["sort_key"])
+        piece_numbers = [i + 1 for i in ordered]
+        order_word = "left to right" if wall in ("far", "near") else "far to near"
+        lines.append(
+            f"{counter}. Pieces {_format_piece_list(piece_numbers)} stand in that order from {order_word} "
+            f"along the {wall} wall. They are separate pieces of furniture with gaps between them, not one "
+            "continuous sofa."
+        )
+        counter += 1
+
+    if len({item.photo_path for item in items}) >= 2:
+        lines.append(
+            f"{counter}. Pieces from different reference photographs must clearly differ in material and "
+            "colour, exactly as those photographs show."
+        )
+        counter += 1
+
+    lines.append(f"{counter}. The rest of the floor stays open and empty.")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# {{ROOM_LAYOUT}} — a compact, confident summary of the vision-generated
+# layout (see run_vision_job), for placement context only. Built-in features
+# are always described as present and finished; never mentions protective
+# coverings (the main prompt's CLEAR THE SPACE section handles that).
+# ---------------------------------------------------------------------------
+
+
+def _feature_phrase(feature: dict) -> str:
+    feature_type = feature.get("type") or "feature"
+    if feature_type in ("unknown", "other"):
+        notes = (feature.get("notes") or "").strip()
+        return notes if notes else "a built-in feature"
+    parts = [p for p in (feature.get("size"), feature_type) if p]
+    phrase = "a " + " ".join(parts)
+    position = feature.get("position")
+    return f"{phrase} at the {position}" if position else phrase
+
+
+def _wall_features_clause(wall_data: dict | None) -> str:
+    features = (wall_data or {}).get("features") or []
+    if not features:
+        return "a long plain wall"
+    phrases = [_feature_phrase(f) for f in features]
+    if len(phrases) == 1:
+        return f"with {phrases[0]}"
+    return "with " + ", ".join(phrases[:-1]) + f" and {phrases[-1]}"
+
+
+def _obstruction_phrase(obstruction: dict) -> str:
+    obstruction_type = obstruction.get("type") or "obstruction"
+    location = (obstruction.get("location") or "").strip()
+    return f"a {obstruction_type} {location}" if location else f"a {obstruction_type}"
+
+
+def build_room_layout_text(layout_json: dict | None) -> str:
+    if not layout_json:
+        return "For placement purposes only, the camera stands at the near end of the room.\n"
+
+    far_clause = _wall_features_clause(layout_json.get("far_wall"))
+    left_clause = _wall_features_clause(layout_json.get("left_wall"))
+    right_clause = _wall_features_clause(layout_json.get("right_wall"))
+
+    obstructions = layout_json.get("obstructions") or []
+    if obstructions:
+        left_clause += ", and " + " and ".join(_obstruction_phrase(o) for o in obstructions)
+
+    lines = [
+        f"The room is {layout_json.get('depth_vs_width') or 'about square'}.",
+        f"Far wall: {far_clause}.",
+        f"Left wall: {left_clause}.",
+        f"Right wall: {right_clause}.",
+        f"For placement purposes only, the camera stands at the {layout_json.get('camera_position') or 'near end of the room'}.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def build_prompt(
     template: str,
-    room_type: str,
+    room: Room,
     items: list[Item],
     room_treatment: str,
     lighting: str,
+    ignore_placement: bool,
 ) -> str:
     pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
     image_manifest = build_image_manifest(items)
     config_notes = build_config_notes(items)
+    placement_text = build_placement_text(items, room.layout_json, ignore_placement)
+    room_layout_text = build_room_layout_text(room.layout_json)
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
 
@@ -1130,10 +1458,12 @@ def build_prompt(
         template = CONFIG_NOTES_BLOCK_RE.sub("", template)
 
     prompt = (
-        template.replace("{{ROOM_TYPE}}", room_type)
+        template.replace("{{ROOM_TYPE}}", room.room_type)
         .replace("{{PIECES}}", pieces)
         .replace("{{IMAGE_MANIFEST}}", image_manifest)
         .replace("{{CONFIG_NOTES}}", config_notes)  # covers bare (unwrapped) use too
+        .replace("{{PLACEMENT}}", placement_text)
+        .replace("{{ROOM_LAYOUT}}", room_layout_text)
         .replace("{{ROOM_TREATMENT}}", room_treatment_text)
         .replace("{{LIGHTING}}", lighting_text)
     )
@@ -1249,7 +1579,10 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
 
         room = attempt.room
         template = get_active_prompt(db)
-        prompt = build_prompt(template, room.room_type, attempt.items, attempt.room_treatment, attempt.lighting)
+        prompt = build_prompt(
+            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement
+        )
+        print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
 
         room_path = DATA_ROOT / room.photo_path
         with Image.open(room_path) as room_image:

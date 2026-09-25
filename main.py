@@ -178,20 +178,20 @@ IMAGE_QUALITY = "medium"
 
 # ---------------------------------------------------------------------------
 # VISION LAYOUT — a salesman input aid only. The room photo is sent to a
-# cheap vision-capable text model on upload to produce a rough top-down
+# vision-capable text model on upload to produce a rough top-down
 # floor-plan description; the salesman positions furniture blocks against
 # it. This JSON is NEVER sent to the image generation model — testing
-# showed doing so makes the render worse. The live prompt lives in the
-# `settings` table (key "vision_prompt"), editable with no redeploy; this
-# constant is only the seed value on first run.
+# showed doing so makes the render worse. The live prompt and model both
+# live in the `settings` table (keys "vision_prompt" and "vision_model"),
+# editable from /admin/prompt with no redeploy; these constants are only
+# the seed values on first run.
 #
 # Model chosen by checking a live client.models.list() call rather than
-# guessing: "gpt-5-nano" is the cheapest vision-capable ($0.05/1M input,
-# $0.40/1M output) text model currently offered — cheaper than
-# gpt-4.1-nano ($0.10) and gpt-5.4-nano ($0.20), and confirmed to accept
-# image input ("Input modalities: text, image").
+# guessing, confirmed vision-capable via its own docs page ("Input
+# modalities: text, image").
 # ---------------------------------------------------------------------------
-VISION_MODEL_NAME = "gpt-5-nano"
+DEFAULT_VISION_MODEL = "gpt-6-luna"
+VISION_MODEL_SETTING_KEY = "vision_model"
 VISION_PROMPT_SETTING_KEY = "vision_prompt"
 DEFAULT_VISION_PROMPT = """\
 You are analysing a photograph of a room. Your output will be used to
@@ -609,6 +609,23 @@ def migrate_to_shops(db: Session) -> None:
     logger.info("multi-tenant migration complete: created shop %r", shop.name)
 
 
+def migrate_item_placements(db: Session) -> None:
+    """One-time move of items.placement from a single geometry dict to a
+    JSONB array of {sub_index, label, shape, geometry} entries, one per
+    placeable sub-piece (see compute_sub_pieces). Idempotent: an item whose
+    placement is already a list has already been migrated and is skipped."""
+    migrated = 0
+    for item in db.query(Item).filter(Item.placement.isnot(None)).all():
+        if isinstance(item.placement, list):
+            continue
+        first = compute_sub_pieces(item)[0]
+        item.placement = [{"sub_index": 0, "label": first["label"], "shape": first["shape"], "geometry": item.placement}]
+        migrated += 1
+    if migrated:
+        db.flush()
+        logger.info("migrated %d item placements to sub-piece array format", migrated)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -709,6 +726,9 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == VISION_PROMPT_SETTING_KEY).first() is None:
             db.add(Setting(key=VISION_PROMPT_SETTING_KEY, value=DEFAULT_VISION_PROMPT))
             logger.info("seeded default vision prompt")
+        if db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first() is None:
+            db.add(Setting(key=VISION_MODEL_SETTING_KEY, value=DEFAULT_VISION_MODEL))
+            logger.info("seeded default vision model")
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
 
         # one-time cleanup: a previously-saved custom generation prompt may
@@ -726,6 +746,7 @@ async def lifespan(app: FastAPI):
             logger.info("stripped stale placement/stroke-map syntax from saved generation prompt")
 
         migrate_to_shops(db)
+        migrate_item_placements(db)
 
         # the superadmin used to have a login mobile; it isn't one anymore
         # (/super/login takes a password only) — clear it once, idempotently.
@@ -935,6 +956,10 @@ def get_active_vision_prompt(db: Session) -> str:
     return get_setting(db, VISION_PROMPT_SETTING_KEY, DEFAULT_VISION_PROMPT)
 
 
+def get_active_vision_model(db: Session) -> str:
+    return get_setting(db, VISION_MODEL_SETTING_KEY, DEFAULT_VISION_MODEL)
+
+
 # ---------------------------------------------------------------------------
 # Vision layout — fired in the background on room-photo upload, never
 # awaited by the upload response. A salesman input aid only, never sent to
@@ -949,6 +974,7 @@ async def run_vision_job(room_id: int) -> None:
         if room is None:
             return
         prompt = get_active_vision_prompt(db)
+        model = get_active_vision_model(db)
         room_path = DATA_ROOT / room.photo_path
         try:
             data = room_path.read_bytes()
@@ -957,7 +983,7 @@ async def run_vision_job(room_id: int) -> None:
 
             def call_vision_api():
                 return client.chat.completions.create(
-                    model=VISION_MODEL_NAME,
+                    model=model,
                     messages=[
                         {
                             "role": "user",
@@ -1065,6 +1091,51 @@ CONFIG_NOTES = {
 }
 MULTI_PIECE_SOFA_TYPES = {"3+2", "3+3", "3+2+1"}
 MULTI_PIECE_WIDTH_NOTE = "The stated width refers to the largest single sofa in the set, not the combined width of all pieces."
+SEAT_COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+
+def seat_count_word(n: int) -> str:
+    return SEAT_COUNT_WORDS.get(n, str(n))
+
+
+def multi_piece_segments(type_: str) -> list[int] | None:
+    """Parses a multi-piece type string like "3+2" into per-sofa seat
+    counts, e.g. [3, 2]. Returns None if it isn't a valid "n+n[+n]" string."""
+    parts = type_.split("+")
+    if len(parts) < 2:
+        return None
+    segments = []
+    for part in parts:
+        part = part.strip()
+        if not part.isdigit() or int(part) <= 0:
+            return None
+        segments.append(int(part))
+    return segments
+
+
+def compute_sub_pieces(item: Item) -> list[dict]:
+    """The stable, zero-based breakdown of placeable sub-pieces for an item:
+    one entry per physical piece a salesman can place a block for. A
+    multi-piece sofa (e.g. "3+2") splits into one rect entry per sofa,
+    each sized from the item's stated width_ft in proportion to its seat
+    count against the largest segment (see MULTI_PIECE_WIDTH_NOTE — the
+    stated width is that largest sofa's width, not the combined width).
+    Everything else — including L-shape and Curved sofas — is a single
+    entry labelled by the item's own type."""
+    if item.category == "Sofa" and item.type in MULTI_PIECE_SOFA_TYPES:
+        segments = multi_piece_segments(item.type)
+        if segments:
+            per_seat_width = item.width_ft / max(segments)
+            return [
+                {
+                    "sub_index": i,
+                    "label": f"{seats}-seater",
+                    "shape": "rect",
+                    "width_ft": float(round(per_seat_width * seats)),
+                }
+                for i, seats in enumerate(segments)
+            ]
+    return [{"sub_index": 0, "label": item.type, "shape": item.shape, "width_ft": item.width_ft}]
 
 
 def build_image_manifest(items: list[Item]) -> str:
@@ -1297,26 +1368,59 @@ def _format_piece_list(numbers: list[int]) -> str:
     return ", ".join(labels[:-1]) + f" and {labels[-1]}"
 
 
+def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
+    """One record per placed sub-piece, in item order then sub_index order.
+    Sub-pieces with no placement are left out entirely — {{PLACEMENT}} only
+    describes what was actually placed, even though {{PIECES}} (see
+    build_pieces_text) lists all of them. Sub-pieces of the same item share
+    that item's Image number, since they come from one reference photo."""
+    records = []
+    for item_index, item in enumerate(items):
+        image_number = item_index + 2  # Image 1 is the room; products follow in add order
+        sub_pieces = {sp["sub_index"]: sp for sp in compute_sub_pieces(item)}
+        is_split = len(sub_pieces) > 1
+        placed_entries = sorted((item.placement or []), key=lambda e: e.get("sub_index", 0))
+        for entry in placed_entries:
+            sub_piece = sub_pieces.get(entry.get("sub_index"))
+            if sub_piece is None or entry.get("geometry") is None:
+                continue
+            if is_split:
+                seats = int(sub_piece["label"].split("-")[0])
+                description = f"{seat_count_word(seats)}-seater {item.category.lower()}"
+            else:
+                description = f"{item.category} ({item.type})"
+            records.append(
+                {
+                    "item": item,
+                    "image_number": image_number,
+                    "shape": sub_piece["shape"],
+                    "geometry": entry["geometry"],
+                    "width_ft": sub_piece["width_ft"],
+                    "description": description,
+                    "is_split": is_split,
+                }
+            )
+    return records
+
+
 def build_placement_text(items: list[Item], layout_json: dict | None, ignore_placement: bool) -> str:
-    placed = [item for item in items if item.placement]
-    if ignore_placement or not placed:
+    records = flatten_placed_subpieces(items)
+    if ignore_placement or not records:
         return NO_PLACEMENT_LINE + "\n"
 
     resolved = []
-    for item in items:
-        if not item.placement:
-            resolved.append({"wall": None, "sentence": NO_PLACEMENT_LINE, "span": (None, None), "sort_key": None})
-        elif item.shape == "L":
-            resolved.append(resolve_l_placement(item.placement))
+    for rec in records:
+        if rec["shape"] == "L":
+            resolved.append(resolve_l_placement(rec["geometry"]))
         else:
-            resolved.append(resolve_rect_placement(item.placement))
+            resolved.append(resolve_rect_placement(rec["geometry"]))
 
     wall_groups: dict[str, list[int]] = {}
     for idx, r in enumerate(resolved):
         if r["wall"]:
             wall_groups.setdefault(r["wall"], []).append(idx)
 
-    neighbour_clause: list[str | None] = [None] * len(items)
+    neighbour_clause: list[str | None] = [None] * len(records)
     for wall, idxs in wall_groups.items():
         ordered = sorted(idxs, key=lambda i: resolved[i]["sort_key"])
         for pos in range(1, len(ordered)):
@@ -1334,10 +1438,14 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
 
     lines: list[str] = []
     counter = 1
-    for idx, item in enumerate(items):
+    item_groups: dict[int, dict] = {}
+    for idx, rec in enumerate(records):
         piece_number = idx + 1
-        image_number = idx + 2  # Image 1 is the room; products follow in add order
-        lines.append(f"Piece {piece_number} — {item.category} ({item.type}), {item.width_ft:g} ft, from Image {image_number}.")
+        group = item_groups.setdefault(
+            rec["item"].id, {"image_number": rec["image_number"], "is_split": rec["is_split"], "piece_numbers": []}
+        )
+        group["piece_numbers"].append(piece_number)
+        lines.append(f"Piece {piece_number} — {rec['description']}, {rec['width_ft']:g} ft, from Image {rec['image_number']}.")
         lines.append(f"{counter}. {resolved[idx]['sentence']}")
         counter += 1
         extra_parts = []
@@ -1364,7 +1472,16 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
         )
         counter += 1
 
-    if len({item.photo_path for item in items}) >= 2:
+    for group in item_groups.values():
+        if group["is_split"] and len(group["piece_numbers"]) >= 2:
+            lines.append(
+                f"{counter}. Pieces {_format_piece_list(group['piece_numbers'])} are separate sofas belonging "
+                f"to one set. They share the same design from Image {group['image_number']} and must match "
+                "each other exactly."
+            )
+            counter += 1
+
+    if len({rec["item"].photo_path for rec in records}) >= 2:
         lines.append(
             f"{counter}. Pieces from different reference photographs must clearly differ in material and "
             "colour, exactly as those photographs show."
@@ -1433,6 +1550,21 @@ def build_room_layout_text(layout_json: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_pieces_text(items: list[Item]) -> str:
+    """Lists every placeable sub-piece, not the parent item — a "3+2" sofa
+    lists its three-seater and two-seater separately, each with its own
+    estimated width, regardless of whether either has been placed yet."""
+    lines = []
+    for item in items:
+        sub_pieces = compute_sub_pieces(item)
+        if len(sub_pieces) > 1:
+            for sp in sub_pieces:
+                lines.append(f"- {item.category} ({sp['label']}), {sp['width_ft']:g} ft wide")
+        else:
+            lines.append(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide")
+    return "\n".join(lines)
+
+
 def build_prompt(
     template: str,
     room: Room,
@@ -1441,7 +1573,7 @@ def build_prompt(
     lighting: str,
     ignore_placement: bool,
 ) -> str:
-    pieces = "\n".join(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide" for item in items)
+    pieces = build_pieces_text(items)
     image_manifest = build_image_manifest(items)
     config_notes = build_config_notes(items)
     placement_text = build_placement_text(items, room.layout_json, ignore_placement)
@@ -1769,7 +1901,8 @@ def item_public(item: Item) -> dict:
         "width_ft": item.width_ft,
         "photo_url": f"/media/{item.photo_path}",
         "shape": item.shape,
-        "placement": item.placement,
+        "sub_pieces": compute_sub_pieces(item),
+        "placement": item.placement or [],
     }
 
 
@@ -1949,24 +2082,33 @@ def validate_placement(shape: str, placement: object) -> dict | None:
     return None
 
 
-def _set_item_placement(attempt: Attempt, item_id: int, placement: dict, db: Session) -> Attempt | JSONResponse:
+def _set_item_placement(
+    attempt: Attempt, item_id: int, sub_index: int, placement: dict, db: Session
+) -> Attempt | JSONResponse:
     item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    validated = validate_placement(item.shape, placement)
+    sub_piece = next((sp for sp in compute_sub_pieces(item) if sp["sub_index"] == sub_index), None)
+    if sub_piece is None:
+        return error_response(400, "invalid_sub_index", "That sub-piece doesn't exist for this item.")
+    validated = validate_placement(sub_piece["shape"], placement)
     if validated is None:
         return error_response(400, "invalid_placement", "That placement isn't valid for this piece's shape.")
-    item.placement = validated
+    entry = {"sub_index": sub_index, "label": sub_piece["label"], "shape": sub_piece["shape"], "geometry": validated}
+    remaining = [e for e in (item.placement or []) if e.get("sub_index") != sub_index]
+    remaining.append(entry)
+    remaining.sort(key=lambda e: e["sub_index"])
+    item.placement = remaining
     db.commit()
     db.refresh(attempt)
     return attempt
 
 
-def _clear_item_placement(attempt: Attempt, item_id: int, db: Session) -> Attempt | JSONResponse:
+def _clear_item_placement(attempt: Attempt, item_id: int, sub_index: int, db: Session) -> Attempt | JSONResponse:
     item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    item.placement = None
+    item.placement = [e for e in (item.placement or []) if e.get("sub_index") != sub_index]
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -2308,7 +2450,7 @@ def api_create_attempt(
                 width_ft=item.width_ft,
                 photo_path=item.photo_path,
                 shape=item.shape,
-                placement=item.placement,
+                placement=[dict(entry) for entry in item.placement] if item.placement else None,
             )
         )
 
@@ -2358,27 +2500,32 @@ def api_delete_item_from_attempt(
     return JSONResponse(content={"attempt": attempt_detail(result)})
 
 
-@app.post("/api/attempts/{attempt_id}/items/{item_id}/placement")
+@app.post("/api/attempts/{attempt_id}/items/{item_id}/placement/{sub_index}")
 def api_set_item_placement(
     attempt_id: int,
     item_id: int,
+    sub_index: int,
     body: PlacementBody,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    result = _set_item_placement(attempt, item_id, body.placement, db)
+    result = _set_item_placement(attempt, item_id, sub_index, body.placement, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})
 
 
-@app.delete("/api/attempts/{attempt_id}/items/{item_id}/placement")
+@app.delete("/api/attempts/{attempt_id}/items/{item_id}/placement/{sub_index}")
 def api_clear_item_placement(
-    attempt_id: int, item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    attempt_id: int,
+    item_id: int,
+    sub_index: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    result = _clear_item_placement(attempt, item_id, db)
+    result = _clear_item_placement(attempt, item_id, sub_index, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})
@@ -2889,12 +3036,26 @@ def api_admin_delete_user(
 # ---------------------------------------------------------------------------
 
 
-def prompt_setting_response(db: Session, setting: Setting | None) -> dict:
+def _prompt_settings(db: Session) -> tuple[Setting | None, Setting | None, Setting | None]:
+    rows = db.query(Setting).filter(
+        Setting.key.in_([PROMPT_SETTING_KEY, VISION_PROMPT_SETTING_KEY, VISION_MODEL_SETTING_KEY])
+    )
+    by_key = {row.key: row for row in rows}
+    return by_key.get(PROMPT_SETTING_KEY), by_key.get(VISION_PROMPT_SETTING_KEY), by_key.get(VISION_MODEL_SETTING_KEY)
+
+
+def prompt_setting_response(
+    db: Session, setting: Setting | None, vision_setting: Setting | None, model_setting: Setting | None
+) -> dict:
     return {
         "prompt": setting.value if setting else DEFAULT_GENERATION_PROMPT,
         "default_prompt": DEFAULT_GENERATION_PROMPT,
         "updated_at": setting.updated_at.isoformat() if setting and setting.updated_at else None,
         "placeholders": PROMPT_PLACEHOLDERS,
+        "vision_prompt": vision_setting.value if vision_setting else DEFAULT_VISION_PROMPT,
+        "default_vision_prompt": DEFAULT_VISION_PROMPT,
+        "vision_model": model_setting.value if model_setting else DEFAULT_VISION_MODEL,
+        "default_vision_model": DEFAULT_VISION_MODEL,
     }
 
 
@@ -2904,12 +3065,14 @@ def api_admin_get_prompt(
 ) -> JSONResponse:
     if resolve_admin_shop_id(owner, shop_id) is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
-    setting = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
-    return JSONResponse(content=prompt_setting_response(db, setting))
+    setting, vision_setting, model_setting = _prompt_settings(db)
+    return JSONResponse(content=prompt_setting_response(db, setting, vision_setting, model_setting))
 
 
 class PromptBody(BaseModel):
     prompt: str
+    vision_prompt: str | None = None
+    vision_model: str | None = None
     shop_id: int | None = None
 
 
@@ -2921,8 +3084,22 @@ def api_admin_save_prompt(
         return error_response(400, "no_shop_context", "Select a shop first.")
     if not body.prompt.strip():
         return error_response(400, "empty_prompt", "The prompt can't be empty.")
+    if body.vision_prompt is not None and not body.vision_prompt.strip():
+        return error_response(400, "empty_vision_prompt", "The vision prompt can't be empty.")
+    if body.vision_model is not None and not body.vision_model.strip():
+        return error_response(400, "empty_vision_model", "The vision model can't be empty.")
     setting = set_setting(db, PROMPT_SETTING_KEY, body.prompt)
-    return JSONResponse(content=prompt_setting_response(db, setting))
+    vision_setting = (
+        set_setting(db, VISION_PROMPT_SETTING_KEY, body.vision_prompt.strip())
+        if body.vision_prompt is not None
+        else db.query(Setting).filter(Setting.key == VISION_PROMPT_SETTING_KEY).first()
+    )
+    model_setting = (
+        set_setting(db, VISION_MODEL_SETTING_KEY, body.vision_model.strip())
+        if body.vision_model is not None
+        else db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first()
+    )
+    return JSONResponse(content=prompt_setting_response(db, setting, vision_setting, model_setting))
 
 
 @app.post("/api/admin/prompt/reset")
@@ -2932,7 +3109,8 @@ def api_admin_reset_prompt(
     if resolve_admin_shop_id(owner, shop_id) is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
     setting = set_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
-    return JSONResponse(content=prompt_setting_response(db, setting))
+    _, vision_setting, model_setting = _prompt_settings(db)
+    return JSONResponse(content=prompt_setting_response(db, setting, vision_setting, model_setting))
 
 
 # ---------------------------------------------------------------------------

@@ -3,82 +3,106 @@ import {
   ARC_TYPES,
   BAND_TYPES,
   DASHED_GAP_TYPES,
+  DOUBLE_DASHED_GAP_TYPES,
   GAP_TYPES,
   POINT_TYPES,
+  UNKNOWN_TYPES,
   WALL_KEY,
+  WINDOW_TYPES,
+  assignLabelRows,
+  cameraGeometry,
   clamp01,
   clampRectToRoom,
   facingArrowAngle,
   featureFootprint,
   featureSpan,
+  labelPosition,
+  mergeAdjacentFeatures,
+  planGeometry,
   rectsOverlap,
-  roomAspect,
   snapRect,
 } from "../placement.js";
 
 const WALLS = ["far", "left", "right", "near"];
 
-function viewBoxSize(depthVsWidth) {
-  const [aw, ah] = roomAspect(depthVsWidth);
-  const scale = 400 / Math.max(aw, ah);
-  return [Math.round(aw * scale), Math.round(ah * scale)];
-}
-
-function wallLine(wall, W, H) {
-  if (wall === "far") return { x1: 0, y1: 0, x2: W, y2: 0, axis: "x", length: W };
-  if (wall === "near") return { x1: 0, y1: H, x2: W, y2: H, axis: "x", length: W };
-  if (wall === "left") return { x1: 0, y1: 0, x2: 0, y2: H, axis: "y", length: H };
-  return { x1: W, y1: 0, x2: W, y2: H, axis: "y", length: H }; // right
+function wallLine(wall, geom) {
+  const { roomX, roomY, roomW, roomH } = geom;
+  if (wall === "far") return { x1: roomX, y1: roomY, x2: roomX + roomW, y2: roomY, axis: "x" };
+  if (wall === "near") return { x1: roomX, y1: roomY + roomH, x2: roomX + roomW, y2: roomY + roomH, axis: "x" };
+  if (wall === "left") return { x1: roomX, y1: roomY, x2: roomX, y2: roomY + roomH, axis: "y" };
+  return { x1: roomX + roomW, y1: roomY, x2: roomX + roomW, y2: roomY + roomH, axis: "y" }; // right
 }
 
 /** Point along a wall at normalised `t` (0-1), and an inward normal to
  * offset symbols/blocks slightly off the wall line. */
-function wallPoint(wall, t, W, H) {
-  if (wall === "far") return { x: t * W, y: 0, nx: 0, ny: 1 };
-  if (wall === "near") return { x: t * W, y: H, nx: 0, ny: -1 };
-  if (wall === "left") return { x: 0, y: t * H, nx: 1, ny: 0 };
-  return { x: W, y: t * H, nx: -1, ny: 0 }; // right
+function wallPoint(wall, t, geom) {
+  const { roomX, roomY, roomW, roomH } = geom;
+  if (wall === "far") return { x: roomX + t * roomW, y: roomY, nx: 0, ny: 1 };
+  if (wall === "near") return { x: roomX + t * roomW, y: roomY + roomH, nx: 0, ny: -1 };
+  if (wall === "left") return { x: roomX, y: roomY + t * roomH, nx: 1, ny: 0 };
+  return { x: roomX + roomW, y: roomY + t * roomH, nx: -1, ny: 0 }; // right
 }
 
-function cameraX(cameraPosition, W) {
-  const p = (cameraPosition || "").toLowerCase();
-  if (p.includes("left")) return W * 0.15;
-  if (p.includes("right")) return W * 0.85;
-  return W * 0.5;
+function segmentBetween(line, from, to, geom) {
+  if (from >= to) return { x1: line.x1, y1: line.y1, x2: line.x1, y2: line.y1 };
+  if (line.axis === "x") {
+    return { x1: line.x1 + from * geom.roomW, y1: line.y1, x2: line.x1 + to * geom.roomW, y2: line.y1 };
+  }
+  return { x1: line.x1, y1: line.y1 + from * geom.roomH, x2: line.x1, y2: line.y1 + to * geom.roomH };
 }
 
-function featureLabel(feature) {
-  return feature.type || "feature";
+/** Two thin lines spanning a gap, straddling the wall line — used for
+ * windows (solid) and glazed openings (dashed, "doubled"). */
+function parallelLines(a, b, dashed) {
+  const off1 = { x: a.nx * -2, y: a.ny * -2 };
+  const off2 = { x: a.nx * 2, y: a.ny * 2 };
+  const cls = "fp-window" + (dashed ? " fp-dashed" : "");
+  return (
+    <>
+      <line x1={a.x + off1.x} y1={a.y + off1.y} x2={b.x + off1.x} y2={b.y + off1.y} className={cls} />
+      <line x1={a.x + off2.x} y1={a.y + off2.y} x2={b.x + off2.x} y2={b.y + off2.y} className={cls} />
+    </>
+  );
 }
+
+function featureLabel(group) {
+  if ((group.type === "unknown" || group.type === "other") && group.notes) return group.notes;
+  return group.type || "feature";
+}
+
+const noop = () => {};
 
 export function FloorPlan({
   room,
-  blocks,
-  selectedKey,
-  onSelectBlock,
-  onMoveBlock,
-  onCommitBlock,
-  onRotateBlock,
-  onFlipBlock,
-  onRemoveBlock,
-  onDropPendingAt,
-  pendingKey,
-  addObstructionMode,
-  onAddObstructionAt,
-  onTapFeature,
-  onTapObstruction,
+  blocks = [],
+  selectedKey = null,
+  onSelectBlock = noop,
+  onMoveBlock = noop,
+  onCommitBlock = noop,
+  onRotateBlock = noop,
+  onFlipBlock = noop,
+  onRemoveBlock = noop,
+  onDropPendingAt = noop,
+  pendingKey = null,
+  addObstructionMode = false,
+  onAddObstructionAt = noop,
+  onTapFeature = noop,
+  onTapObstruction = noop,
+  readOnly = false,
 }) {
   const svgRef = useRef(null);
   const dragRef = useRef(null); // { key, pointerId, grabDx, grabDy }
 
   const layout = room.layout_json;
-  const [W, H] = viewBoxSize(layout?.depth_vs_width);
+  const geom = planGeometry(layout?.depth_vs_width);
 
   function toNormalized(clientX, clientY) {
     const rect = svgRef.current.getBoundingClientRect();
+    const px = ((clientX - rect.left) / rect.width) * geom.planW;
+    const py = ((clientY - rect.top) / rect.height) * geom.planH;
     return {
-      x: clamp01((clientX - rect.left) / rect.width),
-      y: clamp01((clientY - rect.top) / rect.height),
+      x: clamp01((px - geom.roomX) / geom.roomW),
+      y: clamp01((py - geom.roomY) / geom.roomH),
     };
   }
 
@@ -136,30 +160,32 @@ export function FloorPlan({
 
   function renderWallFeatures(wall) {
     const wallData = layout?.[WALL_KEY[wall]];
-    const features = wallData?.features || [];
     const partial = wallData?.confidence === "partial";
-    const line = wallLine(wall, W, H);
+    const groups = mergeAdjacentFeatures(wallData?.features || []);
+    const rows = assignLabelRows(groups, geom, wall);
+    const line = wallLine(wall, geom);
     const elements = [];
     let cursor = 0;
 
-    features.forEach((feature, index) => {
-      const span = featureSpan(feature.position, feature.size);
-      if (!span) return;
-      const [start, end] = span;
-      const a = wallPoint(wall, start, W, H);
-      const b = wallPoint(wall, end, W, H);
-      const mid = wallPoint(wall, (start + end) / 2, W, H);
-      const dashed = partial ? "6 4" : DASHED_GAP_TYPES.has(feature.type) ? "5 5" : null;
-      const key = `${wall}-feature-${index}`;
+    groups.forEach((group, gi) => {
+      const [start, end] = group.span;
+      const a = wallPoint(wall, start, geom);
+      const b = wallPoint(wall, end, geom);
+      const mid = wallPoint(wall, (start + end) / 2, geom);
+      const key = `${wall}-feature-${gi}`;
+      const type = group.type;
 
-      if (GAP_TYPES.has(feature.type)) {
-        // solid wall segment before the gap
-        elements.push(<line key={`${key}-pre`} {...segmentBetween(line, cursor, start, W, H)} className="fp-wall" />);
+      if (GAP_TYPES.has(type)) {
+        elements.push(<line key={`${key}-pre`} {...segmentBetween(line, cursor, start, geom)} className="fp-wall" />);
         cursor = end;
-        if (DASHED_GAP_TYPES.has(feature.type)) {
+        if (WINDOW_TYPES.has(type)) {
+          elements.push(<g key={`${key}-sym`}>{parallelLines(a, b, false)}</g>);
+        } else if (DOUBLE_DASHED_GAP_TYPES.has(type)) {
+          elements.push(<g key={`${key}-sym`}>{parallelLines(a, b, true)}</g>);
+        } else if (DASHED_GAP_TYPES.has(type)) {
           elements.push(<line key={`${key}-d1`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="fp-wall fp-dashed" />);
         }
-        if (ARC_TYPES.has(feature.type)) {
+        if (ARC_TYPES.has(type)) {
           const r = Math.hypot(b.x - a.x, b.y - a.y);
           const swingX = a.x + a.nx * r;
           const swingY = a.y + a.ny * r;
@@ -171,38 +197,27 @@ export function FloorPlan({
             />
           );
         }
-      } else if (feature.type === "window") {
-        const offset1 = { x: a.nx * 3, y: a.ny * 3 };
-        const offset2 = { x: a.nx * 7, y: a.ny * 7 };
-        elements.push(
-          <g key={key}>
-            <line x1={a.x + offset1.x} y1={a.y + offset1.y} x2={b.x + offset1.x} y2={b.y + offset1.y} className="fp-window" />
-            <line x1={a.x + offset2.x} y1={a.y + offset2.y} x2={b.x + offset2.x} y2={b.y + offset2.y} className="fp-window" />
-          </g>
-        );
-      } else if (BAND_TYPES.has(feature.type)) {
+        if (UNKNOWN_TYPES.has(type)) {
+          elements.push(
+            <text key={`${key}-q`} x={mid.x + mid.nx * 11} y={mid.y + mid.ny * 11 + 3} className="fp-unknown-mark" textAnchor="middle">
+              ?
+            </text>
+          );
+        }
+      } else if (BAND_TYPES.has(type)) {
         elements.push(
           <line
             key={key}
             x1={a.x + a.nx * 5} y1={a.y + a.ny * 5}
             x2={b.x + a.nx * 5} y2={b.y + a.ny * 5}
             className="fp-band"
-            strokeDasharray="4 3"
           />
         );
-      } else if (POINT_TYPES.has(feature.type)) {
-        elements.push(
-          <rect
-            key={key}
-            x={mid.x + mid.nx * 8 - 5} y={mid.y + mid.ny * 8 - 5}
-            width="10" height="10"
-            className="fp-pillar"
-          />
-        );
+      } else if (POINT_TYPES.has(type)) {
+        elements.push(<rect key={key} x={mid.x + mid.nx * 8 - 5} y={mid.y + mid.ny * 8 - 5} width="10" height="10" className="fp-pillar" />);
       }
 
-      if (dashed && !GAP_TYPES.has(feature.type)) {
-        // partial-confidence outline for a non-gap feature: a faint dashed box around it
+      if (partial && !GAP_TYPES.has(type)) {
         elements.push(
           <rect
             key={`${key}-unsure`}
@@ -213,9 +228,11 @@ export function FloorPlan({
         );
       }
 
+      const label = labelPosition(wall, group.span, rows[gi], geom);
+      elements.push(<line key={`${key}-leader`} x1={mid.x} y1={mid.y} x2={label.x} y2={label.y} className="fp-leader" />);
       elements.push(
-        <text key={`${key}-label`} x={mid.x + mid.nx * 14} y={mid.y + mid.ny * 14} className="fp-label" textAnchor="middle">
-          {featureLabel(feature)}
+        <text key={`${key}-label`} x={label.x} y={label.y} className="fp-label" textAnchor={label.anchor}>
+          {featureLabel(group)}
           {partial ? " ?" : ""}
         </text>
       );
@@ -226,15 +243,19 @@ export function FloorPlan({
           x={Math.min(a.x, b.x) - 6} y={Math.min(a.y, b.y) - 6}
           width={Math.max(Math.abs(b.x - a.x), 12) + 12} height={Math.max(Math.abs(b.y - a.y), 12) + 12}
           className="fp-hit"
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            onTapFeature(wall, index);
-          }}
+          onPointerUp={
+            readOnly
+              ? undefined
+              : (e) => {
+                  e.stopPropagation();
+                  onTapFeature(wall, group.indices);
+                }
+          }
         />
       );
     });
 
-    elements.push(<line key={`${wall}-tail`} {...segmentBetween(line, cursor, 1, W, H)} className="fp-wall" />);
+    elements.push(<line key={`${wall}-tail`} {...segmentBetween(line, cursor, 1, geom)} className="fp-wall" />);
     return elements;
   }
 
@@ -243,31 +264,43 @@ export function FloorPlan({
     return obstructions
       .map((o, index) => (o.x != null && o.y != null ? { o, index } : null))
       .filter(Boolean)
-      .map(({ o, index }) => (
-        <g key={`obstruction-${index}`}>
-          <rect x={o.x * W - 6} y={o.y * H - 6} width="12" height="12" className="fp-pillar" />
-          <text x={o.x * W} y={o.y * H - 12} className="fp-label" textAnchor="middle">
-            {o.type || "obstruction"}
-          </text>
-          <rect
-            x={o.x * W - 14} y={o.y * H - 14} width="28" height="28"
-            className="fp-hit"
-            onPointerUp={(e) => {
-              e.stopPropagation();
-              onTapObstruction(index);
-            }}
-          />
-        </g>
-      ));
+      .map(({ o, index }) => {
+        const px = geom.roomX + o.x * geom.roomW;
+        const py = geom.roomY + o.y * geom.roomH;
+        return (
+          <g key={`obstruction-${index}`}>
+            <rect x={px - 6} y={py - 6} width="12" height="12" className="fp-pillar" />
+            <text x={px} y={py - 12} className="fp-label" textAnchor="middle">
+              {o.type || "obstruction"}
+            </text>
+            <rect
+              x={px - 14} y={py - 14} width="28" height="28"
+              className="fp-hit"
+              onPointerUp={
+                readOnly
+                  ? undefined
+                  : (e) => {
+                      e.stopPropagation();
+                      onTapObstruction(index);
+                    }
+              }
+            />
+          </g>
+        );
+      });
   }
 
   function renderCamera() {
     if (!layout) return null;
-    const cx = cameraX(layout.camera_position, W);
+    const cam = cameraGeometry(layout.camera_position, geom);
     return (
       <g className="fp-camera">
-        <circle cx={cx} cy={H + 14} r="7" />
-        <text x={cx} y={H + 32} className="fp-label" textAnchor="middle">camera</text>
+        <line x1={cam.cx} y1={cam.cy} x2={cam.fanLeft.x} y2={cam.fanLeft.y} className="fp-camera-fan" />
+        <line x1={cam.cx} y1={cam.cy} x2={cam.fanRight.x} y2={cam.fanRight.y} className="fp-camera-fan" />
+        <circle cx={cam.cx} cy={cam.cy} r={cam.r} />
+        <text x={cam.cx} y={cam.labelY} className="fp-label" textAnchor="middle">
+          Camera
+        </text>
       </g>
     );
   }
@@ -294,27 +327,26 @@ export function FloorPlan({
   }
 
   function renderBlockRect(block, rect, selected) {
-    const cx = (rect.x + rect.w / 2) * W;
-    const cy = (rect.y + rect.h / 2) * H;
+    const px = geom.roomX + rect.x * geom.roomW;
+    const py = geom.roomY + rect.y * geom.roomH;
+    const pw = rect.w * geom.roomW;
+    const ph = rect.h * geom.roomH;
+    const cx = px + pw / 2;
+    const cy = py + ph / 2;
     const angle = facingArrowAngle(rect.rotation);
     return (
       <g
-        key={selected ? `${block.key}-rect` : undefined}
-        onPointerDown={(e) => startDrag(e, block, rect)}
-        onPointerMove={(e) => moveDrag(e, block)}
-        onPointerUp={(e) => endDrag(e, block)}
-        onPointerCancel={(e) => endDrag(e, block)}
-        style={{ touchAction: "none", cursor: "grab" }}
+        onPointerDown={readOnly ? undefined : (e) => startDrag(e, block, rect)}
+        onPointerMove={readOnly ? undefined : (e) => moveDrag(e, block)}
+        onPointerUp={readOnly ? undefined : (e) => endDrag(e, block)}
+        onPointerCancel={readOnly ? undefined : (e) => endDrag(e, block)}
+        style={readOnly ? undefined : { touchAction: "none", cursor: "grab" }}
       >
-        <rect
-          x={rect.x * W} y={rect.y * H} width={rect.w * W} height={rect.h * H}
-          fill={block.color} fillOpacity="0.28" stroke={block.color} strokeWidth={selected ? 2.5 : 1.5}
-          rx="3"
-        />
+        <rect x={px} y={py} width={pw} height={ph} fill={block.color} fillOpacity="0.28" stroke={block.color} strokeWidth={selected ? 2.5 : 1.5} rx="3" />
         <g transform={`translate(${cx} ${cy}) rotate(${angle})`}>
           <path d="M 0 -9 L 5 1 L -5 1 Z" fill={block.color} />
         </g>
-        <text x={cx} y={cy + (rect.h * H) / 2 + 12} className="fp-block-number" textAnchor="middle">
+        <text x={cx} y={py + ph + 12} className="fp-block-number" textAnchor="middle">
           {block.number}
         </text>
       </g>
@@ -323,8 +355,8 @@ export function FloorPlan({
 
   function renderSelectedControls(block) {
     const anchor = block.shape === "L" ? block.placement.long : block.placement;
-    const hx = (anchor.x + anchor.w) * W;
-    const hy = anchor.y * H;
+    const hx = geom.roomX + (anchor.x + anchor.w) * geom.roomW;
+    const hy = geom.roomY + anchor.y * geom.roomH;
     return (
       <g key={`${block.key}-controls`}>
         <circle
@@ -374,11 +406,12 @@ export function FloorPlan({
   return (
     <svg
       ref={svgRef}
-      viewBox={`0 0 ${W} ${H}`}
+      viewBox={`0 0 ${geom.planW} ${geom.planH}`}
       className="floor-plan-svg"
-      onPointerUp={handleBackgroundPointerUp}
+      style={{ aspectRatio: `${geom.planW} / ${geom.planH}` }}
+      onPointerUp={readOnly ? undefined : handleBackgroundPointerUp}
     >
-      <rect x="0" y="0" width={W} height={H} className="fp-floor" />
+      <rect x={geom.roomX} y={geom.roomY} width={geom.roomW} height={geom.roomH} className="fp-floor" />
       {WALLS.map((wall) => (
         <g key={wall}>{renderWallFeatures(wall)}</g>
       ))}
@@ -402,36 +435,27 @@ export function FloorPlan({
               )}
               {warning ? (
                 <>
-                  {(block.shape === "L" ? [block.placement.long, block.placement.short] : [block.placement]).map(
-                    (rect, i) => (
-                      <rect
-                        key={i}
-                        x={rect.x * W - 2} y={rect.y * H - 2} width={rect.w * W + 4} height={rect.h * H + 4}
-                        className="fp-warning-outline"
-                      />
-                    )
-                  )}
+                  {(block.shape === "L" ? [block.placement.long, block.placement.short] : [block.placement]).map((rect, i) => (
+                    <rect
+                      key={i}
+                      x={geom.roomX + rect.x * geom.roomW - 2} y={geom.roomY + rect.y * geom.roomH - 2}
+                      width={rect.w * geom.roomW + 4} height={rect.h * geom.roomH + 4}
+                      className="fp-warning-outline"
+                    />
+                  ))}
                   <text
-                    x={(block.shape === "L" ? block.placement.long.x : block.placement.x) * W}
-                    y={(block.shape === "L" ? block.placement.long.y : block.placement.y) * H - 6}
+                    x={geom.roomX + (block.shape === "L" ? block.placement.long.x : block.placement.x) * geom.roomW}
+                    y={geom.roomY + (block.shape === "L" ? block.placement.long.y : block.placement.y) * geom.roomH - 6}
                     className="fp-warning-label"
                   >
                     Overlaps {warning}
                   </text>
                 </>
               ) : null}
-              {selected ? renderSelectedControls(block) : null}
+              {!readOnly && selected ? renderSelectedControls(block) : null}
             </g>
           );
         })}
     </svg>
   );
-}
-
-function segmentBetween(line, from, to, W, H) {
-  if (from >= to) return { x1: line.x1, y1: line.y1, x2: line.x1, y2: line.y1 };
-  if (line.axis === "x") {
-    return { x1: line.x1 + from * W, y1: line.y1, x2: line.x1 + to * W, y2: line.y1 };
-  }
-  return { x1: line.x1, y1: line.y1 + from * H, x2: line.x1, y2: line.y1 + to * H };
 }

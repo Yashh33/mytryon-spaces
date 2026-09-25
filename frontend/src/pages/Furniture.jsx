@@ -6,6 +6,8 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
+import { BottomSheet } from "../components/BottomSheet.jsx";
+import { RoomPlanView } from "../components/RoomPlanView.jsx";
 
 const ITEM_TYPES = {
   Sofa: ["3+2", "3+3", "L-shape", "Curved"],
@@ -26,6 +28,7 @@ export default function Furniture() {
   const [width, setWidth] = useState("");
   const [photo, setPhoto] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [showPlan, setShowPlan] = useState(false);
 
   async function load() {
     setError(null);
@@ -41,6 +44,23 @@ export default function Furniture() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Poll while the vision layout job is still running, so the "View room
+  // plan" sheet updates live even from this earlier step — the call takes
+  // ~20s and a salesman often reaches this step well before it's ready.
+  useEffect(() => {
+    if (!attempt || attempt.room.layout_status !== "pending") return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const data = await api.get(`/api/rooms/${attempt.room.id}`);
+        setAttempt((prev) => (prev ? { ...prev, room: { ...prev.room, ...data.room } } : prev));
+      } catch {
+        // transient — keep polling
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt?.room?.id, attempt?.room?.layout_status]);
 
   async function handleDelete(itemId) {
     try {
@@ -82,7 +102,12 @@ export default function Furniture() {
     <div className="screen">
       <TopBar backTo={`/room/${attempt.room.id}`} />
       <div className="eyebrow">Step 2 of 4</div>
-      <h1 style={{ marginBottom: 18 }}>Add furniture</h1>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+        <h1 style={{ marginBottom: 0 }}>Add furniture</h1>
+        <button type="button" className="link-btn" onClick={() => setShowPlan(true)}>
+          View room plan
+        </button>
+      </div>
 
       {attempt.items.map((it) => (
         <div key={it.id} className="item-row">
@@ -156,6 +181,12 @@ export default function Furniture() {
       >
         Next — placement
       </button>
+
+      {showPlan ? (
+        <BottomSheet title="Room plan" onClose={() => setShowPlan(false)}>
+          <RoomPlanView room={attempt.room} readOnly />
+        </BottomSheet>
+      ) : null}
     </div>
   );
 }

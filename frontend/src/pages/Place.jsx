@@ -5,22 +5,19 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { FloorPlan } from "../components/FloorPlan.jsx";
+import { RoomPlanView } from "../components/RoomPlanView.jsx";
 import {
   ADDABLE_FEATURE_TYPES,
   FAR_NEAR_POSITIONS,
   SIDE_POSITIONS,
   WALL_KEY,
-  clearSubPlacement,
   defaultBlocksFurniture,
   defaultLFor,
   defaultRectFor,
   flipLPlacement,
   itemsToBlocks,
-  loadSubPlacement,
   nextRotation,
   rotateLPlacement,
-  saveSubPlacement,
 } from "../placement.js";
 
 function emptyLayout() {
@@ -56,11 +53,7 @@ export default function Place() {
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
-      setBlocks(
-        itemsToBlocks(data.attempt.items).map((b) =>
-          b.persisted ? b : { ...b, placement: loadSubPlacement(id, b.itemId, b.subIndex) }
-        )
-      );
+      setBlocks(itemsToBlocks(data.attempt.items));
     } catch (err) {
       setError(err.message);
     }
@@ -94,25 +87,24 @@ export default function Place() {
     setBlocks((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
   }
 
+  // Both calls resync attempt + blocks from the server's response rather
+  // than trusting the optimistic local update alone, so the chip/canvas
+  // placed-state can never drift from what's actually persisted.
   async function persistPlacement(block, placement) {
-    if (!block.persisted) {
-      saveSubPlacement(id, block.itemId, block.subIndex, placement);
-      return;
-    }
     try {
-      await api.post(`/api/attempts/${id}/items/${block.itemId}/placement`, { json: { placement } });
+      const data = await api.post(`/api/attempts/${id}/items/${block.itemId}/placement/${block.subIndex}`, { json: { placement } });
+      setAttempt(data.attempt);
+      setBlocks(itemsToBlocks(data.attempt.items));
     } catch (err) {
       toast(err.message);
     }
   }
 
   async function removePlacement(block) {
-    if (!block.persisted) {
-      clearSubPlacement(id, block.itemId, block.subIndex);
-      return;
-    }
     try {
-      await api.del(`/api/attempts/${id}/items/${block.itemId}/placement`);
+      const data = await api.del(`/api/attempts/${id}/items/${block.itemId}/placement/${block.subIndex}`);
+      setAttempt(data.attempt);
+      setBlocks(itemsToBlocks(data.attempt.items));
     } catch (err) {
       toast(err.message);
     }
@@ -173,7 +165,9 @@ export default function Place() {
     const block = blocks.find((b) => b.key === key);
     if (!block) return;
     updateBlock(key, { placement: null });
-    setSelectedKey(null);
+    // Keep it selected (now unplaced) rather than deselecting, so it's
+    // immediately pending — no second tap needed to re-place it.
+    setSelectedKey(key);
     removePlacement(block);
   }
 
@@ -196,11 +190,12 @@ export default function Place() {
     }));
   }
 
-  function handleTapFeature(wall, index) {
+  function handleTapFeature(wall, indices) {
     const key = WALL_KEY[wall];
+    const toRemove = new Set(Array.isArray(indices) ? indices : [indices]);
     updateLayout((layout) => ({
       ...layout,
-      [key]: { ...layout[key], features: (layout[key]?.features || []).filter((_, i) => i !== index) },
+      [key]: { ...layout[key], features: (layout[key]?.features || []).filter((_, i) => !toRemove.has(i)) },
     }));
   }
 
@@ -238,37 +233,23 @@ export default function Place() {
         {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}
       </div>
 
-      {room.layout_status === "pending" ? (
-        <div className="floor-plan-skeleton">
-          <div className="skel" style={{ position: "absolute", inset: 0, borderRadius: 12 }} />
-          <div className="floor-plan-skeleton-label">
-            <span className="spinner-inline" /> Reading the room…
-          </div>
-        </div>
-      ) : (
-        <div className="floor-plan-wrap">
-          {room.layout_status === "failed" ? (
-            <div className="floor-plan-failed-note">The room layout couldn&rsquo;t be read. You can still add walls and pieces by hand.</div>
-          ) : null}
-          <FloorPlan
-            room={room}
-            blocks={blocks}
-            selectedKey={selectedKey}
-            onSelectBlock={handleSelectBlock}
-            onMoveBlock={handleMoveBlock}
-            onCommitBlock={handleCommitBlock}
-            onRotateBlock={handleRotateBlock}
-            onFlipBlock={handleFlipBlock}
-            onRemoveBlock={handleRemoveBlock}
-            onDropPendingAt={handleDropPendingAt}
-            pendingKey={pendingKey}
-            addObstructionMode={addObstructionMode}
-            onAddObstructionAt={handleAddObstructionAt}
-            onTapFeature={handleTapFeature}
-            onTapObstruction={handleTapObstruction}
-          />
-        </div>
-      )}
+      <RoomPlanView
+        room={room}
+        blocks={blocks}
+        selectedKey={selectedKey}
+        onSelectBlock={handleSelectBlock}
+        onMoveBlock={handleMoveBlock}
+        onCommitBlock={handleCommitBlock}
+        onRotateBlock={handleRotateBlock}
+        onFlipBlock={handleFlipBlock}
+        onRemoveBlock={handleRemoveBlock}
+        onDropPendingAt={handleDropPendingAt}
+        pendingKey={pendingKey}
+        addObstructionMode={addObstructionMode}
+        onAddObstructionAt={handleAddObstructionAt}
+        onTapFeature={handleTapFeature}
+        onTapObstruction={handleTapObstruction}
+      />
 
       {room.layout_status !== "pending" ? (
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>

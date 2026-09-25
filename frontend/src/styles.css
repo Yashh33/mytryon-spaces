@@ -306,20 +306,23 @@ h2 { font-size: 19px; }
   border-radius: 9px; padding: 10px 12px; margin-bottom: 10px;
 }
 .floor-plan-svg {
-  width: 100%; aspect-ratio: 4/3; background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 12px;
   touch-action: none; display: block;
 }
 .fp-floor { fill: var(--page); }
-.fp-wall { stroke: var(--ink); stroke-width: 3; stroke-linecap: square; }
+.fp-wall { stroke: var(--ink); stroke-width: 2; stroke-linecap: square; }
 .fp-dashed { stroke-dasharray: 5 5; }
-.fp-window { stroke: var(--ink); stroke-width: 2; }
+.fp-window { stroke: var(--ink); stroke-width: 1.2; }
 .fp-door-arc { stroke: var(--ink2); stroke-width: 1.2; fill: none; stroke-dasharray: 3 3; }
-.fp-band { stroke: var(--ink2); stroke-width: 2; }
+.fp-band { stroke: var(--ink2); stroke-width: 1.2; stroke-dasharray: 4 3; }
 .fp-pillar { fill: var(--ink2); }
 .fp-unsure { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; rx: 3; }
 .fp-label { font-family: var(--mono); font-size: 9px; fill: var(--ink2); }
+.fp-leader { stroke: var(--muted); stroke-width: 0.5; stroke-dasharray: 3 2; }
+.fp-unknown-mark { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink2); }
 .fp-hit { fill: transparent; cursor: pointer; }
 .fp-camera circle { fill: #fff; stroke: var(--ink2); stroke-width: 1.5; }
+.fp-camera-fan { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 3 3; }
 .fp-camera text { fill: var(--muted); }
 .fp-block-number { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink); pointer-events: none; }
 .fp-handle { fill: #fff; stroke: var(--ink); stroke-width: 1.5; cursor: pointer; }

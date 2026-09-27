@@ -325,6 +325,10 @@ h2 { font-size: 19px; }
 .fp-camera-fan { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 3 3; }
 .fp-camera text { fill: var(--muted); }
 .fp-block-number { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink); pointer-events: none; }
+.fp-block-back { fill: none; stroke-width: 1.5; stroke-opacity: 0.55; stroke-linecap: round; pointer-events: none; }
+.fp-facing-arrow { pointer-events: none; }
+.fp-resize-handle { stroke: #fff; stroke-width: 2; }
+.fp-size-label { font-family: var(--mono); font-size: 8.5px; font-weight: 700; fill: var(--ink2); pointer-events: none; }
 .fp-handle { fill: #fff; stroke: var(--ink); stroke-width: 1.5; cursor: pointer; }
 .fp-flip-handle { stroke: var(--orange-d); }
 .fp-remove-handle { stroke: #C0392B; }

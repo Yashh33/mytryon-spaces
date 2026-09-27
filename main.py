@@ -39,8 +39,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
+import pillow_heif
 
 load_dotenv()
+# iPhone photos are HEIC/HEIF by default; Pillow can't decode them without this.
+pillow_heif.register_heif_opener()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger("mytryon")
@@ -294,11 +297,18 @@ ITEM_TYPES = {
     "Chair": ["Single", "Pair"],
     "Bed": ["Single", "Queen", "King"],
 }
-L_SHAPE_TYPES = {"L-shape", "Curved"}
+SHAPE_FOR_TYPE = {"L-shape": "L", "Curved": "curved"}
+ROUND_CAPABLE_CATEGORIES = {"Dining table", "Ottoman"}
+# 'L' and 'curved' share one geometry: {long, short, corner} (see validate_placement).
+ARM_SHAPES = {"L", "curved"}
 
 
-def derive_item_shape(type_: str) -> str:
-    return "L" if type_ in L_SHAPE_TYPES else "rect"
+def derive_item_shape(category: str, type_: str) -> str:
+    if type_ in SHAPE_FOR_TYPE:
+        return SHAPE_FOR_TYPE[type_]
+    if category in ROUND_CAPABLE_CATEGORIES and "round" in type_.lower():
+        return "round"
+    return "rect"
 
 DEFAULT_ROOM_TREATMENT = "luxury"
 ROOM_TREATMENT_CHOICES = ["luxury", "minimal"]
@@ -434,11 +444,12 @@ class Item(Base):
     type = Column(String, nullable=False)
     width_ft = Column(Float, nullable=False)
     photo_path = Column(String, nullable=False)
-    shape = Column(String, nullable=False)  # 'rect' | 'L' — derived from category/type, never chosen directly
-    # normalised (0-1) block placement on the room's floor plan — a salesman
-    # input aid only, never sent to the image model. A 'rect' placement is
-    # {x,y,w,h,rotation}; an 'L' placement is {long, short, corner} where
-    # long/short are each rects. See validate_placement() below.
+    # 'rect' | 'L' | 'curved' | 'round' — derived from category/type, never chosen directly
+    shape = Column(String, nullable=False)
+    # normalised (0-1) block placements on the room's floor plan, one entry
+    # per sub-piece. 'rect'/'round' geometry is {x,y,w,h,rotation}; 'L' and
+    # 'curved' geometry is {long, short, corner} where long/short are each
+    # rects. See validate_placement() below.
     placement = Column(JSONB, nullable=True)
 
 
@@ -626,6 +637,26 @@ def migrate_item_placements(db: Session) -> None:
         logger.info("migrated %d item placements to sub-piece array format", migrated)
 
 
+def migrate_item_shapes(db: Session) -> None:
+    """Re-derives item.shape (e.g. Curved used to share 'L' and is now
+    'curved') and relabels each placement entry's shape to match. Geometry is
+    untouched: 'curved' uses the same {long, short, corner} form 'L' did.
+    Idempotent: items already at their derived shape are skipped."""
+    migrated = 0
+    for item in db.query(Item).all():
+        shape = derive_item_shape(item.category, item.type)
+        if item.shape == shape:
+            continue
+        item.shape = shape
+        if isinstance(item.placement, list):
+            sub_shapes = {sp["sub_index"]: sp["shape"] for sp in compute_sub_pieces(item)}
+            item.placement = [{**e, "shape": sub_shapes.get(e.get("sub_index"), e.get("shape"))} for e in item.placement]
+        migrated += 1
+    if migrated:
+        db.flush()
+        logger.info("re-derived shape for %d items", migrated)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -642,7 +673,7 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS shape TEXT"))
         conn.execute(
             text(
-                "UPDATE items SET shape = CASE WHEN type IN ('L-shape', 'Curved') THEN 'L' ELSE 'rect' END "
+                "UPDATE items SET shape = CASE WHEN type = 'L-shape' THEN 'L' WHEN type = 'Curved' THEN 'curved' ELSE 'rect' END "
                 "WHERE shape IS NULL"
             )
         )
@@ -746,6 +777,7 @@ async def lifespan(app: FastAPI):
             logger.info("stripped stale placement/stroke-map syntax from saved generation prompt")
 
         migrate_to_shops(db)
+        migrate_item_shapes(db)
         migrate_item_placements(db)
 
         # the superadmin used to have a login mobile; it isn't one anymore
@@ -857,9 +889,21 @@ class UploadValidationError(Exception):
         self.message = message
 
 
+HEIF_MIME_TYPES = {"image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"}
+HEIF_EXTENSIONS = (".heic", ".heif")
+
+
+def _is_heif_upload(upload: UploadFile) -> bool:
+    content_type = (upload.content_type or "").lower()
+    filename = (upload.filename or "").lower()
+    return content_type in HEIF_MIME_TYPES or filename.endswith(HEIF_EXTENSIONS)
+
+
 async def read_validated_upload(upload: UploadFile) -> bytes:
-    content_type = upload.content_type or ""
-    if not content_type.startswith("image/"):
+    content_type = (upload.content_type or "").lower()
+    # Some browsers send HEIC with an empty or octet-stream type, so fall
+    # back to the file extension for those.
+    if not (content_type.startswith("image/") or _is_heif_upload(upload)):
         raise UploadValidationError(400, "invalid_type", "That doesn't look like a photo. Please choose an image.")
     data = await upload.read()
     if len(data) == 0:
@@ -867,6 +911,28 @@ async def read_validated_upload(upload: UploadFile) -> bytes:
     if len(data) > MAX_UPLOAD_BYTES:
         raise UploadValidationError(400, "too_large", "That photo is too large. Please use one under 12MB.")
     return data
+
+
+def convert_heif_to_jpeg(data: bytes) -> bytes:
+    """Converts HEIC/HEIF bytes (the iPhone default) to JPEG bytes, keeping
+    the EXIF orientation. Anything that isn't HEIF passes through unchanged."""
+    if not pillow_heif.is_supported(data):
+        return data
+    try:
+        with Image.open(io.BytesIO(data)) as heif_image:
+            exif = heif_image.getexif()
+            rgb = heif_image.convert("RGB")
+        out = io.BytesIO()
+        rgb.save(out, format="JPEG", quality=95, exif=exif)
+        return out.getvalue()
+    except Exception:
+        logger.exception("HEIC/HEIF conversion failed")
+        raise UploadValidationError(
+            400,
+            "heic_conversion_failed",
+            "We couldn't convert that iPhone photo (HEIC). Try again, or set Camera > Formats to "
+            "\"Most Compatible\" on the iPhone and retake it.",
+        )
 
 
 def load_and_downscale(data: bytes) -> Image.Image:
@@ -883,7 +949,7 @@ def load_and_downscale(data: bytes) -> Image.Image:
 async def save_validated_upload(upload: UploadFile, dest_dir: Path) -> str:
     """Validates, downscales to MAX_IMAGE_DIMENSION and saves to dest_dir.
     Returns the path relative to DATA_ROOT."""
-    data = await read_validated_upload(upload)
+    data = convert_heif_to_jpeg(await read_validated_upload(upload))
     image = load_and_downscale(data)
     filename = f"{uuid.uuid4().hex}.jpg"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1256,7 +1322,7 @@ def resolve_free_area(rect: dict) -> str:
     if y_label == "middle":
         return f"the {x_label} of the room"
     if x_label == "centre":
-        return f"the {y_label} of the room"
+        return f"the {y_label} end of the room"
     return f"the {y_label}-{x_label} of the room"
 
 
@@ -1323,6 +1389,10 @@ def resolve_l_placement(placement: dict) -> dict:
             f"The seats on the short arm face {FACING_FOR_ROTATION[short_rect['rotation']]}.",
         ]
     )
+    return _arm_resolution(long_rect, long_wall, sentence)
+
+
+def _arm_resolution(long_rect: dict, long_wall: str | None, sentence: str) -> dict:
     # the long arm anchors NEIGHBOURS/FEATURES grouping, since it's the one
     # that runs the full length of a wall
     if long_wall:
@@ -1331,6 +1401,42 @@ def resolve_l_placement(placement: dict) -> dict:
     else:
         start = end = sort_key = None
     return {"wall": long_wall, "sentence": sentence, "span": (start, end), "sort_key": sort_key}
+
+
+def _curved_end_clause(lead: str, wall_candidate: str, against: bool) -> str:
+    if against:
+        return f"{lead} reaches along the {wall_candidate} wall, close against it."
+    return f"{lead} reaches toward the {wall_candidate} wall but stands clear of it."
+
+
+def resolve_curved_placement(placement: dict) -> dict:
+    """A curved sofa shares the L's {long, short, corner} geometry, but is
+    one arc-backed piece: its back curves around `corner` and its two ends
+    run toward the walls either side of that corner."""
+    long_rect, short_rect, corner = placement["long"], placement["short"], placement["corner"]
+    long_wall, long_candidate = resolve_rect_wall(long_rect)
+    short_wall, short_candidate = resolve_rect_wall(short_rect)
+    sentence = " ".join(
+        [
+            f"It is one continuous curved sofa whose back arcs around the {corner} of the room.",
+            _curved_end_clause("One end", long_candidate, long_wall is not None),
+            _curved_end_clause("The other end", short_candidate, short_wall is not None),
+            f"Its seats face diagonally into the room, away from the {corner}.",
+        ]
+    )
+    return _arm_resolution(long_rect, long_wall, sentence)
+
+
+def resolve_round_placement(rect: dict) -> dict:
+    """A round piece (e.g. a round dining table) has no back to set against
+    a wall and no single seat direction, so it's described by position only."""
+    resolved = resolve_rect_placement(rect)
+    if resolved["wall"]:
+        position = resolve_wall_position(rect, resolved["wall"])
+        resolved["sentence"] = f"It stands close to the {resolved['wall']} wall, in the {position} of that wall."
+    else:
+        resolved["sentence"] = f"It stands in {resolve_free_area(rect)}, clear of the walls."
+    return resolved
 
 
 def _feature_label(feature: dict) -> str:
@@ -1412,6 +1518,10 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
     for rec in records:
         if rec["shape"] == "L":
             resolved.append(resolve_l_placement(rec["geometry"]))
+        elif rec["shape"] == "curved":
+            resolved.append(resolve_curved_placement(rec["geometry"]))
+        elif rec["shape"] == "round":
+            resolved.append(resolve_round_placement(rec["geometry"]))
         else:
             resolved.append(resolve_rect_placement(rec["geometry"]))
 
@@ -2021,7 +2131,7 @@ async def _add_item_to_attempt(
         type=type_,
         width_ft=width_ft,
         photo_path=photo_path,
-        shape=derive_item_shape(type_),
+        shape=derive_item_shape(category, type_),
     )
     db.add(item)
     db.commit()
@@ -2041,9 +2151,15 @@ def _delete_item_from_attempt(attempt: Attempt, item_id: int, db: Session) -> At
 
 class PlacementBody(BaseModel):
     placement: dict
+    # Set when the block was resized on the plan: the sub-piece's new length
+    # in feet, so the stored width (and so the prompt) matches the plan.
+    width_ft: float | None = None
 
 
 ROTATION_CHOICES = {0, 90, 180, 270}
+CORNER_CHOICES = {"far-left", "far-right", "near-left", "near-right"}
+MIN_RESIZE_WIDTH_FT = 1.0
+MAX_RESIZE_WIDTH_FT = 30.0
 
 
 def _validate_rect_placement(rect: object) -> dict | None:
@@ -2063,16 +2179,17 @@ def _validate_rect_placement(rect: object) -> dict | None:
 
 def validate_placement(shape: str, placement: object) -> dict | None:
     """Structurally validates a block placement against the item's derived
-    shape: a 'rect' placement is {x,y,w,h,rotation}; an 'L' placement is
-    {long, short, corner} where long/short are each rects. Coordinates are
-    normalised 0-1 and rotation is one of the four cardinal directions."""
+    shape: a 'rect' or 'round' placement is {x,y,w,h,rotation}; an 'L' or
+    'curved' placement is {long, short, corner} where long/short are each
+    rects. Coordinates are normalised 0-1 and rotation is one of the four
+    cardinal directions."""
     if not isinstance(placement, dict):
         return None
-    if shape == "rect":
+    if shape in ("rect", "round"):
         return _validate_rect_placement(placement)
-    if shape == "L":
+    if shape in ARM_SHAPES:
         corner = placement.get("corner")
-        if not isinstance(corner, str) or not corner.strip():
+        if not isinstance(corner, str) or corner.strip() not in CORNER_CHOICES:
             return None
         long_rect = _validate_rect_placement(placement.get("long"))
         short_rect = _validate_rect_placement(placement.get("short"))
@@ -2082,21 +2199,59 @@ def validate_placement(shape: str, placement: object) -> dict | None:
     return None
 
 
+def _scale_rect_about_centre(rect: dict, factor: float) -> dict:
+    w = min(rect["w"] * factor, 1.0)
+    h = min(rect["h"] * factor, 1.0)
+    cx = rect["x"] + rect["w"] / 2
+    cy = rect["y"] + rect["h"] / 2
+    x = min(max(cx - w / 2, 0.0), 1.0 - w)
+    y = min(max(cy - h / 2, 0.0), 1.0 - h)
+    return {**rect, "x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}
+
+
 def _set_item_placement(
-    attempt: Attempt, item_id: int, sub_index: int, placement: dict, db: Session
+    attempt: Attempt, item_id: int, sub_index: int, placement: dict, width_ft: float | None, db: Session
 ) -> Attempt | JSONResponse:
     item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
-    sub_piece = next((sp for sp in compute_sub_pieces(item) if sp["sub_index"] == sub_index), None)
+    old_sub_pieces = compute_sub_pieces(item)
+    sub_piece = next((sp for sp in old_sub_pieces if sp["sub_index"] == sub_index), None)
     if sub_piece is None:
         return error_response(400, "invalid_sub_index", "That sub-piece doesn't exist for this item.")
     validated = validate_placement(sub_piece["shape"], placement)
     if validated is None:
         return error_response(400, "invalid_placement", "That placement isn't valid for this piece's shape.")
+
+    others = [e for e in (item.placement or []) if e.get("sub_index") != sub_index]
+    if width_ft is not None:
+        if not (MIN_RESIZE_WIDTH_FT <= width_ft <= MAX_RESIZE_WIDTH_FT):
+            return error_response(
+                400, "invalid_width", f"A piece must be between {MIN_RESIZE_WIDTH_FT:g} and {MAX_RESIZE_WIDTH_FT:g} ft."
+            )
+        if len(old_sub_pieces) > 1:
+            # A set's sub-piece widths all derive from item.width_ft (the
+            # largest sofa), so resizing one rescales the set: back-solve the
+            # item width from this sub-piece, then rescale the other placed
+            # sofas to their new derived widths so the plan keeps matching.
+            segments = multi_piece_segments(item.type) or []
+            seats = segments[sub_index]
+            # derived sub-piece widths are whole feet (compute_sub_pieces)
+            width_ft = float(max(round(width_ft), 1))
+            item.width_ft = width_ft * max(segments) / seats
+            new_widths = {sp["sub_index"]: sp["width_ft"] for sp in compute_sub_pieces(item)}
+            old_widths = {sp["sub_index"]: sp["width_ft"] for sp in old_sub_pieces}
+            others = [
+                {**e, "geometry": _scale_rect_about_centre(e["geometry"], new_widths[e["sub_index"]] / old_widths[e["sub_index"]])}
+                if e.get("sub_index") in new_widths and old_widths.get(e.get("sub_index")) and e.get("shape") in ("rect", "round")
+                else e
+                for e in others
+            ]
+        else:
+            item.width_ft = width_ft
+
     entry = {"sub_index": sub_index, "label": sub_piece["label"], "shape": sub_piece["shape"], "geometry": validated}
-    remaining = [e for e in (item.placement or []) if e.get("sub_index") != sub_index]
-    remaining.append(entry)
+    remaining = [*others, entry]
     remaining.sort(key=lambda e: e["sub_index"])
     item.placement = remaining
     db.commit()
@@ -2510,7 +2665,7 @@ def api_set_item_placement(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    result = _set_item_placement(attempt, item_id, sub_index, body.placement, db)
+    result = _set_item_placement(attempt, item_id, sub_index, body.placement, body.width_ft, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})

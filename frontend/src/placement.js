@@ -255,6 +255,7 @@ export function itemsToBlocks(items) {
         label: isSplit ? `${item.category} — ${sp.label}` : `${item.category} (${item.type})`,
         shape: sp.shape,
         widthFt: sp.width_ft,
+        inSet: isSplit,
         placement: placedBySubIndex.get(sp.sub_index) || null,
         color: PALETTE[colorIndex % PALETTE.length],
         number: colorIndex + 1,
@@ -265,40 +266,45 @@ export function itemsToBlocks(items) {
   return blocks;
 }
 
-/** A block's default length (normalised 0-1) scaled from its width in feet
- * against an assumed room size — see ASSUMED_ROOM_LONGEST_FT. */
-export function defaultRectFor(widthFt) {
-  const length = clamp01(widthFt / ASSUMED_ROOM_LONGEST_FT);
-  const depth = length * BLOCK_DEPTH_RATIO;
-  return { x: round4(0.5 - length / 2), y: round4(0.5 - depth / 2), w: round4(length), h: round4(depth), rotation: 0 };
+// ---------------------------------------------------------------------------
+// Block geometry. Placements are stored normalised (0-1 of the room's width
+// and depth), but every rotate/flip/resize is done in feet, where both axes
+// share one scale, so a block keeps its true proportions in a non-square
+// room. Feet come from ASSUMED_ROOM_LONGEST_FT and the room's aspect.
+//
+// Shapes:
+//   rect, round  {x, y, w, h, rotation}
+//   L, curved    {long, short, corner} — two arm rects meeting at a bend in
+//                `corner`. A curved block is drawn as a quarter-annulus
+//                spanning the same two arms.
+// A rect's `rotation` names the wall its BACK faces (0 far, 90 left,
+// 180 near, 270 right); its seats face the opposite way.
+// ---------------------------------------------------------------------------
+
+export const ARM_SHAPES = new Set(["L", "curved"]);
+export const MIN_BLOCK_FT = 1;
+export const SET_PIECE_SNAP_FT = 1; // sub-pieces of a set derive whole-foot widths on the server
+export const SINGLE_PIECE_SNAP_FT = 0.5; // matches the width input's step on the furniture step
+
+// Unit vector (x right, y toward the camera) the seats face, per rotation —
+// matches FACING_FOR_ROTATION in the backend resolver.
+export const FACING_VECTOR = { 0: [0, 1], 90: [1, 0], 180: [0, -1], 270: [-1, 0] };
+
+const CORNER_CW = { "far-left": "far-right", "far-right": "near-right", "near-right": "near-left", "near-left": "far-left" };
+
+export function roomFeet(depthVsWidth) {
+  const [aw, ah] = roomAspect(depthVsWidth);
+  const longest = Math.max(aw, ah);
+  return { wFt: (ASSUMED_ROOM_LONGEST_FT * aw) / longest, hFt: (ASSUMED_ROOM_LONGEST_FT * ah) / longest };
 }
 
-export function defaultLFor(widthFt) {
-  const long = defaultRectFor(widthFt);
-  // Anchored near a corner (not the room's centre) since an L-piece is
-  // meant to sit in one — both arms share the same starting corner point.
-  const anchored = { ...long, x: 0.05, y: 0.05 };
-  const shortLen = anchored.w * 0.55;
-  const shortDepth = anchored.h;
-  return {
-    long: anchored,
-    short: { x: anchored.x, y: anchored.y, w: round4(shortDepth), h: round4(shortLen), rotation: 90 },
-    corner: "far-left",
-  };
+/** Rotates the back one wall clockwise (as seen on the plan): far -> right -> near -> left. */
+export function rotateCW(rotation) {
+  return (rotation + 270) % 360;
 }
 
-/** Rotates an L block 90 degrees: both arms turn together (swapping their
- * own w/h and stepping their own rotation), staying anchored at the same
- * shared corner point, and the corner name steps through the same cycle. */
-const CORNER_CYCLE = { "far-left": "far-right", "far-right": "near-right", "near-right": "near-left", "near-left": "far-left" };
-
-export function rotateLPlacement(placement) {
-  const { long, short, corner } = placement;
-  return {
-    long: clampRectToRoom({ ...long, w: long.h, h: long.w, rotation: nextRotation(long.rotation) }),
-    short: clampRectToRoom({ ...short, w: short.h, h: short.w, rotation: nextRotation(short.rotation) }),
-    corner: CORNER_CYCLE[corner] || corner,
-  };
+function snapTo(value, step) {
+  return Math.max(MIN_BLOCK_FT, Math.round(value / step) * step);
 }
 
 /** Snaps a rect's edges to 0/1 when within WALL_SNAP_TOLERANCE. */
@@ -317,22 +323,244 @@ export function clampRectToRoom(rect) {
   return { ...rect, w, h, x: clamp01(Math.min(rect.x, 1 - w)), y: clamp01(Math.min(rect.y, 1 - h)) };
 }
 
-/** Rotates 0->90->180->270->0. */
-export function nextRotation(rotation) {
-  return (rotation + 90) % 360;
+// ---- rect / round --------------------------------------------------------
+
+function rectToFeet(rect, feet) {
+  const alongX = rect.rotation % 180 === 0;
+  const wF = rect.w * feet.wFt;
+  const hF = rect.h * feet.hFt;
+  return {
+    cx: rect.x * feet.wFt + wF / 2,
+    cy: rect.y * feet.hFt + hF / 2,
+    lengthFt: alongX ? wF : hF,
+    depthFt: alongX ? hF : wF,
+    rotation: rect.rotation,
+  };
 }
 
-/** Which wall a rect's rotation-implied back edge is against, if within
- * WALL_TOLERANCE — mirrors the backend resolver so what the salesman sees
- * matches what the generation prompt will say. */
-export function resolveRectWall(rect) {
-  const candidate = WALL_FOR_ROTATION[rect.rotation];
-  let distance;
-  if (candidate === "far") distance = rect.y;
-  else if (candidate === "near") distance = 1 - (rect.y + rect.h);
-  else if (candidate === "left") distance = rect.x;
-  else distance = 1 - (rect.x + rect.w);
-  return distance <= WALL_TOLERANCE ? candidate : null;
+function rectFromFeet({ cx, cy, lengthFt, depthFt, rotation }, feet) {
+  const alongX = rotation % 180 === 0;
+  const wF = Math.min(alongX ? lengthFt : depthFt, feet.wFt);
+  const hF = Math.min(alongX ? depthFt : lengthFt, feet.hFt);
+  return clampRectToRoom({
+    x: round4((cx - wF / 2) / feet.wFt),
+    y: round4((cy - hF / 2) / feet.hFt),
+    w: round4(wF / feet.wFt),
+    h: round4(hF / feet.hFt),
+    rotation,
+  });
+}
+
+// ---- L / curved arms -----------------------------------------------------
+
+function cornerSigns(corner) {
+  return { sx: corner.endsWith("left") ? 1 : -1, sy: corner.startsWith("far") ? 1 : -1 };
+}
+
+/** Recovers an arm placement's parameters in `units` (feet, or plan pixels
+ * when passed {wFt: roomW, hFt: roomH}): the outer bend point (bx, by) in
+ * `corner`, the two arm lengths, the depth, and which axis the long arm
+ * runs along. */
+export function armParams(placement, units) {
+  const { long, short, corner } = placement;
+  const { sx, sy } = cornerSigns(corner);
+  const [L, S] = [long, short].map((r) => ({ x: r.x * units.wFt, y: r.y * units.hFt, w: r.w * units.wFt, h: r.h * units.hFt }));
+  return {
+    corner,
+    bx: sx > 0 ? Math.min(L.x, S.x) : Math.max(L.x + L.w, S.x + S.w),
+    by: sy > 0 ? Math.min(L.y, S.y) : Math.max(L.y + L.h, S.y + S.h),
+    longAxis: L.w >= L.h ? "x" : "y",
+    longFt: Math.max(L.w, L.h),
+    shortFt: Math.max(S.w, S.h),
+    depthFt: Math.min(L.w, L.h),
+  };
+}
+
+/** Horizontal/vertical arm lengths and the bounding box of arm params. */
+export function armExtent(p) {
+  const { sx, sy } = cornerSigns(p.corner);
+  const hLen = p.longAxis === "x" ? p.longFt : p.shortFt;
+  const vLen = p.longAxis === "x" ? p.shortFt : p.longFt;
+  const x0 = sx > 0 ? p.bx : p.bx - hLen;
+  const y0 = sy > 0 ? p.by : p.by - vLen;
+  return { sx, sy, hLen, vLen, x0, y0, x1: x0 + hLen, y1: y0 + vLen };
+}
+
+function clampArmParams(p, feet) {
+  const e = armExtent(p);
+  let dx = Math.min(0, feet.wFt - e.x1);
+  if (e.x0 + dx < 0) dx = -e.x0;
+  let dy = Math.min(0, feet.hFt - e.y1);
+  if (e.y0 + dy < 0) dy = -e.y0;
+  return { ...p, bx: p.bx + dx, by: p.by + dy };
+}
+
+/** Builds {long, short, corner} from arm params. Each arm's rotation is
+ * derived from which side its back (the outer edge, on the bend's side)
+ * faces, so rotate/flip can never leave an arm facing the wrong way. */
+export function armsFromParams(p, feet) {
+  const { sx, sy, hLen, vLen } = armExtent(p);
+  const d = p.depthFt;
+  const horiz = { x: sx > 0 ? p.bx : p.bx - hLen, y: sy > 0 ? p.by : p.by - d, w: hLen, h: d, rotation: sy > 0 ? 0 : 180 };
+  const vert = { x: sx > 0 ? p.bx : p.bx - d, y: sy > 0 ? p.by : p.by - vLen, w: d, h: vLen, rotation: sx > 0 ? 90 : 270 };
+  const toNorm = (r) => ({
+    x: clamp01(round4(r.x / feet.wFt)),
+    y: clamp01(round4(r.y / feet.hFt)),
+    w: clamp01(round4(r.w / feet.wFt)),
+    h: clamp01(round4(r.h / feet.hFt)),
+    rotation: r.rotation,
+  });
+  const [long, short] = p.longAxis === "x" ? [horiz, vert] : [vert, horiz];
+  return { long: toNorm(long), short: toNorm(short), corner: p.corner };
+}
+
+// ---- operations, by shape ------------------------------------------------
+
+/** A fresh placement for a block dropped at normalised (nx, ny). */
+export function defaultPlacement(shape, widthFt, feet, nx, ny) {
+  const cx = nx * feet.wFt;
+  const cy = ny * feet.hFt;
+  if (ARM_SHAPES.has(shape)) {
+    const longFt = Math.min(widthFt, feet.wFt);
+    const shortFt = shape === "curved" ? Math.min(longFt, feet.hFt) : longFt * 0.55;
+    const p = {
+      corner: "far-left",
+      longAxis: "x",
+      longFt,
+      shortFt,
+      depthFt: longFt * BLOCK_DEPTH_RATIO,
+      bx: cx - longFt / 2,
+      by: cy - shortFt / 2,
+    };
+    return armsFromParams(clampArmParams(p, feet), feet);
+  }
+  const depthFt = shape === "round" ? widthFt : widthFt * BLOCK_DEPTH_RATIO;
+  return rectFromFeet({ cx, cy, lengthFt: widthFt, depthFt, rotation: 0 }, feet);
+}
+
+/** Rotates a block 90 degrees clockwise about its own centre. */
+export function rotatePlacement(shape, placement, feet) {
+  if (ARM_SHAPES.has(shape)) {
+    const p = armParams(placement, feet);
+    const e = armExtent(p);
+    const cx = (e.x0 + e.x1) / 2;
+    const cy = (e.y0 + e.y1) / 2;
+    const corner = CORNER_CW[p.corner];
+    // the bounding box turns with it: width and depth swap about the centre
+    const nx0 = cx - e.vLen / 2;
+    const ny0 = cy - e.hLen / 2;
+    const bx = corner.endsWith("left") ? nx0 : nx0 + e.vLen;
+    const by = corner.startsWith("far") ? ny0 : ny0 + e.hLen;
+    const q = { ...p, corner, bx, by, longAxis: p.longAxis === "x" ? "y" : "x" };
+    return armsFromParams(clampArmParams(q, feet), feet);
+  }
+  const f = rectToFeet(placement, feet);
+  return rectFromFeet({ ...f, rotation: rotateCW(f.rotation) }, feet);
+}
+
+/** Mirrors an L/curved block along its long arm, so the short arm turns the
+ * other way while the long arm stays on its wall; updates `corner`. */
+export function flipPlacement(shape, placement, feet) {
+  if (!ARM_SHAPES.has(shape)) return placement;
+  const p = armParams(placement, feet);
+  const e = armExtent(p);
+  const [depthWord, sideWord] = p.corner.split("-");
+  const corner =
+    p.longAxis === "x"
+      ? `${depthWord}-${sideWord === "left" ? "right" : "left"}`
+      : `${depthWord === "far" ? "near" : "far"}-${sideWord}`;
+  const bx = corner.endsWith("left") ? e.x0 : e.x1;
+  const by = corner.startsWith("far") ? e.y0 : e.y1;
+  return armsFromParams({ ...p, corner, bx, by }, feet);
+}
+
+/** Moves a block rigidly by a normalised delta, snapping its outer edges to
+ * nearby walls and keeping it inside the room. */
+export function translatePlacement(shape, placement, dx, dy) {
+  if (!ARM_SHAPES.has(shape)) {
+    return clampRectToRoom(snapRect({ ...placement, x: placement.x + dx, y: placement.y + dy }));
+  }
+  const arms = [placement.long, placement.short].map((r) => ({ ...r, x: r.x + dx, y: r.y + dy }));
+  let x0 = Math.min(...arms.map((r) => r.x));
+  let y0 = Math.min(...arms.map((r) => r.y));
+  let x1 = Math.max(...arms.map((r) => r.x + r.w));
+  let y1 = Math.max(...arms.map((r) => r.y + r.h));
+  let sx = 0;
+  let sy = 0;
+  if (x0 <= WALL_SNAP_TOLERANCE) sx = -x0;
+  else if (1 - x1 <= WALL_SNAP_TOLERANCE) sx = 1 - x1;
+  if (y0 <= WALL_SNAP_TOLERANCE) sy = -y0;
+  else if (1 - y1 <= WALL_SNAP_TOLERANCE) sy = 1 - y1;
+  x0 += sx; x1 += sx; y0 += sy; y1 += sy;
+  if (x0 < 0) sx -= x0;
+  if (x1 > 1) sx -= x1 - 1;
+  if (y0 < 0) sy -= y0;
+  if (y1 > 1) sy -= y1 - 1;
+  const [long, short] = arms.map((r) => ({
+    ...r,
+    x: clamp01(round4(r.x + sx)),
+    y: clamp01(round4(r.y + sy)),
+  }));
+  return { ...placement, long, short };
+}
+
+/** Resizes a block toward a normalised pointer position on its resize
+ * handle. Length follows the pointer (snapped to `snapFt`); depth keeps its
+ * current proportion to length. The back edge (and, for arms, the bend)
+ * stays put. Returns the new placement and the new length in feet. */
+export function resizePlacement(shape, placement, nx, ny, feet, snapFt) {
+  const px = nx * feet.wFt;
+  const py = ny * feet.hFt;
+
+  if (ARM_SHAPES.has(shape)) {
+    const p = armParams(placement, feet);
+    const { sx, sy } = cornerSigns(p.corner);
+    const alongX = p.longAxis === "x";
+    const reach = alongX ? (px - p.bx) * sx : (py - p.by) * sy;
+    const room = alongX ? (sx > 0 ? feet.wFt - p.bx : p.bx) : sy > 0 ? feet.hFt - p.by : p.by;
+    const longFt = Math.min(snapTo(reach, snapFt), room);
+    const k = longFt / p.longFt;
+    const q = { ...p, longFt, shortFt: p.shortFt * k, depthFt: p.depthFt * k };
+    return { placement: armsFromParams(clampArmParams(q, feet), feet), widthFt: longFt };
+  }
+
+  const f = rectToFeet(placement, feet);
+  if (shape === "round") {
+    const diameter = Math.min(snapTo(2 * Math.hypot(px - f.cx, py - f.cy), snapFt), feet.wFt, feet.hFt);
+    return { placement: rectFromFeet({ ...f, lengthFt: diameter, depthFt: diameter }, feet), widthFt: diameter };
+  }
+
+  const alongX = f.rotation % 180 === 0;
+  const start = alongX ? placement.x * feet.wFt : placement.y * feet.hFt;
+  const pointer = alongX ? px : py;
+  const lengthFt = Math.min(snapTo(pointer - start, snapFt), (alongX ? feet.wFt : feet.hFt) - start);
+  const depthFt = lengthFt * (f.depthFt / f.lengthFt);
+  const wF = alongX ? lengthFt : depthFt;
+  const hF = alongX ? depthFt : lengthFt;
+  let x0;
+  let y0;
+  if (alongX) {
+    x0 = start;
+    // keep the back edge where it was: top for rotation 0, bottom for 180
+    y0 = f.rotation === 0 ? placement.y * feet.hFt : (placement.y + placement.h) * feet.hFt - hF;
+  } else {
+    y0 = start;
+    // left for rotation 90, right for 270
+    x0 = f.rotation === 90 ? placement.x * feet.wFt : (placement.x + placement.w) * feet.wFt - wF;
+  }
+  const rect = clampRectToRoom({
+    x: round4(x0 / feet.wFt),
+    y: round4(y0 / feet.hFt),
+    w: round4(wF / feet.wFt),
+    h: round4(hF / feet.hFt),
+    rotation: f.rotation,
+  });
+  return { placement: rect, widthFt: lengthFt };
+}
+
+/** The rects a block occupies, for overlap testing. */
+export function placementRects(shape, placement) {
+  return ARM_SHAPES.has(shape) ? [placement.long, placement.short] : [placement];
 }
 
 export function rectsOverlap(a, b) {
@@ -348,38 +576,4 @@ export function featureFootprint(wall, span) {
   if (wall === "near") return { x: start, y: 1 - THICK, w: end - start, h: THICK };
   if (wall === "left") return { x: 0, y: start, w: THICK, h: end - start };
   return { x: 1 - THICK, y: start, w: THICK, h: end - start }; // "right"
-}
-
-/** Flips which side the short arm of an L attaches to, mirroring both arms
- * across whichever axis the long arm's own wall isn't on, and toggling the
- * matching half of the corner name. */
-export function flipLPlacement(placement) {
-  const { long, short, corner } = placement;
-  const [depthWord, sideWord] = corner.split("-");
-  const longWall = WALL_FOR_ROTATION[long.rotation];
-  const longIsDepthWall = longWall === "far" || longWall === "near";
-
-  function mirror(rect, axis) {
-    return axis === "x"
-      ? { ...rect, x: clamp01(round4(1 - rect.x - rect.w)) }
-      : { ...rect, y: clamp01(round4(1 - rect.y - rect.h)) };
-  }
-
-  const axis = longIsDepthWall ? "x" : "y";
-  const newCorner = longIsDepthWall
-    ? `${depthWord}-${sideWord === "left" ? "right" : "left"}`
-    : `${depthWord === "far" ? "near" : "far"}-${sideWord}`;
-
-  return {
-    long: mirror(long, axis),
-    short: { ...mirror(short, axis), rotation: (short.rotation + 180) % 360 },
-    corner: newCorner,
-  };
-}
-
-export function facingArrowAngle(rotation) {
-  // SVG angle (degrees, clockwise from "up") for an arrow pointing the
-  // direction the seats face, matching FACING_FOR_ROTATION in the backend:
-  // 0 -> down (toward the camera), 90 -> right, 180 -> up (far wall), 270 -> left.
-  return { 0: 180, 90: 90, 180: 0, 270: 270 }[rotation];
 }

@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
-import { downscaleImage } from "../utils.js";
+import { IMAGE_ACCEPT, downscaleImage } from "../utils.js";
 
 export default function Adjust() {
   const { id } = useParams();
@@ -118,7 +118,7 @@ export default function Adjust() {
         </span>
         <span className="chevron">&#8250;</span>
       </button>
-      <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleRoomPhotoChange} />
+      <input ref={fileInputRef} type="file" accept={IMAGE_ACCEPT} style={{ display: "none" }} onChange={handleRoomPhotoChange} />
 
       <button type="button" className="btn btn-primary" style={{ marginTop: 20 }} disabled={generating} onClick={handleGenerateAgain}>
         {generating ? "Starting…" : "Generate again"}

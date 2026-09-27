@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { downscaleImage } from "../utils.js";
+import { IMAGE_ACCEPT, downscaleImage } from "../utils.js";
 
 export function UploadBox({ file, existingUrl, onChange }) {
   const inputRef = useRef(null);
@@ -31,7 +31,7 @@ export function UploadBox({ file, existingUrl, onChange }) {
       ) : (
         <div style={{ padding: 10 }}>Tap to add a photo</div>
       )}
-      <input ref={inputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFile} />
+      <input ref={inputRef} type="file" accept={IMAGE_ACCEPT} style={{ display: "none" }} onChange={handleFile} />
     </div>
   );
 }

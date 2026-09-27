@@ -11,13 +11,15 @@ import {
   FAR_NEAR_POSITIONS,
   SIDE_POSITIONS,
   WALL_KEY,
+  SET_PIECE_SNAP_FT,
+  SINGLE_PIECE_SNAP_FT,
   defaultBlocksFurniture,
-  defaultLFor,
-  defaultRectFor,
-  flipLPlacement,
+  defaultPlacement,
+  flipPlacement,
   itemsToBlocks,
-  nextRotation,
-  rotateLPlacement,
+  resizePlacement,
+  roomFeet,
+  rotatePlacement,
 } from "../placement.js";
 
 function emptyLayout() {
@@ -80,6 +82,7 @@ export default function Place() {
   }, [attempt?.room?.id, attempt?.room?.layout_status]);
 
   const room = attempt?.room;
+  const feet = roomFeet(room?.layout_json?.depth_vs_width);
   const selectedBlock = blocks.find((b) => b.key === selectedKey) || null;
   const pendingKey = selectedBlock && !selectedBlock.placement ? selectedBlock.key : null;
 
@@ -90,9 +93,10 @@ export default function Place() {
   // Both calls resync attempt + blocks from the server's response rather
   // than trusting the optimistic local update alone, so the chip/canvas
   // placed-state can never drift from what's actually persisted.
-  async function persistPlacement(block, placement) {
+  async function persistPlacement(block, placement, widthFt) {
+    const json = widthFt == null ? { placement } : { placement, width_ft: widthFt };
     try {
-      const data = await api.post(`/api/attempts/${id}/items/${block.itemId}/placement/${block.subIndex}`, { json: { placement } });
+      const data = await api.post(`/api/attempts/${id}/items/${block.itemId}/placement/${block.subIndex}`, { json });
       setAttempt(data.attempt);
       setBlocks(itemsToBlocks(data.attempt.items));
     } catch (err) {
@@ -117,20 +121,7 @@ export default function Place() {
   function handleDropPendingAt(key, x, y) {
     const block = blocks.find((b) => b.key === key);
     if (!block) return;
-    let placement;
-    if (block.shape === "L") {
-      const base = defaultLFor(block.widthFt);
-      const dx = x - base.long.x - base.long.w / 2;
-      const dy = y - base.long.y - base.long.h / 2;
-      placement = {
-        ...base,
-        long: { ...base.long, x: base.long.x + dx, y: base.long.y + dy },
-        short: { ...base.short, x: base.short.x + dx, y: base.short.y + dy },
-      };
-    } else {
-      const base = defaultRectFor(block.widthFt);
-      placement = { ...base, x: x - base.w / 2, y: y - base.h / 2 };
-    }
+    const placement = defaultPlacement(block.shape, block.widthFt, feet, x, y);
     updateBlock(key, { placement });
     persistPlacement(block, placement);
   }
@@ -147,8 +138,7 @@ export default function Place() {
   function handleRotateBlock(key) {
     const block = blocks.find((b) => b.key === key);
     if (!block || !block.placement) return;
-    const placement =
-      block.shape === "L" ? rotateLPlacement(block.placement) : { ...block.placement, rotation: nextRotation(block.placement.rotation) };
+    const placement = rotatePlacement(block.shape, block.placement, feet);
     updateBlock(key, { placement });
     persistPlacement(block, placement);
   }
@@ -156,9 +146,22 @@ export default function Place() {
   function handleFlipBlock(key) {
     const block = blocks.find((b) => b.key === key);
     if (!block || !block.placement) return;
-    const placement = flipLPlacement(block.placement);
+    const placement = flipPlacement(block.shape, block.placement, feet);
     updateBlock(key, { placement });
     persistPlacement(block, placement);
+  }
+
+  function handleResizeBlock(key, origPlacement, x, y) {
+    const block = blocks.find((b) => b.key === key);
+    if (!block) return;
+    const snap = block.inSet ? SET_PIECE_SNAP_FT : SINGLE_PIECE_SNAP_FT;
+    const { placement, widthFt } = resizePlacement(block.shape, origPlacement, x, y, feet, snap);
+    updateBlock(key, { placement, widthFt });
+  }
+
+  function handleCommitResize(key) {
+    const block = blocks.find((b) => b.key === key);
+    if (block && block.placement) persistPlacement(block, block.placement, block.widthFt);
   }
 
   function handleRemoveBlock(key) {
@@ -242,6 +245,8 @@ export default function Place() {
         onCommitBlock={handleCommitBlock}
         onRotateBlock={handleRotateBlock}
         onFlipBlock={handleFlipBlock}
+        onResizeBlock={handleResizeBlock}
+        onCommitResize={handleCommitResize}
         onRemoveBlock={handleRemoveBlock}
         onDropPendingAt={handleDropPendingAt}
         pendingKey={pendingKey}

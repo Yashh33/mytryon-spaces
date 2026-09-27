@@ -1,8 +1,12 @@
 const MAX_UPLOAD_DIMENSION = 1536;
 
+export const IMAGE_ACCEPT = "image/*,.heic,.heif";
+
 /** Downscales an image file to MAX_UPLOAD_DIMENSION longest edge before it
  * ever leaves the device. The server downscales too (defence in depth), but
- * this keeps upload time reasonable on mobile networks. */
+ * this keeps upload time reasonable on mobile networks. If the browser can't
+ * decode the file (e.g. HEIC outside Safari) the original is sent unchanged
+ * and the server converts it. */
 export function downscaleImage(file, maxDim = MAX_UPLOAD_DIMENSION) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);

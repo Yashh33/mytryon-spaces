@@ -1,26 +1,29 @@
 import { useRef } from "react";
 import {
   ARC_TYPES,
+  ARM_SHAPES,
   BAND_TYPES,
   DASHED_GAP_TYPES,
   DOUBLE_DASHED_GAP_TYPES,
+  FACING_VECTOR,
   GAP_TYPES,
   POINT_TYPES,
   UNKNOWN_TYPES,
   WALL_KEY,
   WINDOW_TYPES,
+  armExtent,
+  armParams,
   assignLabelRows,
   cameraGeometry,
   clamp01,
-  clampRectToRoom,
-  facingArrowAngle,
   featureFootprint,
   featureSpan,
   labelPosition,
   mergeAdjacentFeatures,
+  placementRects,
   planGeometry,
   rectsOverlap,
-  snapRect,
+  translatePlacement,
 } from "../placement.js";
 
 const WALLS = ["far", "left", "right", "near"];
@@ -81,6 +84,8 @@ export function FloorPlan({
   onCommitBlock = noop,
   onRotateBlock = noop,
   onFlipBlock = noop,
+  onResizeBlock = noop,
+  onCommitResize = noop,
   onRemoveBlock = noop,
   onDropPendingAt = noop,
   pendingKey = null,
@@ -91,7 +96,7 @@ export function FloorPlan({
   readOnly = false,
 }) {
   const svgRef = useRef(null);
-  const dragRef = useRef(null); // { key, pointerId, grabDx, grabDy }
+  const dragRef = useRef(null); // { mode: "move"|"resize", key, pointerId, startX, startY, orig, moved }
 
   const layout = room.layout_json;
   const geom = planGeometry(layout?.depth_vs_width);
@@ -120,11 +125,11 @@ export function FloorPlan({
     onSelectBlock(null);
   }
 
-  function startDrag(e, block, anchorRect) {
+  function startDrag(e, block, mode) {
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     const p = toNormalized(e.clientX, e.clientY);
-    dragRef.current = { key: block.key, pointerId: e.pointerId, grabDx: p.x - anchorRect.x, grabDy: p.y - anchorRect.y };
+    dragRef.current = { mode, key: block.key, pointerId: e.pointerId, startX: p.x, startY: p.y, orig: block.placement, moved: false };
     onSelectBlock(block.key);
   }
 
@@ -132,30 +137,33 @@ export function FloorPlan({
     const drag = dragRef.current;
     if (!drag || drag.key !== block.key || drag.pointerId !== e.pointerId) return;
     const p = toNormalized(e.clientX, e.clientY);
-    const rawX = p.x - drag.grabDx;
-    const rawY = p.y - drag.grabDy;
-
-    if (block.shape === "L") {
-      const dx = rawX - block.placement.long.x;
-      const dy = rawY - block.placement.long.y;
-      const long = clampRectToRoom(snapRect({ ...block.placement.long, x: rawX, y: rawY }));
-      const short = clampRectToRoom({
-        ...block.placement.short,
-        x: clamp01(block.placement.short.x + dx),
-        y: clamp01(block.placement.short.y + dy),
-      });
-      onMoveBlock(block.key, { ...block.placement, long, short });
+    drag.moved = true;
+    if (drag.mode === "resize") {
+      onResizeBlock(block.key, drag.orig, p.x, p.y);
     } else {
-      const rect = clampRectToRoom(snapRect({ ...block.placement, x: rawX, y: rawY }));
-      onMoveBlock(block.key, rect);
+      onMoveBlock(block.key, translatePlacement(block.shape, drag.orig, p.x - drag.startX, p.y - drag.startY));
     }
   }
 
   function endDrag(e, block) {
     const drag = dragRef.current;
     if (!drag || drag.key !== block.key || drag.pointerId !== e.pointerId) return;
+    // the svg's own pointerup would otherwise read this as a background tap and deselect
+    e.stopPropagation();
     dragRef.current = null;
-    onCommitBlock(block.key, block.placement);
+    if (!drag.moved) return;
+    if (drag.mode === "resize") onCommitResize(block.key);
+    else onCommitBlock(block.key, block.placement);
+  }
+
+  function dragHandlers(block, mode) {
+    if (readOnly) return {};
+    return {
+      onPointerDown: (e) => startDrag(e, block, mode),
+      onPointerMove: (e) => moveDrag(e, block),
+      onPointerUp: (e) => endDrag(e, block),
+      onPointerCancel: (e) => endDrag(e, block),
+    };
   }
 
   function renderWallFeatures(wall) {
@@ -306,8 +314,7 @@ export function FloorPlan({
   }
 
   function blockOverlapWarning(block) {
-    const rects = block.shape === "L" ? [block.placement.long, block.placement.short] : [block.placement];
-    for (const rect of rects) {
+    for (const rect of placementRects(block.shape, block.placement)) {
       for (const obstruction of layout?.obstructions || []) {
         if (obstruction.x == null) continue;
         const footprint = { x: obstruction.x - 0.02, y: obstruction.y - 0.02, w: 0.04, h: 0.04 };
@@ -326,78 +333,170 @@ export function FloorPlan({
     return null;
   }
 
-  function renderBlockRect(block, rect, selected) {
-    const px = geom.roomX + rect.x * geom.roomW;
-    const py = geom.roomY + rect.y * geom.roomH;
-    const pw = rect.w * geom.roomW;
-    const ph = rect.h * geom.roomH;
-    const cx = px + pw / 2;
-    const cy = py + ph / 2;
-    const angle = facingArrowAngle(rect.rotation);
+  function pxRect(rect) {
+    return { X: geom.roomX + rect.x * geom.roomW, Y: geom.roomY + rect.y * geom.roomH, W: rect.w * geom.roomW, H: rect.h * geom.roomH };
+  }
+
+  /** Arm params in plan pixels, with the bend offset into plan space. */
+  function pxArms(placement) {
+    const p = armParams(placement, { wFt: geom.roomW, hFt: geom.roomH });
+    const q = { ...p, bx: p.bx + geom.roomX, by: p.by + geom.roomY };
+    return { p: q, e: armExtent(q) };
+  }
+
+  /** Everything needed to draw and control a placed block, in plan pixels:
+   * its outline, back markings, facing arrows, bounding box and where the
+   * resize handle sits. */
+  function blockDrawing(block) {
+    const { shape, placement } = block;
+
+    if (ARM_SHAPES.has(shape)) {
+      const { p, e } = pxArms(placement);
+      const { sx, sy, hLen, vLen } = e;
+      const d = p.depthFt; // plan pixels here, despite the name
+      const at = (u, v) => [p.bx + sx * u, p.by + sy * v];
+      const bbox = { x0: e.x0, y0: e.y0, x1: e.x1, y1: e.y1 };
+      const handle = p.longAxis === "x" ? at(hLen, d) : at(d, vLen);
+
+      if (shape === "curved") {
+        const C = at(hLen, vLen);
+        const rx = hLen;
+        const ry = vLen;
+        const irx = Math.max(rx - d, 1);
+        const iry = Math.max(ry - d, 1);
+        const sweep = sx * sy > 0 ? 1 : 0;
+        const pt = (ex, ey, deg) => {
+          const t = (deg * Math.PI) / 180;
+          return [C[0] - sx * ex * Math.cos(t), C[1] - sy * ey * Math.sin(t)];
+        };
+        const o0 = pt(rx, ry, 0);
+        const o90 = pt(rx, ry, 90);
+        const i0 = pt(irx, iry, 0);
+        const i90 = pt(irx, iry, 90);
+        const outline =
+          `M ${o0[0]} ${o0[1]} A ${rx} ${ry} 0 0 ${sweep} ${o90[0]} ${o90[1]} ` +
+          `L ${i90[0]} ${i90[1]} A ${irx} ${iry} 0 0 ${1 - sweep} ${i0[0]} ${i0[1]} Z`;
+        const b0 = pt(rx - 3, ry - 3, 6);
+        const b1 = pt(rx - 3, ry - 3, 84);
+        const back = [`M ${b0[0]} ${b0[1]} A ${rx - 3} ${ry - 3} 0 0 ${sweep} ${b1[0]} ${b1[1]}`];
+        const front = pt(irx, iry, 45);
+        const len = Math.hypot(C[0] - front[0], C[1] - front[1]) || 1;
+        const arrows = [{ x: front[0], y: front[1], dx: (C[0] - front[0]) / len, dy: (C[1] - front[1]) / len }];
+        const labelAt = pt((rx + irx) / 2, (ry + iry) / 2, 45);
+        return { outline, back, arrows, bbox, handle, labelAt };
+      }
+
+      // L: one outline with a square inner turn and rounded outer corners
+      const corners = [[0, 0], [hLen, 0], [hLen, d], [d, d], [d, vLen], [0, vLen]].map(([u, v]) => at(u, v));
+      const outline = roundedPolygon(corners, [6, 6, 6, 0, 6, 6]);
+      const hb0 = at(6, 3);
+      const hb1 = at(hLen - 6, 3);
+      const vb0 = at(3, 6);
+      const vb1 = at(3, vLen - 6);
+      const back = [`M ${hb0[0]} ${hb0[1]} L ${hb1[0]} ${hb1[1]}`, `M ${vb0[0]} ${vb0[1]} L ${vb1[0]} ${vb1[1]}`];
+      const hFront = at((d + hLen) / 2, d);
+      const vFront = at(d, (d + vLen) / 2);
+      const arrows = [
+        { x: hFront[0], y: hFront[1], dx: 0, dy: sy },
+        { x: vFront[0], y: vFront[1], dx: sx, dy: 0 },
+      ];
+      return { outline, back, arrows, bbox, handle, labelAt: at(d / 2, d / 2) };
+    }
+
+    const { X, Y, W, H } = pxRect(placement);
+    const [fx, fy] = FACING_VECTOR[placement.rotation];
+    const bbox = { x0: X, y0: Y, x1: X + W, y1: Y + H };
+
+    if (shape === "round") {
+      const cx = X + W / 2;
+      const cy = Y + H / 2;
+      const r = Math.min(W, H) / 2;
+      const outline = `M ${cx - r} ${cy} A ${r} ${r} 0 1 0 ${cx + r} ${cy} A ${r} ${r} 0 1 0 ${cx - r} ${cy} Z`;
+      const backAngle = Math.atan2(-fy, -fx);
+      const br = Math.max(r - 3, 1);
+      const a0 = backAngle - Math.PI / 4;
+      const a1 = backAngle + Math.PI / 4;
+      const back = [
+        `M ${cx + br * Math.cos(a0)} ${cy + br * Math.sin(a0)} A ${br} ${br} 0 0 1 ${cx + br * Math.cos(a1)} ${cy + br * Math.sin(a1)}`,
+      ];
+      const arrows = [{ x: cx + fx * r, y: cy + fy * r, dx: fx, dy: fy }];
+      return { outline, back, arrows, bbox, handle: [cx + r * Math.SQRT1_2, cy + r * Math.SQRT1_2], labelAt: [cx, cy] };
+    }
+
+    // rect: back edge is the side opposite the facing direction
+    const outline = roundedPolygon([[X, Y], [X + W, Y], [X + W, Y + H], [X, Y + H]], [6, 6, 6, 6]);
+    const inset = 3;
+    const backLine = {
+      0: [X + 6, Y + inset, X + W - 6, Y + inset],
+      180: [X + 6, Y + H - inset, X + W - 6, Y + H - inset],
+      90: [X + inset, Y + 6, X + inset, Y + H - 6],
+      270: [X + W - inset, Y + 6, X + W - inset, Y + H - 6],
+    }[placement.rotation];
+    const back = [`M ${backLine[0]} ${backLine[1]} L ${backLine[2]} ${backLine[3]}`];
+    const frontCentre = [X + W / 2 + (fx * W) / 2, Y + H / 2 + (fy * H) / 2];
+    const arrows = [{ x: frontCentre[0], y: frontCentre[1], dx: fx, dy: fy }];
+    return { outline, back, arrows, bbox, handle: [X + W, Y + H], labelAt: [X + W / 2, Y + H / 2] };
+  }
+
+  function renderBlock(block, selected, drawing) {
+    const { outline, back, arrows, labelAt } = drawing;
     return (
-      <g
-        onPointerDown={readOnly ? undefined : (e) => startDrag(e, block, rect)}
-        onPointerMove={readOnly ? undefined : (e) => moveDrag(e, block)}
-        onPointerUp={readOnly ? undefined : (e) => endDrag(e, block)}
-        onPointerCancel={readOnly ? undefined : (e) => endDrag(e, block)}
-        style={readOnly ? undefined : { touchAction: "none", cursor: "grab" }}
-      >
-        <rect x={px} y={py} width={pw} height={ph} fill={block.color} fillOpacity="0.28" stroke={block.color} strokeWidth={selected ? 2.5 : 1.5} rx="3" />
-        <g transform={`translate(${cx} ${cy}) rotate(${angle})`}>
-          <path d="M 0 -9 L 5 1 L -5 1 Z" fill={block.color} />
-        </g>
-        <text x={cx} y={py + ph + 12} className="fp-block-number" textAnchor="middle">
+      <g {...dragHandlers(block, "move")} style={readOnly ? undefined : { touchAction: "none", cursor: "grab" }}>
+        <path d={outline} fill={block.color} fillOpacity="0.28" stroke={block.color} strokeWidth={selected ? 2.5 : 1.5} strokeLinejoin="round" />
+        {back.map((d, i) => (
+          <path key={`back-${i}`} d={d} className="fp-block-back" stroke={block.color} />
+        ))}
+        {arrows.map((a, i) => (
+          <FacingArrow key={`arrow-${i}`} {...a} color={block.color} />
+        ))}
+        <text x={labelAt[0]} y={labelAt[1] + 4} className="fp-block-number" textAnchor="middle">
           {block.number}
         </text>
       </g>
     );
   }
 
-  function renderSelectedControls(block) {
-    const anchor = block.shape === "L" ? block.placement.long : block.placement;
-    const hx = geom.roomX + (anchor.x + anchor.w) * geom.roomW;
-    const hy = geom.roomY + anchor.y * geom.roomH;
+  function renderSelectedControls(block, drawing) {
+    const { bbox, handle } = drawing;
+    const buttons = [
+      { key: "remove", cls: "fp-remove-handle", icon: "×", onTap: () => onRemoveBlock(block.key) },
+      { key: "rotate", cls: "fp-rotate-handle", icon: "↻", onTap: () => onRotateBlock(block.key) },
+    ];
+    if (ARM_SHAPES.has(block.shape)) {
+      buttons.push({ key: "flip", cls: "fp-flip-handle", icon: "⇔", onTap: () => onFlipBlock(block.key) });
+    }
+    const spacing = 26;
+    const rowWidth = (buttons.length - 1) * spacing;
+    const centreX = Math.min(Math.max((bbox.x0 + bbox.x1) / 2, 12 + rowWidth / 2), geom.planW - 12 - rowWidth / 2);
+    const rowY = Math.max(bbox.y0 - 16, 12);
+    const stop = (e) => e.stopPropagation();
+
     return (
       <g key={`${block.key}-controls`}>
-        <circle
-          cx={hx} cy={hy} r="11" className="fp-handle fp-rotate-handle"
-          onPointerDown={(e) => e.stopPropagation()}
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            onRotateBlock(block.key);
-          }}
-        />
-        <text x={hx} y={hy + 4} textAnchor="middle" className="fp-handle-icon" onPointerUp={(e) => e.stopPropagation()}>
-          &#8635;
-        </text>
-        {block.shape === "L" ? (
-          <>
-            <circle
-              cx={hx - 26} cy={hy} r="11" className="fp-handle fp-flip-handle"
-              onPointerDown={(e) => e.stopPropagation()}
-              onPointerUp={(e) => {
-                e.stopPropagation();
-                onFlipBlock(block.key);
-              }}
-            />
-            <text x={hx - 26} y={hy + 4} textAnchor="middle" className="fp-handle-icon" onPointerUp={(e) => e.stopPropagation()}>
-              &#8646;
-            </text>
-          </>
-        ) : null}
-        <circle
-          cx={hx - (block.shape === "L" ? 52 : 26)} cy={hy} r="11" className="fp-handle fp-remove-handle"
-          onPointerDown={(e) => e.stopPropagation()}
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            onRemoveBlock(block.key);
-          }}
-        />
-        <text
-          x={hx - (block.shape === "L" ? 52 : 26)} y={hy + 4} textAnchor="middle" className="fp-handle-icon"
-          onPointerUp={(e) => e.stopPropagation()}
-        >
-          &times;
+        {buttons.map((b, i) => {
+          const cx = centreX - rowWidth / 2 + i * spacing;
+          return (
+            <g key={b.key}>
+              <circle
+                cx={cx} cy={rowY} r="11" className={`fp-handle ${b.cls}`}
+                onPointerDown={stop}
+                onPointerUp={(e) => {
+                  e.stopPropagation();
+                  b.onTap();
+                }}
+              />
+              <text x={cx} y={rowY + 4} textAnchor="middle" className="fp-handle-icon">
+                {b.icon}
+              </text>
+            </g>
+          );
+        })}
+        <g {...dragHandlers(block, "resize")} style={{ touchAction: "none", cursor: "nwse-resize" }}>
+          <circle cx={handle[0]} cy={handle[1]} r="14" className="fp-hit" />
+          <circle cx={handle[0]} cy={handle[1]} r="6.5" fill={block.color} className="fp-resize-handle" />
+        </g>
+        <text x={handle[0] + 10} y={handle[1] + 16} className="fp-size-label">
+          {formatFeet(block.widthFt)} ft
         </text>
       </g>
     );
@@ -423,39 +522,63 @@ export function FloorPlan({
         .map((block) => {
           const selected = block.key === selectedKey;
           const warning = blockOverlapWarning(block);
+          const drawing = blockDrawing(block);
           return (
             <g key={block.key} opacity={pendingKey && !selected ? 0.55 : 1}>
-              {block.shape === "L" ? (
-                <>
-                  {renderBlockRect(block, block.placement.long, selected)}
-                  {renderBlockRect(block, block.placement.short, selected)}
-                </>
-              ) : (
-                renderBlockRect(block, block.placement, selected)
-              )}
+              {renderBlock(block, selected, drawing)}
               {warning ? (
                 <>
-                  {(block.shape === "L" ? [block.placement.long, block.placement.short] : [block.placement]).map((rect, i) => (
-                    <rect
-                      key={i}
-                      x={geom.roomX + rect.x * geom.roomW - 2} y={geom.roomY + rect.y * geom.roomH - 2}
-                      width={rect.w * geom.roomW + 4} height={rect.h * geom.roomH + 4}
-                      className="fp-warning-outline"
-                    />
-                  ))}
-                  <text
-                    x={geom.roomX + (block.shape === "L" ? block.placement.long.x : block.placement.x) * geom.roomW}
-                    y={geom.roomY + (block.shape === "L" ? block.placement.long.y : block.placement.y) * geom.roomH - 6}
-                    className="fp-warning-label"
-                  >
+                  {placementRects(block.shape, block.placement).map((rect, i) => {
+                    const { X, Y, W, H } = pxRect(rect);
+                    return <rect key={i} x={X - 2} y={Y - 2} width={W + 4} height={H + 4} className="fp-warning-outline" />;
+                  })}
+                  <text x={drawing.bbox.x0} y={drawing.bbox.y0 - 6} className="fp-warning-label">
                     Overlaps {warning}
                   </text>
                 </>
               ) : null}
-              {!readOnly && selected ? renderSelectedControls(block) : null}
+              {!readOnly && selected ? renderSelectedControls(block, drawing) : null}
             </g>
           );
         })}
     </svg>
   );
+}
+
+/** A solid arrow whose tail sits at (x, y), pointing along (dx, dy). */
+function FacingArrow({ x, y, dx, dy, color }) {
+  const px = -dy;
+  const py = dx;
+  const tip = [x + dx * 13, y + dy * 13];
+  const baseL = [x + dx * 6 + px * 4.5, y + dy * 6 + py * 4.5];
+  const baseR = [x + dx * 6 - px * 4.5, y + dy * 6 - py * 4.5];
+  return (
+    <g className="fp-facing-arrow">
+      <line x1={x} y1={y} x2={x + dx * 7} y2={y + dy * 7} stroke={color} strokeWidth="1.8" />
+      <path d={`M ${tip[0]} ${tip[1]} L ${baseL[0]} ${baseL[1]} L ${baseR[0]} ${baseR[1]} Z`} fill={color} />
+    </g>
+  );
+}
+
+/** Closed polygon path with each corner rounded by its own radius (0 keeps
+ * it square), each radius capped at half the shorter adjoining edge. */
+function roundedPolygon(points, radii) {
+  const n = points.length;
+  let d = "";
+  for (let i = 0; i < n; i += 1) {
+    const [x, y] = points[i];
+    const [px, py] = points[(i - 1 + n) % n];
+    const [nx, ny] = points[(i + 1) % n];
+    const inLen = Math.hypot(x - px, y - py) || 1;
+    const outLen = Math.hypot(nx - x, ny - y) || 1;
+    const r = Math.min(radii[i] || 0, inLen / 2, outLen / 2);
+    const a = [x + ((px - x) / inLen) * r, y + ((py - y) / inLen) * r];
+    const b = [x + ((nx - x) / outLen) * r, y + ((ny - y) / outLen) * r];
+    d += `${i === 0 ? "M" : "L"} ${a[0]} ${a[1]} Q ${x} ${y} ${b[0]} ${b[1]} `;
+  }
+  return `${d}Z`;
+}
+
+function formatFeet(ft) {
+  return Number.isInteger(ft) ? String(ft) : ft.toFixed(1);
 }

@@ -64,7 +64,7 @@ export default function Result() {
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
-          title: "Reflection Lifestyle",
+          title: "Reflection Lifestyle - AI",
           text: `${attempt.room.customer_name} — ${attempt.room.room_type}`,
         });
         return;

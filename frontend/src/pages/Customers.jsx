@@ -57,7 +57,7 @@ export default function Customers() {
       <div className="page-header">
         <div>
           <h1>Hello, {user.first_name}</h1>
-          <div className="eyebrow">Reflection Lifestyle</div>
+          <div className="eyebrow">Reflection Lifestyle - AI</div>
         </div>
         <div style={{ position: "relative" }} ref={menuRef}>
           <button type="button" className="menu-btn" onClick={() => setMenuOpen((v) => !v)}>

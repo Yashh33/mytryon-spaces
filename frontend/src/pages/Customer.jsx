@@ -51,7 +51,7 @@ export default function Customer() {
         })
       );
       if (navigator.canShare && navigator.canShare({ files })) {
-        await navigator.share({ files, title: "Reflection Lifestyle", text: data.customer.name });
+        await navigator.share({ files, title: "Reflection Lifestyle - AI", text: data.customer.name });
       } else {
         for (const file of files) {
           const url = URL.createObjectURL(file);

@@ -504,24 +504,30 @@ export function translatePlacement(shape, placement, dx, dy) {
   return { ...placement, long, short };
 }
 
-/** Resizes a block toward a normalised pointer position on its resize
- * handle. Length follows the pointer (snapped to `snapFt`); depth keeps its
- * current proportion to length. The back edge (and, for arms, the bend)
- * stays put. Returns the new placement and the new length in feet. */
-export function resizePlacement(shape, placement, nx, ny, feet, snapFt) {
+/** Resizes a block toward a normalised pointer position on one of its resize
+ * handles. `handle` selects which dimension follows the pointer:
+ *   - "length" (default): rect length, or the long arm for L/curved. Depth
+ *     stays fixed. Back edge (and, for arms, the bend) stays put.
+ *   - "short": the short arm for L/curved only. Depth stays fixed.
+ *   - "depth": rect depth only. Length stays fixed.
+ * Returns the new placement and, for "length", the new length in feet as
+ * `widthFt` (null for "short"/"depth", which never change width_ft). */
+export function resizePlacement(shape, placement, nx, ny, feet, snapFt, handle = "length") {
   const px = nx * feet.wFt;
   const py = ny * feet.hFt;
 
   if (ARM_SHAPES.has(shape)) {
     const p = armParams(placement, feet);
     const { sx, sy } = cornerSigns(p.corner);
-    const alongX = p.longAxis === "x";
+    const resizingLong = handle !== "short";
+    // the long arm runs along p.longAxis; the short arm runs along the other axis
+    const alongX = resizingLong ? p.longAxis === "x" : p.longAxis !== "x";
     const reach = alongX ? (px - p.bx) * sx : (py - p.by) * sy;
     const room = alongX ? (sx > 0 ? feet.wFt - p.bx : p.bx) : sy > 0 ? feet.hFt - p.by : p.by;
-    const longFt = Math.min(snapTo(reach, snapFt), room);
-    const k = longFt / p.longFt;
-    const q = { ...p, longFt, shortFt: p.shortFt * k, depthFt: p.depthFt * k };
-    return { placement: armsFromParams(clampArmParams(q, feet), feet), widthFt: longFt };
+    const minLen = p.depthFt + MIN_BLOCK_FT;
+    const len = Math.max(minLen, Math.min(snapTo(reach, snapFt), room));
+    const q = resizingLong ? { ...p, longFt: len } : { ...p, shortFt: len };
+    return { placement: armsFromParams(clampArmParams(q, feet), feet), widthFt: resizingLong ? len : null };
   }
 
   const f = rectToFeet(placement, feet);
@@ -530,11 +536,37 @@ export function resizePlacement(shape, placement, nx, ny, feet, snapFt) {
     return { placement: rectFromFeet({ ...f, lengthFt: diameter, depthFt: diameter }, feet), widthFt: diameter };
   }
 
+  if (handle === "depth") {
+    const r = placement.rotation;
+    const alongXd = r % 180 === 0;
+    let d;
+    if (r === 0) d = py - placement.y * feet.hFt;
+    else if (r === 180) d = (placement.y + placement.h) * feet.hFt - py;
+    else if (r === 90) d = px - placement.x * feet.wFt;
+    else d = (placement.x + placement.w) * feet.wFt - px;
+    const maxD = alongXd ? feet.hFt : feet.wFt;
+    const depthFt = Math.min(Math.max(MIN_BLOCK_FT, Math.round(d / snapFt) * snapFt), maxD);
+    let rect;
+    if (alongXd) {
+      const hN = depthFt / feet.hFt;
+      const y = r === 0 ? placement.y : placement.y + placement.h - hN; // back edge stays put
+      rect = { ...placement, y, h: hN };
+    } else {
+      const wN = depthFt / feet.wFt;
+      const x = r === 90 ? placement.x : placement.x + placement.w - wN; // back edge stays put
+      rect = { ...placement, x, w: wN };
+    }
+    return {
+      placement: clampRectToRoom({ ...rect, x: round4(rect.x), y: round4(rect.y), w: round4(rect.w), h: round4(rect.h) }),
+      widthFt: null,
+    };
+  }
+
   const alongX = f.rotation % 180 === 0;
   const start = alongX ? placement.x * feet.wFt : placement.y * feet.hFt;
   const pointer = alongX ? px : py;
   const lengthFt = Math.min(snapTo(pointer - start, snapFt), (alongX ? feet.wFt : feet.hFt) - start);
-  const depthFt = lengthFt * (f.depthFt / f.lengthFt);
+  const depthFt = f.depthFt;
   const wF = alongX ? lengthFt : depthFt;
   const hF = alongX ? depthFt : lengthFt;
   let x0;

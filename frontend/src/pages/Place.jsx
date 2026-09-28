@@ -151,17 +151,21 @@ export default function Place() {
     persistPlacement(block, placement);
   }
 
-  function handleResizeBlock(key, origPlacement, x, y) {
+  function handleResizeBlock(key, origPlacement, x, y, handle = "length") {
     const block = blocks.find((b) => b.key === key);
     if (!block) return;
     const snap = block.inSet ? SET_PIECE_SNAP_FT : SINGLE_PIECE_SNAP_FT;
-    const { placement, widthFt } = resizePlacement(block.shape, origPlacement, x, y, feet, snap);
-    updateBlock(key, { placement, widthFt });
+    const { placement, widthFt } = resizePlacement(block.shape, origPlacement, x, y, feet, snap, handle);
+    if (handle === "length") {
+      updateBlock(key, { placement, widthFt, resizedHandle: "length" });
+    } else {
+      updateBlock(key, { placement, resizedHandle: handle });
+    }
   }
 
   function handleCommitResize(key) {
     const block = blocks.find((b) => b.key === key);
-    if (block && block.placement) persistPlacement(block, block.placement, block.widthFt);
+    if (block && block.placement) persistPlacement(block, block.placement, block.resizedHandle === "length" ? block.widthFt : null);
   }
 
   function handleRemoveBlock(key) {

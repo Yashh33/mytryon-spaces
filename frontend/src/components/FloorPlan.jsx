@@ -23,6 +23,7 @@ import {
   placementRects,
   planGeometry,
   rectsOverlap,
+  roomFeet,
   translatePlacement,
 } from "../placement.js";
 
@@ -100,6 +101,7 @@ export function FloorPlan({
 
   const layout = room.layout_json;
   const geom = planGeometry(layout?.depth_vs_width);
+  const feet = roomFeet(layout?.depth_vs_width);
 
   function toNormalized(clientX, clientY) {
     const rect = svgRef.current.getBoundingClientRect();
@@ -138,8 +140,9 @@ export function FloorPlan({
     if (!drag || drag.key !== block.key || drag.pointerId !== e.pointerId) return;
     const p = toNormalized(e.clientX, e.clientY);
     drag.moved = true;
-    if (drag.mode === "resize") {
-      onResizeBlock(block.key, drag.orig, p.x, p.y);
+    const resizeHandle = { resize: "length", "resize-short": "short", "resize-depth": "depth" }[drag.mode];
+    if (resizeHandle) {
+      onResizeBlock(block.key, drag.orig, p.x, p.y, resizeHandle);
     } else {
       onMoveBlock(block.key, translatePlacement(block.shape, drag.orig, p.x - drag.startX, p.y - drag.startY));
     }
@@ -152,7 +155,7 @@ export function FloorPlan({
     e.stopPropagation();
     dragRef.current = null;
     if (!drag.moved) return;
-    if (drag.mode === "resize") onCommitResize(block.key);
+    if (drag.mode === "resize" || drag.mode === "resize-short" || drag.mode === "resize-depth") onCommitResize(block.key);
     else onCommitBlock(block.key, block.placement);
   }
 
@@ -383,7 +386,8 @@ export function FloorPlan({
         const len = Math.hypot(C[0] - front[0], C[1] - front[1]) || 1;
         const arrows = [{ x: front[0], y: front[1], dx: (C[0] - front[0]) / len, dy: (C[1] - front[1]) / len }];
         const labelAt = pt((rx + irx) / 2, (ry + iry) / 2, 45);
-        return { outline, back, arrows, bbox, handle, labelAt };
+        const secondHandle = { pos: p.longAxis === "x" ? at(d, vLen) : at(hLen, d), kind: "short" };
+        return { outline, back, arrows, bbox, handle, secondHandle, labelAt };
       }
 
       // L: one outline with a square inner turn and rounded outer corners
@@ -400,7 +404,8 @@ export function FloorPlan({
         { x: hFront[0], y: hFront[1], dx: 0, dy: sy },
         { x: vFront[0], y: vFront[1], dx: sx, dy: 0 },
       ];
-      return { outline, back, arrows, bbox, handle, labelAt: at(d / 2, d / 2) };
+      const secondHandle = { pos: p.longAxis === "x" ? at(d, vLen) : at(hLen, d), kind: "short" };
+      return { outline, back, arrows, bbox, handle, secondHandle, labelAt: at(d / 2, d / 2) };
     }
 
     const { X, Y, W, H } = pxRect(placement);
@@ -420,7 +425,12 @@ export function FloorPlan({
         `M ${cx + br * Math.cos(a0)} ${cy + br * Math.sin(a0)} A ${br} ${br} 0 0 1 ${cx + br * Math.cos(a1)} ${cy + br * Math.sin(a1)}`,
       ];
       const arrows = [{ x: cx + fx * r, y: cy + fy * r, dx: fx, dy: fy }];
-      return { outline, back, arrows, bbox, handle: [cx + r * Math.SQRT1_2, cy + r * Math.SQRT1_2], labelAt: [cx, cy] };
+      return {
+        outline, back, arrows, bbox,
+        handle: [cx + r * Math.SQRT1_2, cy + r * Math.SQRT1_2],
+        secondHandle: null,
+        labelAt: [cx, cy],
+      };
     }
 
     // rect: back edge is the side opposite the facing direction
@@ -435,7 +445,14 @@ export function FloorPlan({
     const back = [`M ${backLine[0]} ${backLine[1]} L ${backLine[2]} ${backLine[3]}`];
     const frontCentre = [X + W / 2 + (fx * W) / 2, Y + H / 2 + (fy * H) / 2];
     const arrows = [{ x: frontCentre[0], y: frontCentre[1], dx: fx, dy: fy }];
-    return { outline, back, arrows, bbox, handle: [X + W, Y + H], labelAt: [X + W / 2, Y + H / 2] };
+    const frontHandlePos = {
+      0: [X + W * 0.25, Y + H],
+      180: [X + W * 0.25, Y],
+      90: [X + W, Y + H * 0.25],
+      270: [X, Y + H * 0.25],
+    }[placement.rotation];
+    const secondHandle = { pos: frontHandlePos, kind: "depth" };
+    return { outline, back, arrows, bbox, handle: [X + W, Y + H], secondHandle, labelAt: [X + W / 2, Y + H / 2] };
   }
 
   function renderBlock(block, selected, drawing) {
@@ -457,7 +474,7 @@ export function FloorPlan({
   }
 
   function renderSelectedControls(block, drawing) {
-    const { bbox, handle } = drawing;
+    const { bbox, handle, secondHandle } = drawing;
     const buttons = [
       { key: "remove", cls: "fp-remove-handle", icon: "×", onTap: () => onRemoveBlock(block.key) },
       { key: "rotate", cls: "fp-rotate-handle", icon: "↻", onTap: () => onRotateBlock(block.key) },
@@ -498,6 +515,29 @@ export function FloorPlan({
         <text x={handle[0] + 10} y={handle[1] + 16} className="fp-size-label">
           {formatFeet(block.widthFt)} ft
         </text>
+        {secondHandle ? (
+          <g>
+            <g
+              {...dragHandlers(block, secondHandle.kind === "short" ? "resize-short" : "resize-depth")}
+              style={{ touchAction: "none", cursor: "nwse-resize" }}
+            >
+              <circle cx={secondHandle.pos[0]} cy={secondHandle.pos[1]} r="14" className="fp-hit" />
+              <circle cx={secondHandle.pos[0]} cy={secondHandle.pos[1]} r="6.5" fill={block.color} className="fp-resize-handle" />
+            </g>
+            <text x={secondHandle.pos[0] + 10} y={secondHandle.pos[1] + 16} className="fp-size-label">
+              {secondHandle.kind === "short"
+                ? formatFeet(Math.round(armParams(block.placement, feet).shortFt * 2) / 2)
+                : formatFeet(
+                    Math.round(
+                      (block.placement.rotation % 180 === 0
+                        ? block.placement.h * feet.hFt
+                        : block.placement.w * feet.wFt) * 2
+                    ) / 2
+                  )}{" "}
+              ft
+            </text>
+          </g>
+        ) : null}
       </g>
     );
   }

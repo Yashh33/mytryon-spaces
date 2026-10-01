@@ -72,12 +72,14 @@ export default function AdminPrompt() {
     }
   }
 
-  if (!data && !error) return <div className="screen"><TopBar backTo={backTo} /><Loading /></div>;
-  if (error) return <div className="screen"><TopBar backTo={backTo} /><ErrorBlock message={error} onRetry={load} /></div>;
+  const crumbs = [{ label: "Admin", to: backTo }, { label: "Generation prompt" }];
+
+  if (!data && !error) return <div className="screen"><TopBar backTo={backTo} crumbs={crumbs} /><Loading /></div>;
+  if (error) return <div className="screen"><TopBar backTo={backTo} crumbs={crumbs} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   return (
     <div className="screen">
-      <TopBar backTo={backTo} />
+      <TopBar backTo={backTo} crumbs={crumbs} />
       <div className="eyebrow">Admin</div>
       <h1 style={{ marginBottom: 4 }}>Generation prompt</h1>
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>

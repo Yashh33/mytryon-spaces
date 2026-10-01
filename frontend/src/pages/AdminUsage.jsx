@@ -37,12 +37,14 @@ export default function AdminUsage() {
     return <Navigate to="/super" replace />;
   }
 
-  if (!data && !error) return <div className="screen"><TopBar backTo={backTo} /><Loading /></div>;
-  if (error) return <div className="screen"><TopBar backTo={backTo} /><ErrorBlock message={error} onRetry={load} /></div>;
+  const crumbs = [{ label: "Admin", to: withQuery("/admin", { shop_id: shopId }) }, { label: "Usage" }];
+
+  if (!data && !error) return <div className="screen"><TopBar backTo={backTo} crumbs={crumbs} /><Loading /></div>;
+  if (error) return <div className="screen"><TopBar backTo={backTo} crumbs={crumbs} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   return (
     <div className="screen">
-      <TopBar backTo={backTo} />
+      <TopBar backTo={backTo} crumbs={crumbs} />
       <div className="eyebrow">Admin</div>
       <h1 style={{ marginBottom: 4 }}>Usage this cycle</h1>
       <div className="muted mono" style={{ fontSize: 12, marginBottom: 18 }}>
@@ -66,6 +68,25 @@ export default function AdminUsage() {
         </div>
       ) : (
         <div className="empty-state">No salesmen yet.</div>
+      )}
+
+      <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+        The owner&rsquo;s own renders are not included in this table yet.
+      </div>
+
+      <div className="section-label" style={{ marginTop: 22 }}>Daily</div>
+      {data.daily && data.daily.length ? (
+        <div className="usage-table">
+          {[...data.daily].reverse().map((d) => (
+            <div key={d.date} className="usage-row">
+              <div className="usage-name">{formatDate(d.date)}</div>
+              <div className="usage-num mono">{d.generations}</div>
+              <div className="usage-num mono">{d.credits_spent.toLocaleString()}</div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">No activity yet.</div>
       )}
     </div>
   );

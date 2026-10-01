@@ -6,7 +6,8 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { initials, withQuery } from "../utils.js";
+import { BottomNav } from "../components/BottomNav.jsx";
+import { initials, formatDate, withQuery } from "../utils.js";
 
 export default function Admin() {
   const { user } = useAuth();
@@ -16,8 +17,10 @@ export default function Admin() {
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [credits, setCredits] = useState(null);
 
   const isSuperadmin = user.role === "superadmin";
+  const isOwner = user.role === "owner";
   const needsShopRedirect = isSuperadmin && !shopId;
 
   const backTo = isSuperadmin ? `/super/shop/${shopId}` : "/";
@@ -39,9 +42,20 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopId]);
 
+  useEffect(() => {
+    if (!isOwner) return;
+    api
+      .get("/api/shop/credits")
+      .then(setCredits)
+      .catch(() => {});
+  }, [isOwner]);
+
   if (needsShopRedirect) {
     return <Navigate to="/super" replace />;
   }
+
+  const creditsPct = credits ? Math.min(100, Math.max(0, (credits.balance / credits.monthly_credits) * 100)) : 0;
+  const creditsLow = credits && credits.balance < credits.monthly_credits * 0.1;
 
   const filtered = (users || []).filter((u) => {
     const q = query.trim().toLowerCase();
@@ -50,9 +64,10 @@ export default function Admin() {
   });
 
   return (
-    <div className="screen">
+    <div className={"screen" + (isOwner ? " has-bottom-nav" : "")}>
       <TopBar
         backTo={backTo}
+        crumbs={[{ label: "Admin" }]}
         right={
           <div style={{ display: "flex", gap: 14 }}>
             <Link to={withShop("/admin/usage")} className="link-btn">
@@ -65,6 +80,20 @@ export default function Admin() {
         }
       />
       <div className="eyebrow">Admin</div>
+
+      {isOwner && credits ? (
+        <div className="account-credits-card" style={{ marginBottom: 16 }}>
+          <div className="amount">
+            {credits.balance.toLocaleString()} of {credits.monthly_credits.toLocaleString()} credits left
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${creditsPct}%` }} />
+          </div>
+          <div className="reset">Resets {formatDate(credits.cycle_ends_on)}</div>
+          {creditsLow ? <div className="low-credits-note">Low credits</div> : null}
+        </div>
+      ) : null}
+
       <div className="admin-header">
         <h1>Salesmen</h1>
         <div className="admin-count">{users ? users.length : ""}</div>
@@ -110,6 +139,8 @@ export default function Admin() {
           }}
         />
       ) : null}
+
+      {isOwner ? <BottomNav /> : null}
     </div>
   );
 }

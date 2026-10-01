@@ -31,7 +31,7 @@ export default function SuperShop() {
 
   return (
     <div className="screen">
-      <TopBar backTo="/super" />
+      <TopBar backTo="/super" crumbs={[{ label: "Shops", to: "/super" }, { label: shop.name }]} />
       <div className="eyebrow">Superadmin</div>
       <h1 style={{ marginBottom: 4 }}>{shop.name}</h1>
       <div className="mono muted" style={{ marginBottom: 18 }}>

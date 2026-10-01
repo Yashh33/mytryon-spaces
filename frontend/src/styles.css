@@ -508,3 +508,10 @@ h2 { font-size: 19px; }
 .account-credits-card .reset { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 6px; }
 .progress-track { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; }
 .progress-fill { height: 100%; background: var(--orange); border-radius: 4px; }
+
+/* Low credits */
+.low-credits-note { font-size: 12px; font-weight: 700; color: #C0392B; margin-top: 8px; }
+.badge-low {
+  font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em;
+  background: #FCE9E4; color: #C0392B; border-radius: 5px; padding: 2px 6px; font-weight: 700; margin-left: 8px;
+}

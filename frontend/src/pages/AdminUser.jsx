@@ -74,6 +74,7 @@ export default function AdminUser() {
   if (error) return <div className="screen"><TopBar backTo={backTo} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   const { user, customer_count, customers } = data;
+  const crumbs = [{ label: "Admin", to: backTo }, { label: user.name }];
   // Owners can only manage salesmen — never themselves or another owner.
   // Only a superadmin can act on an owner-role account.
   const canManage = viewer.role === "superadmin" || user.role === "salesman";
@@ -82,6 +83,7 @@ export default function AdminUser() {
     <div className="screen">
       <TopBar
         backTo={backTo}
+        crumbs={crumbs}
         right={
           canManage ? (
             <div style={{ position: "relative" }} ref={menuRef}>

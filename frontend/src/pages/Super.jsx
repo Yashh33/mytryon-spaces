@@ -54,7 +54,10 @@ export default function Super() {
               <div key={s.id} className={"row-item" + (s.active ? "" : " inactive")}>
                 <div className="avatar">{initials(s.name)}</div>
                 <Link to={`/super/shop/${s.id}`} className="info">
-                  <div className="name">{s.name}</div>
+                  <div className="name">
+                    {s.name}
+                    {s.balance < s.monthly_credits * 0.1 ? <span className="badge-low">LOW</span> : null}
+                  </div>
                   <div className="sub">
                     {s.balance.toLocaleString()} / {s.monthly_credits.toLocaleString()} credits &middot; {s.salesman_count}{" "}
                     salesm{s.salesman_count === 1 ? "an" : "en"}
@@ -195,6 +198,17 @@ export function EditShopSheet({ shop, onClose, onSaved }) {
       </button>
 
       <div className="section-label" style={{ marginTop: 20 }}>Manual adjustment</div>
+      <div className="chips" style={{ marginBottom: 10 }}>
+        <button type="button" className="chip" onClick={() => setDelta("500")}>
+          +500
+        </button>
+        <button type="button" className="chip" onClick={() => setDelta("1000")}>
+          +1,000
+        </button>
+        <button type="button" className="chip" onClick={() => setDelta("5000")}>
+          +5,000
+        </button>
+      </div>
       <div className="field">
         <label>Credits (negative to deduct)</label>
         <input type="number" value={delta} onChange={(e) => setDelta(e.target.value)} placeholder="e.g. -100 or 500" />

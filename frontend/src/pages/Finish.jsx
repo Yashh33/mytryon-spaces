@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { StepBar } from "../components/StepBar.jsx";
 import { Chip } from "../components/Chip.jsx";
 
 const ROOM_TREATMENTS = [
@@ -63,8 +64,16 @@ export default function Finish() {
 
   return (
     <div className="screen">
-      <TopBar backTo={`/attempt/${id}/place`} />
+      <TopBar
+        backTo={`/attempt/${id}/place`}
+        crumbs={[
+          { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
+          { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
+          { label: "Attempt" },
+        ]}
+      />
       <div className="eyebrow">Step 4 of 4</div>
+      <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} />
       <h1 style={{ marginBottom: 20 }}>Finishing touches</h1>
 
       <div className="field">

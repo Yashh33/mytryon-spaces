@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { StepBar } from "../components/StepBar.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { RoomPlanView } from "../components/RoomPlanView.jsx";
 import {
@@ -233,8 +234,16 @@ export default function Place() {
 
   return (
     <div className="screen">
-      <TopBar backTo={`/attempt/${id}/furniture`} />
+      <TopBar
+        backTo={`/attempt/${id}/furniture`}
+        crumbs={[
+          { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
+          { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
+          { label: "Attempt" },
+        ]}
+      />
       <div className="eyebrow">Step 3 of 4</div>
+      <StepBar current={3} attemptId={attempt.id} roomId={attempt.room.id} />
       <h1 style={{ marginBottom: 4 }}>Where does each piece go?</h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
         {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}

@@ -17,6 +17,7 @@ import Admin from "./pages/Admin.jsx";
 import AdminUser from "./pages/AdminUser.jsx";
 import AdminPrompt from "./pages/AdminPrompt.jsx";
 import AdminUsage from "./pages/AdminUsage.jsx";
+import Account from "./pages/Account.jsx";
 import Super from "./pages/Super.jsx";
 import SuperShop from "./pages/SuperShop.jsx";
 import SuperLogin from "./pages/SuperLogin.jsx";
@@ -139,6 +140,14 @@ export default function App() {
             element={
               <RequireAuth roles={OWNER_ROLES}>
                 <AdminUsage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/account"
+            element={
+              <RequireAuth>
+                <Account />
               </RequireAuth>
             }
           />

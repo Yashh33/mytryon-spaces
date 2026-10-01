@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { StepBar } from "../components/StepBar.jsx";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
@@ -100,8 +101,16 @@ export default function Furniture() {
 
   return (
     <div className="screen">
-      <TopBar backTo={`/room/${attempt.room.id}`} />
+      <TopBar
+        backTo={`/room/${attempt.room.id}`}
+        crumbs={[
+          { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
+          { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
+          { label: "Attempt" },
+        ]}
+      />
       <div className="eyebrow">Step 2 of 4</div>
+      <StepBar current={2} attemptId={attempt.id} roomId={attempt.room.id} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
         <h1 style={{ marginBottom: 0 }}>Add furniture</h1>
         <button type="button" className="link-btn" onClick={() => setShowPlan(true)}>

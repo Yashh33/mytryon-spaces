@@ -79,7 +79,10 @@ export default function Customer() {
 
   return (
     <div className="screen">
-      <TopBar backTo="/" />
+      <TopBar
+        backTo="/"
+        crumbs={customer ? [{ label: "Customers", to: "/" }, { label: customer.name }] : undefined}
+      />
       <div className="eyebrow">Customer</div>
       {customer ? (
         <h1 style={{ marginBottom: 18 }}>{customer.name}</h1>

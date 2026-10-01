@@ -5,6 +5,7 @@ import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
 import { ErrorBlock, RowSkeleton } from "../components/StateBlock.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
+import { BottomNav } from "../components/BottomNav.jsx";
 import { initials, formatDate } from "../utils.js";
 
 const OWNER_ROLES = ["owner", "superadmin"];
@@ -53,7 +54,7 @@ export default function Customers() {
   const filtered = (customers || []).filter((c) => c.name.toLowerCase().includes(query.trim().toLowerCase()));
 
   return (
-    <div className="screen">
+    <div className="screen has-bottom-nav">
       <div className="page-header">
         <div>
           <h1>Hello, {user.first_name}</h1>
@@ -81,6 +82,9 @@ export default function Customers() {
                   Shops
                 </Link>
               ) : null}
+              <Link to="/account" onClick={() => setMenuOpen(false)}>
+                Account
+              </Link>
               <button type="button" onClick={logout} style={{ color: "#C0392B" }}>
                 Sign out
               </button>
@@ -142,6 +146,8 @@ export default function Customers() {
           }}
         />
       ) : null}
+
+      <BottomNav />
     </div>
   );
 }

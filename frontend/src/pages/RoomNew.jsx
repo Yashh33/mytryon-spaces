@@ -35,6 +35,7 @@ export default function RoomNew() {
   return (
     <div className="screen">
       <TopBar backTo={`/customer/${id}`} />
+      <div className="eyebrow">Step 1 of 4</div>
       <h1 style={{ marginBottom: 20 }}>Add a room</h1>
       <div className="field">
         <label>Which room?</label>

@@ -102,7 +102,14 @@ export default function Result() {
 
   return (
     <div className="screen">
-      <TopBar backTo={`/room/${attempt.room.id}`} />
+      <TopBar
+        backTo={`/customer/${attempt.room.customer_id}`}
+        crumbs={[
+          { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
+          { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
+          { label: `Attempt ${number}` },
+        ]}
+      />
       <div className="result-header">
         <div>
           <div className="eyebrow">

@@ -47,7 +47,14 @@ export default function Room() {
 
   return (
     <div className="screen">
-      <TopBar backTo={`/customer/${room.customer_id}`} />
+      <TopBar
+        backTo={`/customer/${room.customer_id}`}
+        crumbs={[
+          { label: "Customers", to: "/" },
+          { label: room.customer_name, to: `/customer/${room.customer_id}` },
+          { label: room.room_type },
+        ]}
+      />
       <div className="eyebrow">{room.customer_name}</div>
       <h1 style={{ marginBottom: 16 }}>{room.room_type}</h1>
 

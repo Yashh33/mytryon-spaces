@@ -455,3 +455,56 @@ h2 { font-size: 19px; }
   background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 9px;
   font-size: 13px; z-index: 60; max-width: 90%; text-align: center;
 }
+
+/* Home button (TopBar) */
+.home-btn { font-size: 18px; color: var(--ink2); line-height: 1; padding: 4px; }
+
+/* Breadcrumbs (TopBar) */
+.crumb-row {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-bottom: 10px;
+}
+.crumb-link { color: var(--muted); }
+.crumb-sep { color: var(--line); }
+.crumb-current { color: var(--ink2); font-weight: 600; }
+
+/* Step bar */
+.step-bar { display: flex; align-items: center; gap: 4px; margin-bottom: 18px; }
+.step-seg {
+  display: flex; align-items: center; gap: 6px; flex: 1; font-size: 11px; font-weight: 600; color: var(--ink2);
+}
+.step-seg-link { cursor: pointer; }
+.step-seg-muted { color: var(--muted); }
+.step-dot {
+  width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 10px; font-weight: 700; background: var(--line); color: var(--ink2);
+}
+.step-dot.done { background: var(--orange-d); color: #fff; }
+.step-dot.current { background: var(--orange); color: #fff; }
+.step-label { display: none; }
+@media (min-width: 360px) {
+  .step-label { display: inline; }
+}
+
+/* Bottom nav */
+.bottom-nav {
+  position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: min(480px, 100%); display: flex; background: #fff; border-top: 1px solid var(--line);
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); z-index: 30;
+}
+.bottom-nav-tab {
+  flex: 1; display: flex; align-items: center; justify-content: center; min-height: 44px;
+  font-size: 12.5px; font-weight: 700; color: var(--muted); border-radius: 9px;
+}
+.bottom-nav-tab.active { color: var(--orange-d); background: var(--tint); }
+.screen.has-bottom-nav { padding-bottom: 96px; }
+
+/* Account page */
+.account-credits-card {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 4px;
+}
+.account-credits-card .amount { font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+.account-credits-card .reset { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 6px; }
+.progress-track { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.progress-fill { height: 100%; background: var(--orange); border-radius: 4px; }

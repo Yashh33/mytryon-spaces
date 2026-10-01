@@ -80,7 +80,14 @@ export default function Adjust() {
 
   return (
     <div className="screen">
-      <TopBar backTo={`/attempt/${id}/result`} />
+      <TopBar
+        backTo={`/attempt/${id}/result`}
+        crumbs={[
+          { label: draft.room.customer_name, to: `/customer/${draft.room.customer_id}` },
+          { label: draft.room.room_type, to: `/room/${draft.room.id}` },
+          { label: "Attempt" },
+        ]}
+      />
       <div className="eyebrow">Adjust</div>
       <h1 style={{ marginBottom: 16 }}>Adjust &amp; try again</h1>
 
@@ -98,7 +105,7 @@ export default function Adjust() {
       <button type="button" className="adjust-row" onClick={() => navigate(`/attempt/${draft.id}/place`)}>
         <span>
           Placement
-          <div className="sub">{draft.items.some((it) => it.strokes && it.strokes.length) ? "drawn" : "not drawn"}</div>
+          <div className="sub">{draft.items.some((it) => it.placement && it.placement.length) ? "placed" : "not placed"}</div>
         </span>
         <span className="chevron">&#8250;</span>
       </button>

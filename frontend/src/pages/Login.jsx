@@ -28,10 +28,7 @@ export default function Login() {
 
   return (
     <div className="login-screen">
-      <div className="logo-block">
-        <div className="logo-name">Reflection</div>
-        <div className="logo-sub">Lifestyle</div>
-      </div>
+      <img src="/logo.png" alt="Reflection Lifestyle" className="login-logo" />
       <div className="login-tagline">Visualization tool</div>
       <form className="login-form" onSubmit={handleSubmit}>
         {error ? <div className="login-error">{error}</div> : null}

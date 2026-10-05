@@ -25,10 +25,8 @@ export default function SuperLogin() {
 
   return (
     <div className="login-screen">
-      <div className="logo-block">
-        <div className="logo-name">Reflection</div>
-        <div className="logo-sub">Superadmin</div>
-      </div>
+      <img src="/logo.png" alt="Reflection Lifestyle" className="login-logo" />
+      <div className="login-logo-sub">SUPERADMIN</div>
       <div className="login-tagline">Shop management</div>
       <form className="login-form" onSubmit={handleSubmit}>
         {error ? <div className="login-error">{error}</div> : null}

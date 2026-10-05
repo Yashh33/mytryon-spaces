@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, RequireAuth } from "./auth.jsx";
 import { ToastProvider } from "./components/Toast.jsx";
+import { AppHeader } from "./components/AppHeader.jsx";
 
 import Login from "./pages/Login.jsx";
 import Customers from "./pages/Customers.jsx";
@@ -24,6 +25,15 @@ import SuperLogin from "./pages/SuperLogin.jsx";
 
 const OWNER_ROLES = ["owner", "superadmin"];
 
+function AuthedLayout({ children }) {
+  return (
+    <>
+      <AppHeader />
+      {children}
+    </>
+  );
+}
+
 export default function App() {
   return (
     <ToastProvider>
@@ -35,7 +45,9 @@ export default function App() {
             path="/"
             element={
               <RequireAuth>
-                <Customers />
+                <AuthedLayout>
+                  <Customers />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -43,7 +55,9 @@ export default function App() {
             path="/customer/:id"
             element={
               <RequireAuth>
-                <Customer />
+                <AuthedLayout>
+                  <Customer />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -51,7 +65,9 @@ export default function App() {
             path="/customer/:id/room/new"
             element={
               <RequireAuth>
-                <RoomNew />
+                <AuthedLayout>
+                  <RoomNew />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -59,7 +75,9 @@ export default function App() {
             path="/room/:id"
             element={
               <RequireAuth>
-                <Room />
+                <AuthedLayout>
+                  <Room />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -67,7 +85,9 @@ export default function App() {
             path="/attempt/:id/furniture"
             element={
               <RequireAuth>
-                <Furniture />
+                <AuthedLayout>
+                  <Furniture />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -75,7 +95,9 @@ export default function App() {
             path="/attempt/:id/place"
             element={
               <RequireAuth>
-                <Place />
+                <AuthedLayout>
+                  <Place />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -83,7 +105,9 @@ export default function App() {
             path="/attempt/:id/finish"
             element={
               <RequireAuth>
-                <Finish />
+                <AuthedLayout>
+                  <Finish />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -91,7 +115,9 @@ export default function App() {
             path="/attempt/:id/generating"
             element={
               <RequireAuth>
-                <Generating />
+                <AuthedLayout>
+                  <Generating />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -99,7 +125,9 @@ export default function App() {
             path="/attempt/:id/result"
             element={
               <RequireAuth>
-                <Result />
+                <AuthedLayout>
+                  <Result />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -107,7 +135,9 @@ export default function App() {
             path="/attempt/:id/adjust"
             element={
               <RequireAuth>
-                <Adjust />
+                <AuthedLayout>
+                  <Adjust />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -115,7 +145,9 @@ export default function App() {
             path="/admin"
             element={
               <RequireAuth roles={OWNER_ROLES}>
-                <Admin />
+                <AuthedLayout>
+                  <Admin />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -123,7 +155,9 @@ export default function App() {
             path="/admin/user/:id"
             element={
               <RequireAuth roles={OWNER_ROLES}>
-                <AdminUser />
+                <AuthedLayout>
+                  <AdminUser />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -131,7 +165,9 @@ export default function App() {
             path="/admin/prompt"
             element={
               <RequireAuth roles={OWNER_ROLES}>
-                <AdminPrompt />
+                <AuthedLayout>
+                  <AdminPrompt />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -139,7 +175,9 @@ export default function App() {
             path="/admin/usage"
             element={
               <RequireAuth roles={OWNER_ROLES}>
-                <AdminUsage />
+                <AuthedLayout>
+                  <AdminUsage />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -147,7 +185,9 @@ export default function App() {
             path="/account"
             element={
               <RequireAuth>
-                <Account />
+                <AuthedLayout>
+                  <Account />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -155,7 +195,9 @@ export default function App() {
             path="/super"
             element={
               <RequireAuth roles={["superadmin"]} loginPath="/super/login">
-                <Super />
+                <AuthedLayout>
+                  <Super />
+                </AuthedLayout>
               </RequireAuth>
             }
           />
@@ -163,7 +205,9 @@ export default function App() {
             path="/super/shop/:id"
             element={
               <RequireAuth roles={["superadmin"]} loginPath="/super/login">
-                <SuperShop />
+                <AuthedLayout>
+                  <SuperShop />
+                </AuthedLayout>
               </RequireAuth>
             }
           />

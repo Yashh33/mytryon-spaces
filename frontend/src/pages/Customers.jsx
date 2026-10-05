@@ -1,25 +1,24 @@
-import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
 import { ErrorBlock, RowSkeleton } from "../components/StateBlock.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { BottomNav } from "../components/BottomNav.jsx";
-import { initials, formatDate } from "../utils.js";
+import { initials } from "../utils.js";
 
 const OWNER_ROLES = ["owner", "superadmin"];
 
 export default function Customers() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [customers, setCustomers] = useState(null);
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
-  const [menuOpen, setMenuOpen] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [credits, setCredits] = useState(null);
-  const menuRef = useRef(null);
 
   async function load() {
     setError(null);
@@ -39,17 +38,19 @@ export default function Customers() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      setShowAdd(true);
+      setSearchParams((params) => {
+        params.delete("new");
+        return params;
+      }, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const isOwnerRole = OWNER_ROLES.includes(user.role);
   const showLowCreditStrip = isOwnerRole && credits && credits.balance < credits.monthly_credits * 0.1;
-
-  useEffect(() => {
-    if (!menuOpen) return undefined;
-    function onDocClick(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
-    }
-    document.addEventListener("click", onDocClick);
-    return () => document.removeEventListener("click", onDocClick);
-  }, [menuOpen]);
 
   const filtered = (customers || []).filter((c) => c.name.toLowerCase().includes(query.trim().toLowerCase()));
 
@@ -59,37 +60,6 @@ export default function Customers() {
         <div>
           <h1>Hello, {user.first_name}</h1>
           <div className="eyebrow">Reflection Lifestyle - AI</div>
-        </div>
-        <div style={{ position: "relative" }} ref={menuRef}>
-          <button type="button" className="menu-btn" onClick={() => setMenuOpen((v) => !v)}>
-            &#8942;
-          </button>
-          {menuOpen ? (
-            <div className="menu-dropdown">
-              {credits ? (
-                <div className="menu-credits">
-                  <div className="amount">{credits.balance.toLocaleString()} credits left</div>
-                  <div className="reset">RESETS {formatDate(credits.cycle_ends_on).toUpperCase()}</div>
-                </div>
-              ) : null}
-              {isOwnerRole ? (
-                <Link to="/admin" onClick={() => setMenuOpen(false)}>
-                  Admin
-                </Link>
-              ) : null}
-              {user.role === "superadmin" ? (
-                <Link to="/super" onClick={() => setMenuOpen(false)}>
-                  Shops
-                </Link>
-              ) : null}
-              <Link to="/account" onClick={() => setMenuOpen(false)}>
-                Account
-              </Link>
-              <button type="button" onClick={logout} style={{ color: "#C0392B" }}>
-                Sign out
-              </button>
-            </div>
-          ) : null}
         </div>
       </div>
 

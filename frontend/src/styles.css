@@ -287,6 +287,29 @@ h2 { font-size: 19px; }
 .count-hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
 
 /* Floor plan placement */
+.placement-card { display: flex; flex-direction: column; }
+.placement-card-top { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.fp-fullscreen-btn {
+  display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 12px; font-size: 12px; font-weight: 700; color: var(--ink);
+}
+.fp-control-bar {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 10px;
+}
+.fp-control-bar-title { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 700; margin-bottom: 10px; }
+.fp-control-bar-size { font-family: var(--mono); color: var(--muted); font-weight: 600; font-size: 12px; margin-left: auto; }
+.fp-control-bar-buttons { display: flex; gap: 8px; }
+.fp-control-btn {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 48px; border: 1px solid var(--line); background: #fff; border-radius: 9px;
+  font-size: 13px; font-weight: 700; color: var(--ink);
+}
+.fp-control-btn-danger { color: #B42318; border-color: #E8C4BC; }
+.placement-fullscreen {
+  position: fixed; inset: 0; z-index: 30; background: #fff; overflow-y: auto;
+  padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom));
+}
+.placement-fullscreen .floor-plan-svg { max-height: calc(100vh - 220px); }
 .floor-plan-wrap { position: relative; }
 .floor-plan-skeleton {
   position: relative; border-radius: 12px; aspect-ratio: 4/3; overflow: hidden;
@@ -313,23 +336,29 @@ h2 { font-size: 19px; }
 .fp-pillar { fill: var(--ink2); }
 .fp-unsure { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; rx: 3; }
 .fp-label { font-family: var(--mono); font-size: 9px; fill: var(--ink2); }
+.fp-label-caps { text-transform: lowercase; font-variant-caps: small-caps; font-weight: 700; }
 .fp-leader { stroke: var(--muted); stroke-width: 0.5; stroke-dasharray: 3 2; }
-.fp-unknown-mark { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink2); }
 .fp-hit { fill: transparent; cursor: pointer; }
 .fp-camera circle { fill: #fff; stroke: var(--ink2); stroke-width: 1.5; }
 .fp-camera-fan { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 3 3; }
 .fp-camera text { fill: var(--muted); }
-.fp-block-number { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink); pointer-events: none; }
-.fp-block-back { fill: none; stroke-width: 1.5; stroke-opacity: 0.55; stroke-linecap: round; pointer-events: none; }
-.fp-facing-arrow { pointer-events: none; }
-.fp-resize-handle { stroke: #fff; stroke-width: 2; }
+.fp-block-number {
+  font-family: var(--mono); font-size: 10px; font-weight: 700; fill: #fff; pointer-events: none;
+  paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 2.5px;
+}
+.fp-sofa-label { font-family: var(--mono); font-size: 7.5px; font-weight: 700; fill: #fff; pointer-events: none; letter-spacing: 0.03em; }
+.fp-resize-handle { fill: #fff; stroke: #2563EB; stroke-width: 3; cursor: nwse-resize; }
 .fp-size-label { font-family: var(--mono); font-size: 8.5px; font-weight: 700; fill: var(--ink2); pointer-events: none; }
-.fp-handle { fill: #fff; stroke: var(--ink); stroke-width: 1.5; cursor: pointer; }
-.fp-flip-handle { stroke: var(--orange-d); }
-.fp-remove-handle { stroke: #C0392B; }
-.fp-handle-icon { font-size: 12px; fill: var(--ink); pointer-events: none; user-select: none; }
 .fp-warning-outline { fill: none; stroke: #C77700; stroke-width: 2; stroke-dasharray: 4 3; rx: 3; }
 .fp-warning-label { font-family: var(--mono); font-size: 8.5px; fill: #C77700; font-weight: 700; }
+.fp-legend {
+  display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center;
+  font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.4;
+}
+.fp-legend-item { display: inline-flex; align-items: center; gap: 5px; text-transform: lowercase; }
+.fp-legend-item:first-letter { text-transform: uppercase; }
+.fp-legend-swatch { width: 10px; height: 10px; border-radius: 3px; border: 1.5px solid; display: inline-block; flex-shrink: 0; }
+.fp-legend-dot { width: 9px; height: 9px; border-radius: 50%; background: #fff; border: 2px solid #2563EB; display: inline-block; flex-shrink: 0; }
 .chip-placed { position: relative; }
 .chip-placed::after {
   content: ""; position: absolute; top: -3px; right: -3px; width: 8px; height: 8px;

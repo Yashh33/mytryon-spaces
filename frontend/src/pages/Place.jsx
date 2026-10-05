@@ -6,7 +6,7 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { RoomPlanView } from "../components/RoomPlanView.jsx";
+import { PlacementCard } from "../components/PlacementCard.jsx";
 import {
   ADDABLE_FEATURE_TYPES,
   FAR_NEAR_POSITIONS,
@@ -50,6 +50,8 @@ export default function Place() {
   const [selectedKey, setSelectedKey] = useState(null);
   const [showAddFeature, setShowAddFeature] = useState(false);
   const [addObstructionMode, setAddObstructionMode] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState(null); // { kind: "piece"|"feature"|"obstruction", label, onConfirm }
+  const [fullScreen, setFullScreen] = useState(false);
 
   async function load() {
     setError(null);
@@ -81,6 +83,24 @@ export default function Place() {
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt?.room?.id, attempt?.room?.layout_status]);
+
+  // Full screen is a view mode, not a route — pushing a history entry when
+  // it opens means the phone's own back gesture/button closes it (handled
+  // here) instead of leaving the placement screen.
+  useEffect(() => {
+    if (!fullScreen) return undefined;
+    window.history.pushState({ placementFullScreen: true }, "");
+    const onPopState = () => setFullScreen(false);
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [fullScreen]);
+
+  function closeFullScreen() {
+    setFullScreen(false);
+    // Drop the history entry we pushed on open, so back doesn't later
+    // re-open full screen or require an extra back press to leave /place.
+    if (window.history.state?.placementFullScreen) window.history.back();
+  }
 
   const room = attempt?.room;
   const feet = roomFeet(room?.layout_json?.depth_vs_width);
@@ -169,7 +189,7 @@ export default function Place() {
     if (block && block.placement) persistPlacement(block, block.placement, block.resizedHandle === "length" ? block.widthFt : null);
   }
 
-  function handleRemoveBlock(key) {
+  function doRemoveBlock(key) {
     const block = blocks.find((b) => b.key === key);
     if (!block) return;
     updateBlock(key, { placement: null });
@@ -177,6 +197,19 @@ export default function Place() {
     // immediately pending — no second tap needed to re-place it.
     setSelectedKey(key);
     removePlacement(block);
+  }
+
+  function requestRemoveBlock(key) {
+    const block = blocks.find((b) => b.key === key);
+    if (!block) return;
+    setRemoveTarget({
+      label: block.label,
+      note: "It will not appear in the picture.",
+      onConfirm: () => {
+        doRemoveBlock(key);
+        setRemoveTarget(null);
+      },
+    });
   }
 
   async function updateLayout(mutate) {
@@ -198,7 +231,7 @@ export default function Place() {
     }));
   }
 
-  function handleTapFeature(wall, indices) {
+  function doRemoveFeature(wall, indices) {
     const key = WALL_KEY[wall];
     const toRemove = new Set(Array.isArray(indices) ? indices : [indices]);
     updateLayout((layout) => ({
@@ -207,11 +240,37 @@ export default function Place() {
     }));
   }
 
-  function handleTapObstruction(index) {
+  function handleTapFeature(wall, indices) {
+    const wallData = room.layout_json?.[WALL_KEY[wall]];
+    const first = Array.isArray(indices) ? indices[0] : indices;
+    const type = wallData?.features?.[first]?.type || "feature";
+    setRemoveTarget({
+      label: type,
+      note: "It will not appear in the picture.",
+      onConfirm: () => {
+        doRemoveFeature(wall, indices);
+        setRemoveTarget(null);
+      },
+    });
+  }
+
+  function doRemoveObstruction(index) {
     updateLayout((layout) => ({
       ...layout,
       obstructions: (layout.obstructions || []).filter((_, i) => i !== index),
     }));
+  }
+
+  function handleTapObstruction(index) {
+    const type = room.layout_json?.obstructions?.[index]?.type || "obstruction";
+    setRemoveTarget({
+      label: type,
+      note: "It will not appear in the picture.",
+      onConfirm: () => {
+        doRemoveObstruction(index);
+        setRemoveTarget(null);
+      },
+    });
   }
 
   function handleAddFeature({ wall, type, position }) {
@@ -232,6 +291,27 @@ export default function Place() {
   if (!attempt && !error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><Loading /></div>;
   if (error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><ErrorBlock message={error} onRetry={load} /></div>;
 
+  const placementCardProps = {
+    room,
+    blocks,
+    selectedBlock,
+    selectedKey,
+    onSelectBlock: handleSelectBlock,
+    onMoveBlock: handleMoveBlock,
+    onCommitBlock: handleCommitBlock,
+    onResizeBlock: handleResizeBlock,
+    onCommitResize: handleCommitResize,
+    onDropPendingAt: handleDropPendingAt,
+    pendingKey,
+    addObstructionMode,
+    onAddObstructionAt: handleAddObstructionAt,
+    onTapFeature: handleTapFeature,
+    onTapObstruction: handleTapObstruction,
+    onRotate: () => selectedKey && handleRotateBlock(selectedKey),
+    onFlip: () => selectedKey && handleFlipBlock(selectedKey),
+    onRequestRemove: () => selectedKey && requestRemoveBlock(selectedKey),
+  };
+
   return (
     <div className="screen">
       <TopBar
@@ -249,25 +329,9 @@ export default function Place() {
         {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}
       </div>
 
-      <RoomPlanView
-        room={room}
-        blocks={blocks}
-        selectedKey={selectedKey}
-        onSelectBlock={handleSelectBlock}
-        onMoveBlock={handleMoveBlock}
-        onCommitBlock={handleCommitBlock}
-        onRotateBlock={handleRotateBlock}
-        onFlipBlock={handleFlipBlock}
-        onResizeBlock={handleResizeBlock}
-        onCommitResize={handleCommitResize}
-        onRemoveBlock={handleRemoveBlock}
-        onDropPendingAt={handleDropPendingAt}
-        pendingKey={pendingKey}
-        addObstructionMode={addObstructionMode}
-        onAddObstructionAt={handleAddObstructionAt}
-        onTapFeature={handleTapFeature}
-        onTapObstruction={handleTapObstruction}
-      />
+      {!fullScreen ? (
+        <PlacementCard {...placementCardProps} fullScreen={false} onToggleFullScreen={() => setFullScreen(true)} />
+      ) : null}
 
       {room.layout_status !== "pending" ? (
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -309,7 +373,40 @@ export default function Place() {
       </div>
 
       {showAddFeature ? <AddFeatureSheet onClose={() => setShowAddFeature(false)} onAdd={handleAddFeature} /> : null}
+
+      {fullScreen ? (
+        <div className="placement-fullscreen">
+          <PlacementCard {...placementCardProps} fullScreen onToggleFullScreen={closeFullScreen} />
+        </div>
+      ) : null}
+
+      {/* Fixed-position sheet — rendered once regardless of full-screen,
+         since it already overlays everything via its own backdrop. */}
+      {removeTarget ? <RemoveConfirmSheet target={removeTarget} onClose={() => setRemoveTarget(null)} /> : null}
     </div>
+  );
+}
+
+function RemoveConfirmSheet({ target, onClose }) {
+  return (
+    <BottomSheet title={`Remove ${target.label}?`} onClose={onClose}>
+      <p className="muted" style={{ fontSize: 13.5, marginBottom: 18 }}>
+        {target.note}
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <button
+          type="button"
+          className="btn btn-small"
+          style={{ background: "#B42318", color: "#fff" }}
+          onClick={target.onConfirm}
+        >
+          Remove
+        </button>
+        <button type="button" className="btn btn-ghost btn-small" onClick={onClose}>
+          Keep
+        </button>
+      </div>
+    </BottomSheet>
   );
 }
 

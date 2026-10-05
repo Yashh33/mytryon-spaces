@@ -163,6 +163,26 @@ export const ADDABLE_FEATURE_TYPES = [
   "window", "door", "doorway", "opening", "balcony door", "glazed opening", "built-in", "recess", "step", "other",
 ];
 
+// Fill/border colour for each wall-feature (and obstruction) type, for the
+// 2D floor-plan style. Anything not listed falls back to the neutral
+// recess/step/unknown/other pair. Drawing-only.
+export const FEATURE_COLORS = {
+  window: { fill: "#DBEAFE", border: "#2563EB" },
+  door: { fill: "#8B5A2B", border: "#6B4420" },
+  doorway: { fill: "#8B5A2B", border: "#6B4420" },
+  "balcony door": { fill: "#8B5A2B", border: "#6B4420" },
+  opening: { fill: "#ECEAE6", border: "#6B665F" },
+  "glazed opening": { fill: "#DBEAFE", border: "#2563EB" },
+  pillar: { fill: "#B42318", border: "#7A1710" },
+  column: { fill: "#B42318", border: "#7A1710" },
+  panelling: { fill: "#EDE4FF", border: "#7C3AED" },
+};
+export const DEFAULT_FEATURE_COLOR = { fill: "#ECEAE6", border: "#6B665F" };
+
+export function featureColor(type) {
+  return FEATURE_COLORS[type] || DEFAULT_FEATURE_COLOR;
+}
+
 // Whether a feature type physically blocks furniture from standing in
 // front of it. Only meaningful for salesman-added features — vision-
 // generated ones never carry this flag (the backend that produces them is
@@ -253,6 +273,13 @@ export function itemsToBlocks(items) {
         itemId: item.id,
         subIndex: sp.sub_index,
         label: isSplit ? `${item.category} — ${sp.label}` : `${item.category} (${item.type})`,
+        // Raw category/type/sub-piece label, kept alongside the formatted
+        // `label` above purely so the plan can style and caption each piece
+        // (sofa seat count, dining/bed styling, etc.) — never read for
+        // geometry and never sent back to the API.
+        category: item.category,
+        type: item.type,
+        subLabel: sp.label,
         shape: sp.shape,
         widthFt: sp.width_ft,
         inSet: isSplit,
@@ -264,6 +291,55 @@ export function itemsToBlocks(items) {
     });
   });
   return blocks;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing-only labelling helpers (seat counts, backrest captions). None of
+// these feed geometry, facing or the saved placement shape — purely what
+// text/band to draw on top of a block FloorPlan.jsx has already placed.
+// ---------------------------------------------------------------------------
+
+/** "n SEATER" count for a straight sofa block: from its sub-piece label when
+ * it states one (e.g. "3-seater"), else from its own type string (e.g. a
+ * single unsplit sofa typed "3+2" never reaches here — that always splits —
+ * but a future straight single type stating a number would resolve the same
+ * way), else estimated from length and clamped to a sane range. */
+export function sofaSeatCount(block) {
+  const fromText = (s) => {
+    const m = /(\d+)\s*-?\s*seat/i.exec(s || "");
+    return m ? parseInt(m[1], 10) : null;
+  };
+  const stated = fromText(block.subLabel) || fromText(block.type);
+  const n = stated || Math.round(block.widthFt / 2.3);
+  return Math.min(5, Math.max(1, n));
+}
+
+export function isStraightSofa(block) {
+  return block.category === "Sofa" && block.shape === "rect";
+}
+
+export function isDiningTable(block) {
+  return block.category === "Dining table";
+}
+
+export function isBed(block) {
+  return block.category === "Bed";
+}
+
+/** Lightens (positive amt) or darkens (negative amt) a "#rrggbb" colour by
+ * `amt` (-1..1) toward black/white. Drawing-only — used to derive a block's
+ * backrest/seat/arm shades from its one base PALETTE colour. */
+export function shadeColor(hex, amt) {
+  const c = hex.replace("#", "");
+  const num = parseInt(c, 16);
+  let r = (num >> 16) & 0xff;
+  let g = (num >> 8) & 0xff;
+  let b = num & 0xff;
+  const mix = (ch) => (amt >= 0 ? ch + (255 - ch) * amt : ch * (1 + amt));
+  r = Math.round(Math.min(255, Math.max(0, mix(r))));
+  g = Math.round(Math.min(255, Math.max(0, mix(g))));
+  b = Math.round(Math.min(255, Math.max(0, mix(b))));
+  return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
 // ---------------------------------------------------------------------------

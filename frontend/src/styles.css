@@ -587,3 +587,11 @@ h2 { font-size: 19px; }
 }
 .menu-drawer-row-danger { color: #B42318; }
 .menu-drawer-row-tile-danger { background: #FDE2DF; }
+
+.qty-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; }
+.qty-label { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.qty-stepper { display: flex; align-items: center; gap: 10px; }
+.qty-btn { width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: #fff; font-size: 22px; font-weight: 700; line-height: 1; }
+.qty-btn:disabled { opacity: 0.35; }
+.qty-count { min-width: 24px; text-align: center; font-family: var(--mono); font-weight: 700; font-size: 16px; }
+.seat-box { min-width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--orange-d); background: #fff; font-family: var(--mono); font-weight: 700; font-size: 16px; }

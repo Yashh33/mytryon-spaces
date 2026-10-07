@@ -292,7 +292,9 @@ SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 ROOM_TYPES = ["Living room", "Bedroom", "Dining", "Balcony"]
 ITEM_TYPES = {
-    "Sofa": ["3+2", "3+3", "L-shape", "Curved"],
+    # "3+2"/"3+3" are kept at the end only so older attempts keep working;
+    # the furniture screen no longer offers them.
+    "Sofa": ["1-seater", "2-seater", "3-seater", "4-seater", "5-seater", "L-shape", "Curved", "3+2", "3+3"],
     "Dining table": ["4 seater", "6 seater", "8 seater"],
     "Chair": ["Single", "Pair"],
     "Bed": ["Single", "Queen", "King"],
@@ -1145,6 +1147,11 @@ CONFIG_NOTES = {
     ("Sofa", "3+2"): "A set of two separate sofas: one three-seater and one two-seater, placed as a pair around the same coffee table, usually at right angles or facing each other. Not one continuous sofa.",
     ("Sofa", "3+3"): "A set of two separate three-seater sofas, placed as a pair, usually facing each other or at right angles. Not one continuous sofa.",
     ("Sofa", "3+2+1"): "A set of three separate pieces: a three-seater sofa, a two-seater sofa and a single armchair.",
+    ("Sofa", "1-seater"): "One single-seat sofa / armchair in the same design. A single piece.",
+    ("Sofa", "2-seater"): "One straight sofa seating two people. A single piece, not a set.",
+    ("Sofa", "3-seater"): "One straight sofa seating three people. A single piece, not a set.",
+    ("Sofa", "4-seater"): "One straight sofa seating four people. A single piece, not a set.",
+    ("Sofa", "5-seater"): "One straight sofa seating five people. A single piece, not a set.",
     ("Sofa", "L-shape"): "One continuous sectional sofa with a single right-angle turn forming an L. A single piece, not a set.",
     ("Sofa", "Curved"): "One continuous sofa with a gently curved, arcing back rather than straight sections. A single piece.",
     ("Dining table", "4 seater"): "A dining table with four chairs around it.",
@@ -1214,7 +1221,17 @@ def build_image_manifest(items: list[Item]) -> str:
     instead of building what was actually asked for."""
     lines = ["Image 1 is a room."]
     n = 2
+    first_image_for_photo: dict[str, int] = {}
     for item in items:
+        earlier = first_image_for_photo.get(item.photo_path)
+        if earlier is not None:
+            lines.append(
+                f"Image {n} is the same showroom photograph as Image {earlier}, used for another "
+                "piece of the same design."
+            )
+            n += 1
+            continue
+        first_image_for_photo[item.photo_path] = n
         lines.append(
             f"Image {n} is a showroom photograph of a {item.category.lower()}. It is a design "
             "reference for material, colour, texture and styling only — the requested "
@@ -1588,6 +1605,21 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
                 f"{counter}. Pieces {_format_piece_list(group['piece_numbers'])} are separate sofas belonging "
                 f"to one set. They share the same design from Image {group['image_number']} and must match "
                 "each other exactly."
+            )
+            counter += 1
+
+    photo_groups: dict[str, dict] = {}
+    for idx, rec in enumerate(records):
+        pg = photo_groups.setdefault(
+            rec["item"].photo_path, {"image_number": rec["image_number"], "item_ids": set(), "piece_numbers": []}
+        )
+        pg["item_ids"].add(rec["item"].id)
+        pg["piece_numbers"].append(idx + 1)
+    for pg in photo_groups.values():
+        if len(pg["item_ids"]) >= 2:
+            lines.append(
+                f"{counter}. Pieces {_format_piece_list(pg['piece_numbers'])} are separate pieces of furniture "
+                f"of the same design from Image {pg['image_number']} and must match each other exactly."
             )
             counter += 1
 
@@ -2642,6 +2674,57 @@ async def api_add_item_to_attempt(
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.post("/api/attempts/{attempt_id}/items/batch")
+async def api_add_items_batch(
+    attempt_id: int,
+    category: str = Form(...),
+    pieces: str = Form(...),
+    photo: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """Adds several separate pieces (each its own Item and width) that all
+    share one uploaded photo."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    if category not in ITEM_TYPES:
+        return error_response(400, "invalid_category", "Please choose a furniture category.")
+    try:
+        parsed = json.loads(pieces)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, list) or not parsed:
+        return error_response(400, "invalid_pieces", "Please add at least one piece.")
+    clean: list[tuple[str, float]] = []
+    for entry in parsed:
+        type_ = entry.get("type") if isinstance(entry, dict) else None
+        width = entry.get("width_ft") if isinstance(entry, dict) else None
+        if not isinstance(type_, str) or type_ not in ITEM_TYPES[category]:
+            return error_response(400, "invalid_type", "Please choose a valid type for that category.")
+        if isinstance(width, bool) or not isinstance(width, (int, float)) or not width > 0:
+            return error_response(400, "invalid_width", "Please enter a width in feet.")
+        clean.append((type_, float(width)))
+    if len(attempt.items) + len(clean) > MAX_ITEMS_PER_ATTEMPT:
+        return error_response(400, "too_many_items", f"You can add up to {MAX_ITEMS_PER_ATTEMPT} pieces.")
+    try:
+        photo_path = await save_validated_upload(photo, ITEMS_DIR)
+    except UploadValidationError as exc:
+        return error_response(exc.status_code, exc.error, exc.message)
+    for type_, width in clean:
+        db.add(
+            Item(
+                attempt_id=attempt.id,
+                category=category,
+                type=type_,
+                width_ft=width,
+                photo_path=photo_path,
+                shape=derive_item_shape(category, type_),
+            )
+        )
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 
 @app.delete("/api/attempts/{attempt_id}/items/{item_id}")

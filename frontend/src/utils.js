@@ -1,50 +1,144 @@
-const MAX_UPLOAD_DIMENSION = 1536;
+const MAX_UPLOAD_DIMENSION = 1600;
+const TARGET_BYTES = 600 * 1024;
+const QUALITIES = [0.82, 0.75, 0.68, 0.6];
+const READ_ERROR = "Couldn't read this photo. Try another photo or take a screenshot of it.";
 
-export const IMAGE_ACCEPT = "image/*,.heic,.heif";
+export const IMAGE_ACCEPT = "image/*";
 
-/** Downscales an image file to MAX_UPLOAD_DIMENSION longest edge before it
- * ever leaves the device. The server downscales too (defence in depth), but
- * this keeps upload time reasonable on mobile networks. If the browser can't
- * decode the file (e.g. HEIC outside Safari) the original is sent unchanged
- * and the server converts it. */
-export function downscaleImage(file, maxDim = MAX_UPLOAD_DIMENSION) {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const { width, height } = img;
-      const scale = Math.min(1, maxDim / Math.max(width, height));
-      if (scale >= 1) {
-        URL.revokeObjectURL(url);
-        resolve(file);
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(width * scale);
-      canvas.height = Math.round(height * scale);
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob(
-        (blob) => {
-          URL.revokeObjectURL(url);
-          if (!blob) {
-            resolve(file);
-            return;
-          }
-          const newName = file.name.replace(/\.\w+$/, "") + ".jpg";
-          resolve(new File([blob], newName, { type: "image/jpeg" }));
-        },
-        "image/jpeg",
-        0.9
-      );
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(file);
-    };
-    img.src = url;
-  });
+// ---- ?debug=1 on-screen log -------------------------------------------------
+const debugLines = [];
+const debugSubscribers = new Set();
+
+export function isDebug() {
+  return typeof window !== "undefined" && window.location.search.includes("debug=1");
 }
+
+export function getDebugLines() {
+  return debugLines;
+}
+
+export function clearDebug() {
+  debugLines.length = 0;
+  debugSubscribers.forEach((fn) => fn());
+}
+
+export function subscribeDebug(fn) {
+  debugSubscribers.add(fn);
+  return () => debugSubscribers.delete(fn);
+}
+
+export function debugLog(msg) {
+  if (!isDebug()) return;
+  const stamp = new Date().toTimeString().slice(0, 8);
+  debugLines.push(`${stamp} ${msg}`);
+  if (debugLines.length > 50) debugLines.shift();
+  debugSubscribers.forEach((fn) => fn());
+}
+
+// ---- image normalisation ----------------------------------------------------
+function isHeic(file) {
+  const type = (file.type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  return type === "image/heic" || type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif") || !type;
+}
+
+async function decodeViaBitmap(blob) {
+  const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
+  return { source: bitmap, width: bitmap.width, height: bitmap.height, release: () => bitmap.close && bitmap.close() };
+}
+
+async function decodeViaImg(blob) {
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error("img decode failed"));
+      img.src = url;
+    });
+  } catch (err) {
+    URL.revokeObjectURL(url);
+    throw err;
+  }
+  return {
+    source: img,
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+    release: () => URL.revokeObjectURL(url),
+  };
+}
+
+async function tryDecode(blob) {
+  try {
+    const d = await decodeViaBitmap(blob);
+    return { decoded: d, via: "bitmap" };
+  } catch {
+    // fall through
+  }
+  try {
+    const d = await decodeViaImg(blob);
+    return { decoded: d, via: "img" };
+  } catch {
+    return null;
+  }
+}
+
+function canvasToBlob(canvas, quality) {
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+}
+
+/** Always returns a NEW image/jpeg File (longest edge <= 1600px, ~600 KB) or
+ * throws — it never hands back the original file. iPhone HEIC is decoded by
+ * the browser when it can, otherwise converted with heic2any (lazy chunk). */
+export async function normalizeToJpeg(file) {
+  debugLog(`onChange fired ${file.name} ${file.type || "no type"} ${Math.round(file.size / 1024)}KB`);
+  let result = await tryDecode(file);
+  if (!result && isHeic(file)) {
+    try {
+      const { default: heic2any } = await import("heic2any");
+      let converted = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.9 });
+      if (Array.isArray(converted)) converted = converted[0];
+      result = await tryDecode(converted);
+      if (result) result.via = "heic2any";
+    } catch {
+      result = null;
+    }
+  }
+  if (!result) {
+    debugLog("decode FAIL");
+    throw new Error(READ_ERROR);
+  }
+  debugLog(`decode OK via ${result.via}`);
+
+  const { decoded } = result;
+  try {
+    const scale = Math.min(1, MAX_UPLOAD_DIMENSION / Math.max(decoded.width, decoded.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(decoded.width * scale));
+    canvas.height = Math.max(1, Math.round(decoded.height * scale));
+    canvas.getContext("2d").drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
+
+    let blob = null;
+    let used = QUALITIES[0];
+    for (const q of QUALITIES) {
+      blob = await canvasToBlob(canvas, q);
+      used = q;
+      if (!blob) break;
+      if (blob.size <= TARGET_BYTES) break;
+    }
+    if (!blob) {
+      debugLog("decode FAIL");
+      throw new Error(READ_ERROR);
+    }
+    debugLog(`compressed ${Math.round(blob.size / 1024)}KB at q${used}`);
+    const name = (file.name || "photo").replace(/\.[^.]*$/, "") + ".jpg";
+    return new File([blob], name, { type: "image/jpeg" });
+  } finally {
+    decoded.release();
+  }
+}
+
+export const downscaleImage = normalizeToJpeg;
 
 export function formatDate(iso) {
   if (!iso) return "";

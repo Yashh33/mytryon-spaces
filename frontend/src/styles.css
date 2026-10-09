@@ -595,3 +595,14 @@ h2 { font-size: 19px; }
 .qty-btn:disabled { opacity: 0.35; }
 .qty-count { min-width: 24px; text-align: center; font-family: var(--mono); font-weight: 700; font-size: 16px; }
 .seat-box { min-width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--orange-d); background: #fff; font-family: var(--mono); font-weight: 700; font-size: 16px; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; opacity: 0;
+}
+.debug-log {
+  position: fixed; left: 0; right: 0; bottom: 0; max-height: 35vh; overflow-y: auto; z-index: 9999;
+  background: rgba(0, 0, 0, 0.8); color: #fff; font-family: var(--mono); font-size: 11px;
+  padding: 6px 8px; pointer-events: auto;
+}
+.debug-log button { float: right; font-size: 11px; padding: 2px 8px; }

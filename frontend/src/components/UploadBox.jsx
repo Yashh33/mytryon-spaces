@@ -1,18 +1,10 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import { IMAGE_ACCEPT, downscaleImage } from "../utils.js";
-
-const HIDDEN_INPUT_STYLE = {
-  position: "absolute",
-  width: 1,
-  height: 1,
-  opacity: 0,
-  overflow: "hidden",
-  pointerEvents: "none",
-};
+import { IMAGE_ACCEPT, debugLog, normalizeToJpeg } from "../utils.js";
 
 export function UploadBox({ file, existingUrl, onChange }) {
   const inputId = useId();
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
   const objectUrl = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
 
   useEffect(() => {
@@ -27,12 +19,12 @@ export function UploadBox({ file, existingUrl, onChange }) {
     const picked = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!picked || busy) return;
+    setError(null);
     setBusy(true);
     try {
-      onChange(await downscaleImage(picked));
-    } catch {
-      // Let the server convert the original if downscaling fails.
-      onChange(picked);
+      onChange(await normalizeToJpeg(picked));
+    } catch (err) {
+      setError(err.message);
     } finally {
       setBusy(false);
     }
@@ -44,6 +36,7 @@ export function UploadBox({ file, existingUrl, onChange }) {
         htmlFor={inputId}
         className={"upload-box" + (previewUrl ? " has-image" : "")}
         style={{ display: "block", pointerEvents: busy ? "none" : undefined }}
+        onClick={() => debugLog("input clicked")}
       >
         {busy ? (
           <div style={{ padding: 10 }}>Preparing photo…</div>
@@ -55,12 +48,13 @@ export function UploadBox({ file, existingUrl, onChange }) {
         ) : (
           <div style={{ padding: 10 }}>Tap to add a photo</div>
         )}
+        {error && !busy ? <div style={{ padding: "0 10px 10px", color: "#c0392b", fontWeight: 600 }}>{error}</div> : null}
       </label>
       <input
         id={inputId}
         type="file"
         accept={IMAGE_ACCEPT}
-        style={HIDDEN_INPUT_STYLE}
+        className="visually-hidden"
         onClick={(e) => e.stopPropagation()}
         onChange={handleFile}
       />

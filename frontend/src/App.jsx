@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, RequireAuth } from "./auth.jsx";
 import { ToastProvider } from "./components/Toast.jsx";
 import { AppHeader } from "./components/AppHeader.jsx";
+import { DebugLog } from "./components/DebugLog.jsx";
 
 import Login from "./pages/Login.jsx";
 import Customers from "./pages/Customers.jsx";
@@ -213,6 +214,7 @@ export default function App() {
           />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        <DebugLog />
       </AuthProvider>
     </ToastProvider>
   );

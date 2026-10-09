@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
-import { IMAGE_ACCEPT, downscaleImage } from "../utils.js";
+import { IMAGE_ACCEPT, debugLog, normalizeToJpeg } from "../utils.js";
 
 export default function Adjust() {
   const { id } = useParams();
@@ -15,6 +15,7 @@ export default function Adjust() {
   const [error, setError] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [preparingPhoto, setPreparingPhoto] = useState(false);
   const clonedRef = useRef(false);
   const fileInputRef = useRef(null);
 
@@ -49,14 +50,26 @@ export default function Adjust() {
     e.target.value = "";
     if (!picked || !draft) return;
     setUploadingPhoto(true);
+    setPreparingPhoto(true);
+    let jpeg;
     try {
-      const downscaled = await downscaleImage(picked);
+      jpeg = await normalizeToJpeg(picked);
+    } catch (err) {
+      toast(err.message);
+      setPreparingPhoto(false);
+      setUploadingPhoto(false);
+      return;
+    }
+    setPreparingPhoto(false);
+    try {
       const form = new FormData();
-      form.append("photo", downscaled);
+      form.append("photo", jpeg);
       const data = await api.post(`/api/rooms/${draft.room.id}/photo`, { form });
+      debugLog("upload OK");
       setDraft((d) => ({ ...d, room: { ...d.room, photo_url: data.room.photo_url } }));
       toast("Room photo updated.");
     } catch (err) {
+      debugLog(`upload FAIL ${err.message}`);
       toast(err.message);
     } finally {
       setUploadingPhoto(false);
@@ -118,14 +131,18 @@ export default function Adjust() {
         </span>
         <span className="chevron">&#8250;</span>
       </button>
-      <button type="button" className="adjust-row" disabled={uploadingPhoto} onClick={() => fileInputRef.current.click()}>
+      <button type="button" className="adjust-row" disabled={uploadingPhoto} onClick={() => {
+          debugLog("input clicked");
+          fileInputRef.current.click();
+        }}
+      >
         <span>
           Room photo
-          <div className="sub">{uploadingPhoto ? "uploading…" : "tap to replace"}</div>
+          <div className="sub">{preparingPhoto ? "preparing photo…" : uploadingPhoto ? "uploading…" : "tap to replace"}</div>
         </span>
         <span className="chevron">&#8250;</span>
       </button>
-      <input ref={fileInputRef} type="file" accept={IMAGE_ACCEPT} style={{ display: "none" }} onChange={handleRoomPhotoChange} />
+      <input ref={fileInputRef} type="file" accept={IMAGE_ACCEPT} className="visually-hidden" onChange={handleRoomPhotoChange} />
 
       <button type="button" className="btn btn-primary" style={{ marginTop: 20 }} disabled={generating} onClick={handleGenerateAgain}>
         {generating ? "Starting…" : "Generate again"}

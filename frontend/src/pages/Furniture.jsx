@@ -7,6 +7,7 @@ import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
+import { debugLog } from "../utils.js";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { RoomPlanView } from "../components/RoomPlanView.jsx";
 
@@ -159,12 +160,14 @@ export default function Furniture() {
     form.append("photo", photo);
     try {
       const data = await api.post(`/api/attempts/${id}/items/batch`, { form });
+      debugLog("upload OK");
       setAttempt(data.attempt);
       setPhoto(null);
       setWidth("");
       setSofaRows(initialSofaRows());
       setOtherCount(1);
     } catch (err) {
+      debugLog(`upload FAIL ${err.message}`);
       toast(err.message);
     } finally {
       setAdding(false);

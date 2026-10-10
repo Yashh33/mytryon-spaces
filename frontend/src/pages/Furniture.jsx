@@ -10,11 +10,10 @@ import { UploadBox } from "../components/UploadBox.jsx";
 import { debugLog } from "../utils.js";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { RoomPlanView } from "../components/RoomPlanView.jsx";
+import { cornerFigure, curvedFigure, lFigure, straightFigure } from "../placement.js";
 
-const ITEM_TYPES = {
-  Sofa: ["1-seater", "2-seater", "3-seater", "4-seater", "5-seater", "L-shape", "Curved"],
+const OTHER_TYPES = {
   "Dining table": ["4 seater", "6 seater", "8 seater"],
-  Chair: ["Single", "Pair"],
   Bed: ["Single", "Queen", "King"],
 };
 const MAX_ITEMS = 4;
@@ -26,6 +25,7 @@ const DEFAULT_WIDTHS = {
   "4-seater": 8,
   "5-seater": 10,
   "L-shape": 9,
+  Corner: 9,
   Curved: 8,
   "4 seater": 4,
   "6 seater": 6,
@@ -41,19 +41,70 @@ function defaultWidth(category, type) {
   return DEFAULT_WIDTHS[type] ?? 5;
 }
 
-let nextRowId = 1;
-function initialSofaRows() {
-  return [
-    { id: nextRowId++, kind: "L-shape", count: 0 },
-    { id: nextRowId++, kind: "Curved", count: 0 },
-    { id: nextRowId++, kind: "seats", seats: 3, count: 1 },
-  ];
+// The picture cards. `type` is what the batch endpoint receives; the plain
+// Sofa card has none because it sends "<n>-seater" from the chosen seats.
+const TYPE_CARDS = [
+  { key: "sofa", label: "Sofa", icon: "straight", category: "Sofa", type: null },
+  { key: "L-shape", label: "L-shape", icon: "L", category: "Sofa", type: "L-shape" },
+  { key: "Corner", label: "Corner sofa", icon: "corner", category: "Sofa", type: "Corner" },
+  { key: "Curved", label: "Curved", icon: "curved", category: "Sofa", type: "Curved" },
+  { key: "chair", label: "Chair", icon: "chair", category: "Chair", type: "Single" },
+];
+const GREY = "#6b7280";
+const ORANGE = "#EF7B1C";
+
+function pillRect(r, key, fill) {
+  const w = Math.max(r.u1 - r.u0, 0);
+  const h = Math.max(r.v1 - r.v0, 0);
+  return <rect key={key} x={r.u0} y={r.v0} width={w} height={h} rx={Math.min(w, h, 8) / 2} fill={fill} />;
+}
+
+/** Small figure of a type, in the same style as the plan: back cushions,
+ * hand-rests, one seat outline. The back cushions are orange when selected. */
+function TypeIcon({ kind, selected }) {
+  const backFill = selected ? ORANGE : GREY;
+  let body;
+  if (kind === "curved") {
+    const fig = curvedFigure(80, 50, 22);
+    body = (
+      <g transform="translate(10 6)">
+        <path d={fig.seat.d} fill="#e5e7eb" stroke={GREY} strokeWidth={fig.seat.r * 2 + 3} strokeLinejoin="round" />
+        <path d={fig.seat.d} fill="#e5e7eb" stroke="#e5e7eb" strokeWidth={fig.seat.r * 2} strokeLinejoin="round" />
+        <path
+          d={fig.back.d} fill="none" stroke={backFill} strokeWidth={fig.back.width} strokeLinecap="round"
+          strokeDasharray={`${fig.back.dash} ${fig.back.gap}`} strokeDashoffset={fig.back.offset}
+        />
+        {fig.handRests.map((r, i) => pillRect(r, `h${i}`, GREY))}
+      </g>
+    );
+  } else {
+    const figures = {
+      L: [lFigure(80, 50, 26), "translate(10 6)"],
+      corner: [cornerFigure(80, 50, 26), "translate(10 6)"],
+      chair: [straightFigure(34, 34, 1), "translate(33 15)"],
+      straight: [straightFigure(84, 34, 3), "translate(8 15)"],
+    };
+    const [fig, origin] = figures[kind];
+    const seat = `M ${fig.seatPoints.map((p) => p.join(" ")).join(" L ")} Z`;
+    body = (
+      <g transform={origin}>
+        <path d={seat} fill="#e5e7eb" stroke={GREY} strokeWidth="1.5" strokeLinejoin="round" />
+        {fig.backPills.map((r, i) => pillRect(r, `b${i}`, backFill))}
+        {fig.handRests.map((r, i) => pillRect(r, `h${i}`, GREY))}
+      </g>
+    );
+  }
+  return (
+    <svg className="type-icon" viewBox="0 0 100 64" aria-hidden="true">
+      {body}
+    </svg>
+  );
 }
 
 function QtyStepper({ count, onChange, canAdd, label }) {
   return (
     <div className="qty-stepper">
-      <button type="button" className="qty-btn" aria-label={`Fewer ${label}`} disabled={count <= 0} onClick={() => onChange(count - 1)}>
+      <button type="button" className="qty-btn" aria-label={`Fewer ${label}`} disabled={count <= 1} onClick={() => onChange(count - 1)}>
         &minus;
       </button>
       <span className="qty-count">{count}</span>
@@ -70,11 +121,11 @@ export default function Furniture() {
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
   const [error, setError] = useState(null);
-  const [category, setCategory] = useState("Sofa");
-  const [type, setType] = useState(ITEM_TYPES["Dining table"][0]);
-  const [sofaRows, setSofaRows] = useState(initialSofaRows);
-  const [otherCount, setOtherCount] = useState(1);
-  const [seatPickerRow, setSeatPickerRow] = useState(null);
+  // choice: a TYPE_CARDS key, or "Dining table" / "Bed"; null until picked
+  const [choice, setChoice] = useState(null);
+  const [seats, setSeats] = useState(3);
+  const [otherType, setOtherType] = useState("");
+  const [count, setCount] = useState(1);
   const [width, setWidth] = useState("");
   const [photo, setPhoto] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -121,37 +172,27 @@ export default function Furniture() {
     }
   }
 
-  function buildPieces() {
-    if (category === "Sofa") {
-      return sofaRows.flatMap((r) => {
-        const t = r.kind === "seats" ? `${r.seats}-seater` : r.kind;
-        return Array.from({ length: r.count }, () => t);
-      });
-    }
-    return Array.from({ length: otherCount }, () => type);
+  function pickCard(key) {
+    setChoice(key);
+    setCount(1);
+    setWidth("");
   }
 
-  function updateSofaRow(rowId, patch) {
-    setSofaRows((rows) => rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
-  }
-
-  function addSofaSize() {
-    setSofaRows((rows) => {
-      const used = new Set(rows.filter((r) => r.kind === "seats").map((r) => r.seats));
-      const seats = SEAT_OPTIONS.find((n) => !used.has(n)) ?? 2;
-      return [...rows, { id: nextRowId++, kind: "seats", seats, count: 0 }];
-    });
+  function pickOther(name) {
+    setChoice(name);
+    setOtherType(OTHER_TYPES[name][0]);
+    setCount(1);
+    setWidth("");
   }
 
   async function handleAdd() {
-    const types = buildPieces();
     if (!photo) return toast("Please add a photo of the piece.");
-    if (!types.length) return toast("Please choose at least one piece.");
+    if (!choice || total < 1) return toast("Please choose a type first.");
     const w = parseFloat(width);
-    const useWidth = types.length === 1 && w > 0;
-    const pieces = types.map((t) => ({
-      type: t,
-      width_ft: useWidth ? w : defaultWidth(category, t),
+    const useWidth = total === 1 && w > 0;
+    const pieces = Array.from({ length: total }, () => ({
+      type: typeName,
+      width_ft: useWidth ? w : defaultWidth(category, typeName),
     }));
     setAdding(true);
     const form = new FormData();
@@ -164,8 +205,8 @@ export default function Furniture() {
       setAttempt(data.attempt);
       setPhoto(null);
       setWidth("");
-      setSofaRows(initialSofaRows());
-      setOtherCount(1);
+      setChoice(null);
+      setCount(1);
     } catch (err) {
       debugLog(`upload FAIL ${err.message}`);
       toast(err.message);
@@ -179,7 +220,21 @@ export default function Furniture() {
 
   const remaining = MAX_ITEMS - attempt.items.length;
   const atMax = remaining <= 0;
-  const total = category === "Sofa" ? sofaRows.reduce((sum, r) => sum + r.count, 0) : otherCount;
+  const card = TYPE_CARDS.find((c) => c.key === choice) ?? null;
+  const isOther = choice !== null && card === null;
+  let category = "";
+  let typeName = "";
+  let typeLabel = "";
+  if (card) {
+    category = card.category;
+    typeName = card.type ?? `${seats}-seater`;
+    typeLabel = card.type ? card.label.toLowerCase() : "sofa";
+  } else if (isOther) {
+    category = choice;
+    typeName = otherType;
+    typeLabel = choice.toLowerCase();
+  }
+  const total = choice ? Math.max(1, Math.min(count, remaining)) : 0;
   const canAddMore = total < remaining;
 
   return (
@@ -220,95 +275,95 @@ export default function Furniture() {
         <div className="count-hint">Maximum of {MAX_ITEMS} pieces reached.</div>
       ) : (
         <div className="add-piece-card">
-          <div className="section-label" style={{ marginTop: 0 }}>Add furniture</div>
-          <div className="chips">
-            {Object.keys(ITEM_TYPES).map((c) => (
-              <Chip
-                key={c}
-                selected={c === category}
-                onClick={() => {
-                  setCategory(c);
-                  if (c !== "Sofa") setType(ITEM_TYPES[c][0]);
-                  setOtherCount(1);
-                }}
-              >
-                {c}
-              </Chip>
-            ))}
-          </div>
-          <div className="field" style={{ marginTop: 14 }}>
+          <div className="field">
             <label>Photo of the piece</label>
             <UploadBox file={photo} onChange={setPhoto} />
             <div className="count-hint" style={{ textAlign: "left" }}>One photo for all the pieces below</div>
           </div>
-          <div className="section-label">What and how many?</div>
-          {category === "Sofa" ? (
+
+          <div className="section-label">1 &middot; What is it?</div>
+          <div className="type-grid">
+            {TYPE_CARDS.map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                className={`type-card${choice === c.key ? " selected" : ""}`}
+                aria-pressed={choice === c.key}
+                onClick={() => pickCard(c.key)}
+              >
+                <TypeIcon kind={c.icon} selected={choice === c.key} />
+                <span className="type-card-label">{c.label}</span>
+              </button>
+            ))}
+          </div>
+          <div className="type-other">
+            <span className="type-other-label">Other:</span>
+            {Object.keys(OTHER_TYPES).map((name) => (
+              <Chip key={name} selected={choice === name} onClick={() => pickOther(name)}>
+                {name}
+              </Chip>
+            ))}
+          </div>
+
+          {!choice ? (
+            <div className="count-hint" style={{ textAlign: "left", marginTop: 14 }}>
+              Tap a type above. Seats and quantity appear after that.
+            </div>
+          ) : (
             <>
-              {sofaRows.map((r) => (
-                <div key={r.id} className="qty-row">
-                  <div className="qty-label">
-                    {r.kind === "seats" ? (
-                      <>
-                        Sofa{" "}
-                        <button type="button" className="seat-box" onClick={() => setSeatPickerRow(r.id)}>
-                          {r.seats}
-                        </button>{" "}
-                        seats
-                      </>
-                    ) : (
-                      `${r.kind} sofa`
-                    )}
+              {card ? <div className="type-back-note">Orange = the back of the {card.label.toLowerCase()}</div> : null}
+              {card && !card.type ? (
+                <>
+                  <div className="section-label">Seats</div>
+                  <div className="seat-buttons">
+                    {SEAT_OPTIONS.map((n) => (
+                      <button key={n} type="button" className={`seat-btn${seats === n ? " selected" : ""}`} onClick={() => setSeats(n)}>
+                        {n}
+                      </button>
+                    ))}
                   </div>
-                  <QtyStepper
-                    count={r.count}
-                    canAdd={canAddMore}
-                    label={r.kind === "seats" ? `${r.seats}-seat sofas` : `${r.kind} sofas`}
-                    onChange={(n) => updateSofaRow(r.id, { count: n })}
+                </>
+              ) : null}
+              {isOther ? (
+                <>
+                  <div className="section-label">Size</div>
+                  <div className="chips">
+                    {OTHER_TYPES[choice].map((t) => (
+                      <Chip key={t} selected={t === otherType} onClick={() => setOtherType(t)}>
+                        {t}
+                      </Chip>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+
+              <div className="section-label">How many?</div>
+              <QtyStepper count={total} canAdd={canAddMore} label={typeLabel} onChange={setCount} />
+              <div className="count-hint" style={{ textAlign: "left" }}>
+                {attempt.items.length + total} of {MAX_ITEMS} pieces used
+              </div>
+              {total === 1 ? (
+                <div className="field" style={{ marginTop: 14 }}>
+                  <label>Width (ft) &ndash; optional</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    step="0.5"
+                    value={width}
+                    onChange={(e) => setWidth(e.target.value)}
+                    placeholder="e.g. 7"
                   />
                 </div>
-              ))}
-              <button type="button" className="link-btn" style={{ marginTop: 6 }} onClick={addSofaSize}>
-                + Add another sofa size
+              ) : (
+                <div className="count-hint" style={{ textAlign: "left" }}>
+                  Sizes are set automatically &ndash; drag the blue dots on the plan to adjust.
+                </div>
+              )}
+              <button type="button" className="btn btn-dark" disabled={adding || !photo || total < 1} onClick={handleAdd}>
+                {adding ? "Adding…" : `Add ${total} × ${typeLabel}`}
               </button>
             </>
-          ) : (
-            <>
-              <div className="chips">
-                {ITEM_TYPES[category].map((t) => (
-                  <Chip key={t} selected={t === type} onClick={() => setType(t)}>
-                    {t}
-                  </Chip>
-                ))}
-              </div>
-              <div className="qty-row">
-                <div className="qty-label">{category} &middot; {type}</div>
-                <QtyStepper count={otherCount} canAdd={canAddMore} label={category.toLowerCase()} onChange={setOtherCount} />
-              </div>
-            </>
           )}
-          <div className="count-hint" style={{ textAlign: "left" }}>
-            {attempt.items.length + total} of {MAX_ITEMS} pieces used
-          </div>
-          {total > 1 ? (
-            <div className="count-hint" style={{ textAlign: "left" }}>
-              Sizes are set automatically &ndash; drag the blue dots on the plan to adjust.
-            </div>
-          ) : (
-            <div className="field" style={{ marginTop: 14 }}>
-              <label>Width (feet) &ndash; optional</label>
-              <input
-                type="number"
-                min="0.5"
-                step="0.5"
-                value={width}
-                onChange={(e) => setWidth(e.target.value)}
-                placeholder="e.g. 7"
-              />
-            </div>
-          )}
-          <button type="button" className="btn btn-dark" disabled={adding || !photo || total < 1} onClick={handleAdd}>
-            {adding ? "Adding…" : "Add"}
-          </button>
         </div>
       )}
 
@@ -321,25 +376,6 @@ export default function Furniture() {
       >
         Next — placement
       </button>
-
-      {seatPickerRow !== null ? (
-        <BottomSheet title="Number of seats" onClose={() => setSeatPickerRow(null)}>
-          <div className="chips">
-            {SEAT_OPTIONS.map((n) => (
-              <Chip
-                key={n}
-                selected={sofaRows.find((r) => r.id === seatPickerRow)?.seats === n}
-                onClick={() => {
-                  updateSofaRow(seatPickerRow, { seats: n });
-                  setSeatPickerRow(null);
-                }}
-              >
-                {n}
-              </Chip>
-            ))}
-          </div>
-        </BottomSheet>
-      ) : null}
 
       {showPlan ? (
         <BottomSheet title="Room plan" onClose={() => setShowPlan(false)}>

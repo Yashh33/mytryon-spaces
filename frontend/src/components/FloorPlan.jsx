@@ -16,6 +16,7 @@ import {
   cameraGeometry,
   cameraXFraction,
   clamp01,
+  cornerFigure,
   curvedFigure,
   featureColor,
   featureFootprint,
@@ -489,7 +490,7 @@ export function FloorPlan({
       // The figure is built in a local frame (origin = outer bend corner, u
       // along the long arm, back at v = 0) and placed with this one matrix.
       return {
-        kind: shape === "curved" ? "curved" : "L",
+        kind: shape === "curved" ? "curved" : shape === "corner" ? "corner" : "L",
         frame: armFrame(p),
         longPx: p.longFt,
         shortPx: p.shortFt,
@@ -609,6 +610,17 @@ export function FloorPlan({
         </>
       );
       names = seatName("CURVED", frame, { u0: fig.label.u - fig.label.w / 2, u1: fig.label.u + fig.label.w / 2, v0: fig.label.v - fig.label.h / 2, v1: fig.label.v + fig.label.h / 2 }, color, "n");
+    } else if (drawing.kind === "corner") {
+      frame = drawing.frame;
+      const fig = cornerFigure(drawing.longPx, drawing.shortPx, drawing.depthPx);
+      group = (
+        <>
+          {seatShape(fig, "seat")}
+          {backPills(fig)}
+          {handRests(fig)}
+        </>
+      );
+      names = seatName("CORNER SOFA", frame, fig.label, color, "n");
     } else if (drawing.kind === "L") {
       frame = drawing.frame;
       const fig = lFigure(drawing.longPx, drawing.shortPx, drawing.depthPx);

@@ -354,14 +354,15 @@ export function shadeColor(hex, amt) {
 //
 // Shapes:
 //   rect, round  {x, y, w, h, rotation}
-//   L, curved    {long, short, corner} — two arm rects meeting at a bend in
-//                `corner`. A curved block is drawn as a quarter-annulus
-//                spanning the same two arms.
+//   L, curved, corner  {long, short, corner} — two arm rects meeting at a bend
+//                in `corner`. A curved block is drawn as a quarter-annulus
+//                spanning the same two arms; a corner sofa has a backrest
+//                on both arms.
 // A rect's `rotation` names the wall its BACK faces (0 far, 90 left,
 // 180 near, 270 right); its seats face the opposite way.
 // ---------------------------------------------------------------------------
 
-export const ARM_SHAPES = new Set(["L", "curved"]);
+export const ARM_SHAPES = new Set(["L", "curved", "corner"]);
 export const MIN_BLOCK_FT = 1;
 export const SET_PIECE_SNAP_FT = 1; // sub-pieces of a set derive whole-foot widths on the server
 export const SINGLE_PIECE_SNAP_FT = 0.5; // matches the width input's step on the furniture step
@@ -502,7 +503,10 @@ export function defaultPlacement(shape, widthFt, feet, nx, ny) {
   const cy = ny * feet.hFt;
   if (ARM_SHAPES.has(shape)) {
     const longFt = Math.min(widthFt, feet.wFt);
-    const shortFt = shape === "curved" ? Math.min(longFt, feet.hFt) : Math.min(longFt, longFt * BLOCK_DEPTH_RATIO + 2.5);
+    let shortFt;
+    if (shape === "curved") shortFt = Math.min(longFt, feet.hFt);
+    else if (shape === "corner") shortFt = Math.min(longFt * 0.8, feet.hFt);
+    else shortFt = Math.min(longFt, longFt * BLOCK_DEPTH_RATIO + 2.5);
     const p = {
       corner: "far-left",
       longAxis: "x",
@@ -773,6 +777,35 @@ export function lFigure(Lf, S, d) {
     seatRadii: [6, 6, 6, 2, 6, 6],
     labelLong: { u0: d, v0: bt + g, u1: Lf - 1, v1: d - 1 },
     labelLounge: { u0: t + g, v0: d, u1: d - 1, v1: Sx - 1 },
+  };
+}
+
+/** Corner sofa: a square corner with a backrest along BOTH outer arms (v = 0
+ * and u = 0), a hand-rest at each far end, and one L-shaped seat. */
+export function cornerFigure(Lf, S, d) {
+  const { t, bt, g } = figureMetrics(Lf, d);
+  const Sx = Math.max(S, d + 1);
+  const seatEndU = Lf - t - g;
+  const seatEndV = Sx - t - g;
+  const nLong = Math.max(1, Math.round((seatEndU - (bt + g)) / Math.max(d * 0.95, 1)));
+  const nShort = Math.max(1, Math.round((seatEndV - (bt + g)) / Math.max(d * 0.95, 1)));
+  const wLong = Math.max((seatEndU - (bt + g) - 2 * (nLong - 1)) / nLong, 1);
+  const wShort = Math.max((seatEndV - (bt + g) - 2 * (nShort - 1)) / nShort, 1);
+  const backPills = [{ u0: 0, v0: 0, u1: bt, v1: bt }];
+  for (let i = 0; i < nLong; i += 1) {
+    const u0 = bt + g + i * (wLong + 2);
+    backPills.push({ u0, v0: 0, u1: u0 + wLong, v1: bt });
+  }
+  for (let i = 0; i < nShort; i += 1) {
+    const v0 = bt + g + i * (wShort + 2);
+    backPills.push({ u0: 0, v0, u1: bt, v1: v0 + wShort });
+  }
+  return {
+    handRests: [{ u0: Lf - t, v0: 0, u1: Lf, v1: d }, { u0: 0, v0: Sx - t, u1: d, v1: Sx }],
+    backPills,
+    seatPoints: [[bt + g, bt + g], [seatEndU, bt + g], [seatEndU, d - 1], [d - 1, d - 1], [d - 1, seatEndV], [bt + g, seatEndV]],
+    seatRadii: [6, 6, 6, 2, 6, 6],
+    label: { u0: bt + g, v0: bt + g, u1: seatEndU, v1: d - 1 },
   };
 }
 

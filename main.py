@@ -294,15 +294,15 @@ ROOM_TYPES = ["Living room", "Bedroom", "Dining", "Balcony"]
 ITEM_TYPES = {
     # "3+2"/"3+3" are kept at the end only so older attempts keep working;
     # the furniture screen no longer offers them.
-    "Sofa": ["1-seater", "2-seater", "3-seater", "4-seater", "5-seater", "L-shape", "Curved", "3+2", "3+3"],
+    "Sofa": ["1-seater", "2-seater", "3-seater", "4-seater", "5-seater", "L-shape", "Corner", "Curved", "3+2", "3+3"],
     "Dining table": ["4 seater", "6 seater", "8 seater"],
     "Chair": ["Single", "Pair"],
     "Bed": ["Single", "Queen", "King"],
 }
-SHAPE_FOR_TYPE = {"L-shape": "L", "Curved": "curved"}
+SHAPE_FOR_TYPE = {"L-shape": "L", "Curved": "curved", "Corner": "corner"}
 ROUND_CAPABLE_CATEGORIES = {"Dining table", "Ottoman"}
-# 'L' and 'curved' share one geometry: {long, short, corner} (see validate_placement).
-ARM_SHAPES = {"L", "curved"}
+# 'L', 'curved' and 'corner' share one geometry: {long, short, corner} (see validate_placement).
+ARM_SHAPES = {"L", "curved", "corner"}
 
 
 def derive_item_shape(category: str, type_: str) -> str:
@@ -675,7 +675,7 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS shape TEXT"))
         conn.execute(
             text(
-                "UPDATE items SET shape = CASE WHEN type = 'L-shape' THEN 'L' WHEN type = 'Curved' THEN 'curved' ELSE 'rect' END "
+                "UPDATE items SET shape = CASE WHEN type = 'L-shape' THEN 'L' WHEN type = 'Curved' THEN 'curved' WHEN type = 'Corner' THEN 'corner' ELSE 'rect' END "
                 "WHERE shape IS NULL"
             )
         )
@@ -1153,6 +1153,7 @@ CONFIG_NOTES = {
     ("Sofa", "4-seater"): "One straight sofa seating four people. A single piece, not a set.",
     ("Sofa", "5-seater"): "One straight sofa seating five people. A single piece, not a set.",
     ("Sofa", "L-shape"): "One continuous sectional sofa with a single right-angle turn forming an L. A single piece, not a set.",
+    ("Sofa", "Corner"): "One corner sofa with a square corner and a backrest on BOTH arms, hand-rests at both ends. Not curved, no chaise lounge. A single piece.",
     ("Sofa", "Curved"): "One continuous sofa with a gently curved, arcing back rather than straight sections. A single piece.",
     ("Dining table", "4 seater"): "A dining table with four chairs around it.",
     ("Dining table", "6 seater"): "A dining table with six chairs around it.",
@@ -1390,7 +1391,7 @@ def _l_arm_line(lead: str, wall_candidate: str, against: bool, direction: str, i
     return f"{lead} runs from that corner {direction}, parallel to the {wall_candidate} wall but standing clear of it."
 
 
-def resolve_l_placement(placement: dict) -> dict:
+def resolve_l_placement(placement: dict, corner_line: str | None = None) -> dict:
     long_rect, short_rect, corner = placement["long"], placement["short"], placement["corner"]
     long_wall, long_candidate = resolve_rect_wall(long_rect)
     short_wall, short_candidate = resolve_rect_wall(short_rect)
@@ -1399,7 +1400,7 @@ def resolve_l_placement(placement: dict) -> dict:
 
     sentence = " ".join(
         [
-            f"The corner of the L sits in the {corner} of the room.",
+            corner_line or f"The corner of the L sits in the {corner} of the room.",
             _l_arm_line("Its long arm", long_candidate, long_wall is not None, long_direction, True),
             _l_arm_line("Its short arm", short_candidate, short_wall is not None, short_direction, False),
             f"The seats on the long arm face {FACING_FOR_ROTATION[long_rect['rotation']]}.",
@@ -1535,6 +1536,14 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
     for rec in records:
         if rec["shape"] == "L":
             resolved.append(resolve_l_placement(rec["geometry"]))
+        elif rec["shape"] == "corner":
+            corner = rec["geometry"]["corner"]
+            resolved.append(
+                resolve_l_placement(
+                    rec["geometry"],
+                    f"It is one corner sofa with backrests along both arms; its corner sits in the {corner} of the room.",
+                )
+            )
         elif rec["shape"] == "curved":
             resolved.append(resolve_curved_placement(rec["geometry"]))
         elif rec["shape"] == "round":

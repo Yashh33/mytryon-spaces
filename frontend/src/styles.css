@@ -617,3 +617,17 @@ h2 { font-size: 19px; }
   padding: 6px 8px; pointer-events: auto;
 }
 .debug-log button { float: right; font-size: 11px; padding: 2px 8px; }
+
+/* furniture screen: pick-a-type cards */
+.type-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+@media (min-width: 1024px) { .type-grid { grid-template-columns: repeat(5, 1fr); } }
+.type-card { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px 6px; background: #fff; border: 2px solid var(--line); border-radius: 12px; font-weight: 600; font-size: 13px; }
+.type-card.selected { border-color: #EF7B1C; background: #FEF1E4; }
+.type-icon { width: 100%; height: auto; max-height: 64px; }
+.type-card-label { text-align: center; line-height: 1.2; }
+.type-other { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.type-other-label { font-size: 13px; font-weight: 600; color: var(--muted, #6b7280); }
+.type-back-note { margin-top: 10px; font-size: 13px; font-weight: 600; color: #CE5C10; }
+.seat-buttons { display: flex; gap: 8px; }
+.seat-btn { flex: 1; height: 48px; border-radius: 10px; border: 1px solid var(--line); background: #fff; font-size: 18px; font-weight: 700; }
+.seat-btn.selected { background: #EF7B1C; border-color: #EF7B1C; color: #fff; }

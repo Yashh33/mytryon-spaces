@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import calendar
+import hashlib
 import io
 import json
 import logging
@@ -57,6 +58,7 @@ DATA_ROOT = Path(os.environ.get("DATA_DIR") or ("/data" if Path("/data").is_dir(
 ROOMS_DIR = DATA_ROOT / "rooms"
 ITEMS_DIR = DATA_ROOT / "items"
 RENDERS_DIR = DATA_ROOT / "renders"
+PLANS_DIR = DATA_ROOT / "plans"  # floor-plan PNGs exported by the client, for the placement writer only
 for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -440,6 +442,10 @@ class Attempt(Base):
     lighting = Column(String, nullable=False, default=DEFAULT_LIGHTING, server_default="warm")
     ignore_placement = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_picked = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # the latest floor-plan PNG uploaded for this attempt, and the placement
+    # writer's cached state/result for it — see start_placement_writer()
+    plan_path = Column(String, nullable=True)
+    placement_writer = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     items = relationship("Item", backref="attempt", cascade="all, delete-orphan", order_by="Item.id")
@@ -488,8 +494,12 @@ class GenerationDebug(Base):
     size = Column(String, nullable=False)
     elapsed_s = Column(Float, nullable=False)
     usage = Column(JSON, nullable=True)
-    # ordered list of {filename, role, width, height, size_bytes, url}
+    # ordered list of {filename, role, width, height, size_bytes, url}; role
+    # "plan" is the floor-plan PNG, logged here but sent only to the writer
     images = Column(JSON, nullable=False)
+    # {facts, output, used, reason, conflicts, usage, model, elapsed_s} — what the
+    # placement writer was given, what it wrote, and whether it was used
+    placement_writer = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -693,6 +703,11 @@ async def lifespan(app: FastAPI):
         # job (or a manual edit) fills it in.
         conn.execute(text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS layout_json JSONB"))
         conn.execute(text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS layout_status TEXT NOT NULL DEFAULT 'pending'"))
+        # placement writer: the plan image + cached result per attempt, and
+        # what it did for each render.
+        conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS plan_path TEXT"))
+        conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS placement_writer JSONB"))
+        conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS placement_writer JSON"))
         # migrate DBs created before multi-tenant shops existed: add the
         # column additively (users predates shops; create_all only creates
         # brand-new tables, it won't alter this existing one).
@@ -770,6 +785,11 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first() is None:
             db.add(Setting(key=VISION_MODEL_SETTING_KEY, value=DEFAULT_VISION_MODEL))
             logger.info("seeded default vision model")
+        if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_ENABLED_KEY).first() is None:
+            db.add(Setting(key=PLACEMENT_WRITER_ENABLED_KEY, value="true"))
+        if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first() is None:
+            db.add(Setting(key=PLACEMENT_WRITER_PROMPT_KEY, value=DEFAULT_PLACEMENT_WRITER_PROMPT))
+            logger.info("seeded default placement writer prompt")
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
 
         # one-time cleanup: a previously-saved custom generation prompt may
@@ -1862,11 +1882,15 @@ def build_prompt(
     room_treatment: str,
     lighting: str,
     ignore_placement: bool,
+    placement_text: str | None = None,
 ) -> str:
+    """`placement_text`, when given, is the placement writer's section and
+    replaces the generated facts in {{PLACEMENT}}."""
     pieces = build_pieces_text(items)
     image_manifest = build_image_manifest(items)
     config_notes = build_config_notes(items)
-    placement_text = build_placement_text(items, room.layout_json, ignore_placement)
+    if placement_text is None:
+        placement_text = build_placement_text(items, room.layout_json, ignore_placement)
     room_layout_text = build_room_layout_text(room.layout_json)
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
@@ -1968,6 +1992,299 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# PLACEMENT WRITER — a vision model rewrites the generated placement facts
+# into instructions the image model follows better, by looking at the room
+# photo and the salesman's floor plan (a PNG exported by the client). It
+# starts when the salesman leaves the plan screen and its result is cached
+# on the attempt; generation waits briefly for it and otherwise falls back,
+# silently, to the facts themselves. The plan PNG only ever goes to this
+# writer, never to the image model.
+# ---------------------------------------------------------------------------
+
+PLACEMENT_WRITER_ENABLED_KEY = "placement_writer_enabled"
+PLACEMENT_WRITER_PROMPT_KEY = "placement_writer_prompt"
+PLACEMENT_WRITER_WAIT_SECONDS = 45  # how long Generate waits for a writer that is still running
+PLACEMENT_WRITER_CALL_TIMEOUT = 90  # hard limit on the model call itself
+FACTS_TOKEN = "{{FACTS}}"
+# Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
+# by third-party pricing pages in Oct 2026. Only used for the cost logged
+# beside a generation; wrong if settings.vision_model is changed.
+VISION_INPUT_RATE_PER_M = 0.10
+VISION_OUTPUT_RATE_PER_M = 0.50
+
+DEFAULT_PLACEMENT_WRITER_PROMPT = """\
+You write furniture placement instructions for an image generator.
+
+INPUTS
+- Image 1: a photograph of a room. The generator will add furniture into exactly this photograph.
+- Image 2: a top-down floor plan of the same room, drawn by a salesman. Top edge = far wall, bottom edge = near wall, the circle below the bottom edge = where Image 1 was photographed from. Wall features are coloured segments on the walls with capital labels such as DOOR, WINDOW, OPENING or PILLAR; numbered labels (DOOR 1, DOOR 2) mean there are several; a label ending in "?" is uncertain. Find each labelled feature in Image 1. Each piece of furniture is a coloured block with its number in a circle. Thick solid bars on a block are its backrest and arms; seats face away from the backrest. Labels like "LOUNGE" name a part of a piece.
+- PLACEMENT FACTS below: generated from the same plan. They are correct. Treat them and the plan as the authority on where each piece goes. Never move, add, remove or resize a piece.
+
+YOUR JOB
+The generator cannot see the plan and does not understand feet or fractions well. Left to itself it tends to push furniture into corners, beside doors and away from windows, to slide pieces sideways so they line up, and to build L-shaped sofas with the chaise or lounge at the end nearest the camera. Rewrite the facts so that it follows the plan instead of those habits.
+
+RULES
+1. Keep every "Piece N — ..." header line exactly as given, including "from Image k". In those headers "Image k" refers to the generator's product photographs, NOT to your Image 2 floor plan. Under each header, write numbered lines; numbering continues across pieces.
+2. One fact per line. Never pack several facts into one line.
+3. Anchor every position to something VISIBLE in Image 1: a labelled door or window and its edges, a corner, the sill, the bottom edge of the frame. Also say where it appears in the frame: left/right side, higher (further away) or lower (closer).
+4. Describe BOTH ends of every piece: where each end is, and what is or is not at each end.
+5. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule that out with a line starting "NOT". A NOT line must never forbid something the plan actually shows — if the plan agrees with a habit, do not mention that habit.
+6. Use CAPS only for the single key word in a line: CENTRED, FAR, NEAR, LEFT, RIGHT, NOT.
+7. For multi-part pieces (L-shape, corner, curved), say which part is where, which way each part's back and seats face, and which end of the piece is plain.
+8. When two pieces overlap side to side on the plan, say which one stands IN FRONT (nearer the camera, lower in the frame) and which stands BEHIND, and that neither slides sideways to make room for the other.
+9. Every labelled DOOR, WINDOW and OPENING must stay fully visible and usable in the result; say so for any that a piece stands near.
+10. Keep any line saying pieces from different reference photographs must differ in material and colour.
+11. Finish with numbered lines saying which floor areas stay empty, especially between the furniture and the camera.
+12. Never describe the camera or ask to change the view.
+13. If the plan and the photo disagree (a block over a door, a labelled feature you cannot find in Image 1), follow the plan and note it under CONFLICTS.
+
+OUTPUT
+Only the placement section, then a line "CONFLICTS", then a list (or "none"). Nothing before the first "Piece" line.
+
+PLACEMENT FACTS
+{{FACTS}}
+"""
+
+# attempt_id -> the writer task currently running for it (same process only,
+# like JOBS), so Generate can wait for one that hasn't finished yet.
+WRITER_TASKS: dict[int, asyncio.Task] = {}
+
+
+def placement_writer_enabled(db: Session) -> bool:
+    return get_setting(db, PLACEMENT_WRITER_ENABLED_KEY, "true").strip().lower() == "true"
+
+
+def get_placement_writer_prompt(db: Session) -> str:
+    return get_setting(db, PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT)
+
+
+def writer_signature(facts: str, layout_json: dict | None, prompt: str, model: str) -> str:
+    """Identifies exactly what a writer result was written for. Any change to
+    the placed blocks, the room's features, the prompt or the model changes
+    it, so a stale result can never be used."""
+    payload = json.dumps([facts, layout_json, prompt, model], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _piece_headers(lines: list[str]) -> list[str]:
+    return [line.rstrip() for line in lines if line.startswith("Piece ")]
+
+
+def parse_writer_output(facts: str, output: str) -> dict:
+    """Splits the writer's reply into the placement section and its CONFLICTS
+    list, and validates the section: every "Piece N — ..." header from the
+    facts must appear unchanged and in the same order, and no other line may
+    start with "Piece ". Returns {ok, reason, placement, conflicts}."""
+    lines = (output or "").replace("\r\n", "\n").split("\n")
+    conflicts_at = next((i for i, line in enumerate(lines) if line.strip().rstrip(":").strip() == "CONFLICTS"), None)
+    body = lines if conflicts_at is None else lines[:conflicts_at]
+    conflicts = "" if conflicts_at is None else "\n".join(lines[conflicts_at + 1 :]).strip()
+
+    expected = _piece_headers(facts.split("\n"))
+    got = _piece_headers(body)
+    if got != expected:
+        missing = [h for h in expected if h not in got]
+        extra = [h for h in got if h not in expected]
+        if missing:
+            reason = f"validation failed: header missing or changed: {missing[0]!r}"
+        elif extra:
+            reason = f"validation failed: unexpected line starting with 'Piece ': {extra[0]!r}"
+        else:
+            reason = "validation failed: piece headers repeated or out of order"
+        return {"ok": False, "reason": reason, "placement": None, "conflicts": conflicts}
+
+    first = next(i for i, line in enumerate(body) if line.startswith("Piece "))
+    placement = "\n".join(body[first:]).strip() + "\n"
+    return {"ok": True, "reason": None, "placement": placement, "conflicts": conflicts}
+
+
+def call_placement_writer(room_photo: bytes, room_mime: str, plan_png: bytes, prompt: str, model: str) -> dict:
+    """One writer call: Image 1 = the room photo, Image 2 = the plan PNG.
+    Synchronous — callers offload it to a thread."""
+
+    def image_part(data: bytes, mime: str) -> dict:
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}}
+
+    start = time.monotonic()
+    result = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}, image_part(room_photo, room_mime), image_part(plan_png, "image/png")],
+            }
+        ],
+        timeout=PLACEMENT_WRITER_CALL_TIMEOUT,
+    )
+    return {
+        "output": result.choices[0].message.content or "",
+        "usage": result.usage.model_dump() if result.usage else None,
+        "elapsed_s": round(time.monotonic() - start, 1),
+    }
+
+
+def writer_usd_cost(prompt_tokens: int, completion_tokens: int) -> float:
+    return round((prompt_tokens * VISION_INPUT_RATE_PER_M + completion_tokens * VISION_OUTPUT_RATE_PER_M) / 1_000_000, 6)
+
+
+def _with_writer_spend(unlogged: dict | None, usage: dict | None) -> dict | None:
+    """Adds one call's tokens to the attempt's not-yet-logged writer spend
+    (logged, then cleared, by the next successful generation)."""
+    if not usage:
+        return unlogged
+    prev = unlogged or {}
+    return {
+        "calls": prev.get("calls", 0) + 1,
+        "prompt_tokens": prev.get("prompt_tokens", 0) + (usage.get("prompt_tokens") or 0),
+        "completion_tokens": prev.get("completion_tokens", 0) + (usage.get("completion_tokens") or 0),
+    }
+
+
+def discard_placement_writer(attempt: Attempt) -> None:
+    """Drops the cached writer result (and orphans any call still running)
+    because the plan changed. Keeps the not-yet-logged spend."""
+    unlogged = (attempt.placement_writer or {}).get("unlogged_usage")
+    attempt.placement_writer = {"unlogged_usage": unlogged} if unlogged else None
+
+
+async def run_placement_writer(attempt_id: int, signature: str) -> None:
+    db = SessionLocal()
+    try:
+        attempt = db.query(Attempt).filter(Attempt.id == attempt_id).first()
+        state = (attempt.placement_writer or {}) if attempt else {}
+        if state.get("signature") != signature:
+            return
+        prompt = get_placement_writer_prompt(db).replace(FACTS_TOKEN, state["facts"])
+        outcome: dict
+        usage = None
+        try:
+            room_path = DATA_ROOT / attempt.room.photo_path
+            room_mime, _ = mimetypes.guess_type(room_path.name)
+            result = await asyncio.to_thread(
+                call_placement_writer,
+                room_path.read_bytes(),
+                room_mime or "image/jpeg",
+                (DATA_ROOT / state["plan_path"]).read_bytes(),
+                prompt,
+                state["model"],
+            )
+        except Exception as exc:
+            logger.exception("placement writer call failed attempt_id=%s", attempt_id)
+            outcome = {"status": "failed", "ok": False, "reason": f"writer call failed: {exc.__class__.__name__}"}
+        else:
+            usage = result["usage"]
+            parsed = parse_writer_output(state["facts"], result["output"])
+            outcome = {
+                "status": "done",
+                "ok": parsed["ok"],
+                "reason": parsed["reason"],
+                "output": result["output"],
+                "placement": parsed["placement"],
+                "conflicts": parsed["conflicts"],
+                "usage": usage,
+                "elapsed_s": result["elapsed_s"],
+            }
+
+        db.refresh(attempt)
+        current = attempt.placement_writer or {}
+        unlogged = _with_writer_spend(current.get("unlogged_usage"), usage)
+        if current.get("signature") != signature:
+            # the plan changed while this ran: the result is useless, the spend is real
+            attempt.placement_writer = {**current, "unlogged_usage": unlogged} if (current or unlogged) else None
+        else:
+            attempt.placement_writer = {**current, **outcome, "unlogged_usage": unlogged}
+        db.commit()
+    except Exception:
+        logger.exception("placement writer job crashed attempt_id=%s", attempt_id)
+    finally:
+        db.close()
+
+
+def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session) -> str:
+    """Starts the writer for the attempt's current plan unless an identical
+    run is already cached or in flight. `plan_path` is a freshly uploaded
+    plan image, or None to reuse the stored one. Returns what happened."""
+    if not placement_writer_enabled(db):
+        return "disabled"
+    if not flatten_placed_subpieces(attempt.items):
+        return "no_placement"
+    plan_path = plan_path or attempt.plan_path
+    if not plan_path:
+        return "no_plan"
+    facts = build_placement_text(attempt.items, attempt.room.layout_json, False)
+    model = get_active_vision_model(db)
+    signature = writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model)
+    state = attempt.placement_writer or {}
+    task = WRITER_TASKS.get(attempt.id)
+    if state.get("signature") == signature and (
+        state.get("status") == "done" or (state.get("status") == "running" and task is not None and not task.done())
+    ):
+        return "cached"
+
+    attempt.plan_path = plan_path
+    attempt.placement_writer = {
+        "status": "running",
+        "signature": signature,
+        "facts": facts,
+        "model": model,
+        "plan_path": plan_path,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "unlogged_usage": state.get("unlogged_usage"),
+    }
+    db.commit()
+    task = asyncio.create_task(run_placement_writer(attempt.id, signature))
+    WRITER_TASKS[attempt.id] = task
+    task.add_done_callback(lambda t, attempt_id=attempt.id: WRITER_TASKS.pop(attempt_id, None) if WRITER_TASKS.get(attempt_id) is t else None)
+    return "started"
+
+
+async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str | None, dict]:
+    """Decides what goes into {{PLACEMENT}} for a generation: the writer's
+    section if a valid one exists for exactly this plan (waiting up to
+    PLACEMENT_WRITER_WAIT_SECONDS for one still running), otherwise None so
+    the caller falls back to the facts. Also returns the record saved to
+    generation_debug: facts, raw output, used/fallback + reason, usage."""
+    facts = build_placement_text(attempt.items, attempt.room.layout_json, False)
+    info: dict = {"facts": facts, "used": False, "reason": None, "output": None, "conflicts": None, "usage": None, "plan_path": None}
+
+    def fallback(reason: str) -> tuple[None, dict]:
+        info["reason"] = reason
+        return None, info
+
+    if not placement_writer_enabled(db):
+        return fallback("the placement writer is switched off")
+    if not flatten_placed_subpieces(attempt.items):
+        return fallback("no pieces are placed on the plan")
+    state = attempt.placement_writer or {}
+    if not state.get("signature"):
+        return fallback("no plan image was uploaded for this layout")
+    model = get_active_vision_model(db)
+    if state["signature"] != writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model):
+        return fallback("the plan, the room's features or the writer settings changed after the writer ran")
+
+    info["plan_path"] = state.get("plan_path")
+    info["model"] = state.get("model")
+    if state.get("status") == "running":
+        task = WRITER_TASKS.get(attempt.id)
+        if task is None or task.done():
+            return fallback("the writer was interrupted before it finished")
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=PLACEMENT_WRITER_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            return fallback(f"the writer did not finish within {PLACEMENT_WRITER_WAIT_SECONDS} s")
+        db.refresh(attempt)
+        state = attempt.placement_writer or {}
+
+    info.update(
+        output=state.get("output"), conflicts=state.get("conflicts"), usage=state.get("usage"), elapsed_s=state.get("elapsed_s")
+    )
+    if state.get("status") == "done" and state.get("ok") and state.get("placement"):
+        info["used"] = True
+        return state["placement"], info
+    return fallback(state.get("reason") or "the writer produced no result")
+
+
+# ---------------------------------------------------------------------------
 # Generation jobs — POST starts a background job, the client polls for the
 # result so the flow survives the phone locking or the tab backgrounding.
 # ---------------------------------------------------------------------------
@@ -2001,8 +2318,11 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
 
         room = attempt.room
         template = get_active_prompt(db)
+        writer_placement, writer_info = (None, None)
+        if not attempt.ignore_placement:
+            writer_placement, writer_info = await resolve_writer_placement(attempt, db)
         prompt = build_prompt(
-            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement
+            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement
         )
         print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
 
@@ -2023,6 +2343,13 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             )
             image_files.append(item_file)
             debug_images.append(item_debug)
+
+        # The plan PNG is logged beside the others but never added to
+        # image_files: it goes to the placement writer only.
+        plan_path = (writer_info or {}).get("plan_path")
+        if plan_path and (DATA_ROOT / plan_path).is_file():
+            _plan_file, plan_debug = load_local_image_with_debug(DATA_ROOT / plan_path, "plan", f"/media/{plan_path}")
+            debug_images.append(plan_debug)
 
         try:
             result = await asyncio.to_thread(
@@ -2053,9 +2380,28 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 elapsed_s=result["elapsed_s"],
                 usage=result["usage"],
                 images=debug_images,
+                placement_writer=writer_info,
             )
         )
         usage = result["usage"]
+        tokens_in = usage.get("input_tokens") if usage else None
+        tokens_out = usage.get("output_tokens") if usage else None
+        usd_cost = compute_usd_cost(usage)
+        note = None
+        # The writer's spend (every call made for this attempt since the last
+        # render) is logged in this same row; no extra credits are charged.
+        db.refresh(attempt)
+        writer_spend = (attempt.placement_writer or {}).get("unlogged_usage")
+        if writer_spend:
+            writer_cost = writer_usd_cost(writer_spend["prompt_tokens"], writer_spend["completion_tokens"])
+            tokens_in = (tokens_in or 0) + writer_spend["prompt_tokens"]
+            tokens_out = (tokens_out or 0) + writer_spend["completion_tokens"]
+            usd_cost = round((usd_cost or 0) + writer_cost, 6)
+            note = (
+                f"includes placement writer: {writer_spend['calls']} call(s), {writer_spend['prompt_tokens']} in / "
+                f"{writer_spend['completion_tokens']} out tokens, ${writer_cost:.6f}"
+            )
+            attempt.placement_writer = {**attempt.placement_writer, "unlogged_usage": None}
         db.add(
             CreditLedger(
                 shop_id=shop_id,
@@ -2064,9 +2410,10 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 render_id=render.id,
                 delta=0,
                 reason="generation",
-                tokens_in=usage.get("input_tokens") if usage else None,
-                tokens_out=usage.get("output_tokens") if usage else None,
-                usd_cost=compute_usd_cost(usage),
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                usd_cost=usd_cost,
+                note=note,
             )
         )
         db.commit()
@@ -2314,6 +2661,7 @@ async def _add_item_to_attempt(
         shape=derive_item_shape(category, type_),
     )
     db.add(item)
+    discard_placement_writer(attempt)
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -2324,6 +2672,7 @@ def _delete_item_from_attempt(attempt: Attempt, item_id: int, db: Session) -> At
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
     db.delete(item)
+    discard_placement_writer(attempt)
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -2434,6 +2783,7 @@ def _set_item_placement(
     remaining = [*others, entry]
     remaining.sort(key=lambda e: e["sub_index"])
     item.placement = remaining
+    discard_placement_writer(attempt)
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -2444,6 +2794,7 @@ def _clear_item_placement(attempt: Attempt, item_id: int, sub_index: int, db: Se
     if item is None:
         return error_response(404, "item_not_found", "That piece could not be found.")
     item.placement = [e for e in (item.placement or []) if e.get("sub_index") != sub_index]
+    discard_placement_writer(attempt)
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -2939,6 +3290,35 @@ async def api_generate_attempt(
     return _start_generation(attempt, ignore_placement, user, db)
 
 
+@app.post("/api/attempts/{attempt_id}/plan")
+async def api_upload_attempt_plan(
+    attempt_id: int,
+    plan: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """Receives the floor plan as the salesman left it (a PNG exported by the
+    client when he taps Next) and starts the placement writer in the
+    background. Never blocks or fails the flow: generation works without it."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    data = await plan.read()
+    if not data or len(data) > MAX_UPLOAD_BYTES:
+        return error_response(400, "invalid_plan", "That plan image couldn't be read.")
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+        image = image.convert("RGB")
+    except Exception:
+        return error_response(400, "invalid_plan", "That plan image couldn't be read.")
+    PLANS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}.png"
+    image.save(PLANS_DIR / filename, format="PNG")
+    status = start_placement_writer(attempt, f"plans/{filename}", db)
+    if status != "started":
+        (PLANS_DIR / filename).unlink(missing_ok=True)  # nothing new to write for; keep the plan already on record
+    return JSONResponse(content={"writer": status})
+
+
 # ---------------------------------------------------------------------------
 # Renders
 # ---------------------------------------------------------------------------
@@ -3422,26 +3802,34 @@ def api_admin_delete_user(
 # ---------------------------------------------------------------------------
 
 
-def _prompt_settings(db: Session) -> tuple[Setting | None, Setting | None, Setting | None]:
-    rows = db.query(Setting).filter(
-        Setting.key.in_([PROMPT_SETTING_KEY, VISION_PROMPT_SETTING_KEY, VISION_MODEL_SETTING_KEY])
-    )
-    by_key = {row.key: row for row in rows}
-    return by_key.get(PROMPT_SETTING_KEY), by_key.get(VISION_PROMPT_SETTING_KEY), by_key.get(VISION_MODEL_SETTING_KEY)
+PROMPT_PAGE_KEYS = [
+    PROMPT_SETTING_KEY,
+    VISION_PROMPT_SETTING_KEY,
+    VISION_MODEL_SETTING_KEY,
+    PLACEMENT_WRITER_ENABLED_KEY,
+    PLACEMENT_WRITER_PROMPT_KEY,
+]
 
 
-def prompt_setting_response(
-    db: Session, setting: Setting | None, vision_setting: Setting | None, model_setting: Setting | None
-) -> dict:
+def prompt_setting_response(db: Session) -> dict:
+    rows = {row.key: row for row in db.query(Setting).filter(Setting.key.in_(PROMPT_PAGE_KEYS))}
+
+    def value(key: str, default: str) -> str:
+        return rows[key].value if key in rows else default
+
+    setting = rows.get(PROMPT_SETTING_KEY)
     return {
-        "prompt": setting.value if setting else DEFAULT_GENERATION_PROMPT,
+        "prompt": value(PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT),
         "default_prompt": DEFAULT_GENERATION_PROMPT,
         "updated_at": setting.updated_at.isoformat() if setting and setting.updated_at else None,
         "placeholders": PROMPT_PLACEHOLDERS,
-        "vision_prompt": vision_setting.value if vision_setting else DEFAULT_VISION_PROMPT,
+        "vision_prompt": value(VISION_PROMPT_SETTING_KEY, DEFAULT_VISION_PROMPT),
         "default_vision_prompt": DEFAULT_VISION_PROMPT,
-        "vision_model": model_setting.value if model_setting else DEFAULT_VISION_MODEL,
+        "vision_model": value(VISION_MODEL_SETTING_KEY, DEFAULT_VISION_MODEL),
         "default_vision_model": DEFAULT_VISION_MODEL,
+        "placement_writer_enabled": value(PLACEMENT_WRITER_ENABLED_KEY, "true").strip().lower() == "true",
+        "placement_writer_prompt": value(PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT),
+        "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
     }
 
 
@@ -3451,14 +3839,15 @@ def api_admin_get_prompt(
 ) -> JSONResponse:
     if resolve_admin_shop_id(owner, shop_id) is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
-    setting, vision_setting, model_setting = _prompt_settings(db)
-    return JSONResponse(content=prompt_setting_response(db, setting, vision_setting, model_setting))
+    return JSONResponse(content=prompt_setting_response(db))
 
 
 class PromptBody(BaseModel):
     prompt: str
     vision_prompt: str | None = None
     vision_model: str | None = None
+    placement_writer_enabled: bool | None = None
+    placement_writer_prompt: str | None = None
     shop_id: int | None = None
 
 
@@ -3474,18 +3863,20 @@ def api_admin_save_prompt(
         return error_response(400, "empty_vision_prompt", "The vision prompt can't be empty.")
     if body.vision_model is not None and not body.vision_model.strip():
         return error_response(400, "empty_vision_model", "The vision model can't be empty.")
-    setting = set_setting(db, PROMPT_SETTING_KEY, body.prompt)
-    vision_setting = (
+    if body.placement_writer_prompt is not None and FACTS_TOKEN not in body.placement_writer_prompt:
+        return error_response(
+            400, "writer_prompt_missing_facts", f"The placement writer prompt must contain {FACTS_TOKEN} where the facts go."
+        )
+    set_setting(db, PROMPT_SETTING_KEY, body.prompt)
+    if body.vision_prompt is not None:
         set_setting(db, VISION_PROMPT_SETTING_KEY, body.vision_prompt.strip())
-        if body.vision_prompt is not None
-        else db.query(Setting).filter(Setting.key == VISION_PROMPT_SETTING_KEY).first()
-    )
-    model_setting = (
+    if body.vision_model is not None:
         set_setting(db, VISION_MODEL_SETTING_KEY, body.vision_model.strip())
-        if body.vision_model is not None
-        else db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first()
-    )
-    return JSONResponse(content=prompt_setting_response(db, setting, vision_setting, model_setting))
+    if body.placement_writer_enabled is not None:
+        set_setting(db, PLACEMENT_WRITER_ENABLED_KEY, "true" if body.placement_writer_enabled else "false")
+    if body.placement_writer_prompt is not None:
+        set_setting(db, PLACEMENT_WRITER_PROMPT_KEY, body.placement_writer_prompt)
+    return JSONResponse(content=prompt_setting_response(db))
 
 
 @app.post("/api/admin/prompt/reset")
@@ -3494,9 +3885,8 @@ def api_admin_reset_prompt(
 ) -> JSONResponse:
     if resolve_admin_shop_id(owner, shop_id) is None:
         return error_response(400, "no_shop_context", "Select a shop first.")
-    setting = set_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
-    _, vision_setting, model_setting = _prompt_settings(db)
-    return JSONResponse(content=prompt_setting_response(db, setting, vision_setting, model_setting))
+    set_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
+    return JSONResponse(content=prompt_setting_response(db))
 
 
 # ---------------------------------------------------------------------------
@@ -3530,6 +3920,7 @@ def api_debug_generation(
             "elapsed_s": debug_row.elapsed_s,
             "usage": debug_row.usage,
             "images": debug_row.images,
+            "placement_writer": debug_row.placement_writer,
         }
     )
 

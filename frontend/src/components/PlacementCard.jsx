@@ -28,6 +28,7 @@ export function PlacementCard({
   fullScreen,
   onToggleFullScreen,
   hideControls = false,
+  onSvg = null,
 }) {
   return (
     <div className="placement-card">
@@ -54,6 +55,7 @@ export function PlacementCard({
         onAddObstructionAt={onAddObstructionAt}
         onTapFeature={onTapFeature}
         onTapObstruction={onTapObstruction}
+        onSvg={onSvg}
       />
 
       {hideControls ? null : (

@@ -18,6 +18,7 @@ import Adjust from "./pages/Adjust.jsx";
 import Admin from "./pages/Admin.jsx";
 import AdminUser from "./pages/AdminUser.jsx";
 import AdminPrompt from "./pages/AdminPrompt.jsx";
+import DebugGeneration from "./pages/DebugGeneration.jsx";
 import AdminUsage from "./pages/AdminUsage.jsx";
 import Account from "./pages/Account.jsx";
 import Super from "./pages/Super.jsx";
@@ -168,6 +169,16 @@ export default function App() {
               <RequireAuth roles={OWNER_ROLES}>
                 <AuthedLayout>
                   <AdminPrompt />
+                </AuthedLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/debug/generation/:renderId"
+            element={
+              <RequireAuth roles={OWNER_ROLES}>
+                <AuthedLayout>
+                  <DebugGeneration />
                 </AuthedLayout>
               </RequireAuth>
             }

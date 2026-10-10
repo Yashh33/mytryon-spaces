@@ -23,6 +23,7 @@ import {
   roomFeet,
   rotatePlacement,
 } from "../placement.js";
+import { exportPlanPng } from "../planExport.js";
 
 function emptyLayout() {
   return {
@@ -60,6 +61,8 @@ export default function Place() {
   // when another block's reply resyncs the list.
   const changeSeq = useRef({});
   const dirtyKeys = useRef(new Set());
+  const planSvg = useRef(null); // the plan's <svg>, for exporting it as an image on Next
+  const [leaving, setLeaving] = useState(false);
 
   async function load() {
     setError(null);
@@ -311,6 +314,31 @@ export default function Place() {
     setShowAddFeature(false);
   }
 
+  // Next: send the plan, as drawn, to the server so the placement writer can
+  // start while the salesman picks his finishing options. Entirely optional —
+  // any failure here is ignored and generation falls back to the plain facts.
+  async function handleNext() {
+    setLeaving(true);
+    try {
+      if (planSvg.current && blocks.some((b) => b.placement)) {
+        // let any placement still being saved land first, so the server
+        // writes about the same layout the image shows
+        for (let waited = 0; dirtyKeys.current.size && waited < 3000; waited += 100) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const form = new FormData();
+        form.append("plan", await exportPlanPng(planSvg.current), "plan.png");
+        await Promise.race([
+          api.post(`/api/attempts/${id}/plan`, { form }),
+          new Promise((resolve) => setTimeout(resolve, 6000)),
+        ]);
+      }
+    } catch {
+      // the writer is a bonus; never block the flow on it
+    }
+    navigate(`/attempt/${id}/finish`);
+  }
+
   if (!attempt && !error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><Loading /></div>;
   if (error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><ErrorBlock message={error} onRetry={load} /></div>;
 
@@ -333,6 +361,9 @@ export default function Place() {
     onRotate: () => selectedKey && handleRotateBlock(selectedKey),
     onFlip: () => selectedKey && handleFlipBlock(selectedKey),
     onRequestRemove: () => selectedKey && requestRemoveBlock(selectedKey),
+    onSvg: (node) => {
+      planSvg.current = node;
+    },
   };
 
   return (
@@ -419,8 +450,8 @@ export default function Place() {
           ) : null}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 20 }}>
-            <button type="button" className="btn btn-primary" onClick={() => navigate(`/attempt/${id}/finish`)}>
-              Next
+            <button type="button" className="btn btn-primary" disabled={leaving} onClick={handleNext}>
+              {leaving ? "Saving plan…" : "Next"}
             </button>
             <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/finish?ignore_placement=true`)}>
               Skip placement

@@ -899,3 +899,17 @@ h2 { font-size: 19px; }
   .place-side { margin-top: 0; }
   .rpr-photo img { max-height: none; }
 }
+
+/* Debug page (/debug/generation/:id) */
+.debug-images { display: flex; flex-wrap: wrap; gap: 12px; }
+.debug-images figure { margin: 0; width: 220px; max-width: 100%; }
+.debug-images img { width: 100%; border-radius: 10px; border: 1px solid var(--line); background: #fff; display: block; }
+.debug-images figcaption { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+.debug-verdict { font-weight: 800; font-size: 13.5px; padding: 10px 12px; border-radius: 9px; }
+.debug-verdict.used { background: #E7F6EC; color: #116B33; }
+.debug-verdict.fallback { background: #FFF1DC; color: #8A4B00; }
+.debug-label { font-size: 12px; font-weight: 800; margin: 16px 0 6px; }
+.debug-pre {
+  white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 0;
+}

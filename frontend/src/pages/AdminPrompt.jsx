@@ -14,6 +14,8 @@ export default function AdminPrompt() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [prompt, setPrompt] = useState("");
+  const [writerEnabled, setWriterEnabled] = useState(true);
+  const [writerPrompt, setWriterPrompt] = useState("");
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const toast = useToast();
@@ -23,13 +25,18 @@ export default function AdminPrompt() {
   const backTo = withQuery("/admin", { shop_id: shopId });
   const shopIdNum = shopId ? Number(shopId) : null;
 
+  function apply(res) {
+    setData(res);
+    setPrompt(res.prompt);
+    setWriterEnabled(res.placement_writer_enabled);
+    setWriterPrompt(res.placement_writer_prompt);
+  }
+
   async function load() {
     if (needsShopRedirect) return;
     setError(null);
     try {
-      const res = await api.get(withQuery("/api/admin/prompt", { shop_id: shopId }));
-      setData(res);
-      setPrompt(res.prompt);
+      apply(await api.get(withQuery("/api/admin/prompt", { shop_id: shopId })));
     } catch (err) {
       setError(err.message);
     }
@@ -47,10 +54,9 @@ export default function AdminPrompt() {
   async function handleSave() {
     setSaving(true);
     try {
-      const res = await api.post("/api/admin/prompt", { json: { prompt, shop_id: shopIdNum } });
-      setData(res);
-      setPrompt(res.prompt);
-      toast("Prompt saved.");
+      const json = { prompt, placement_writer_enabled: writerEnabled, placement_writer_prompt: writerPrompt, shop_id: shopIdNum };
+      apply(await api.post("/api/admin/prompt", { json }));
+      toast("Saved.");
     } catch (err) {
       toast(err.message);
     } finally {
@@ -88,12 +94,29 @@ export default function AdminPrompt() {
 
       <textarea className="prompt-textarea" spellCheck="false" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
 
+      <div className="section-label" style={{ marginTop: 26 }}>Placement writer</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        Before each picture, a vision model ({data.vision_model}) looks at the room photo and the floor plan and rewrites the
+        placement section. If it is off, fails or is slow, the plain placement facts are used instead.
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, marginBottom: 12, minHeight: 44 }}>
+        <input type="checkbox" checked={writerEnabled} onChange={(e) => setWriterEnabled(e.target.checked)} style={{ width: 20, height: 20 }} />
+        Use the placement writer
+      </label>
+      <textarea className="prompt-textarea" spellCheck="false" value={writerPrompt} onChange={(e) => setWriterPrompt(e.target.value)} />
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+        Must contain <span className="mono">{"{{FACTS}}"}</span>.{" "}
+        <button type="button" className="link-btn" onClick={() => setWriterPrompt(data.default_placement_writer_prompt)}>
+          Put back the built-in writer prompt
+        </button>
+      </div>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
         <button type="button" className="btn btn-primary" disabled={saving} onClick={handleSave}>
           {saving ? "Saving…" : "Save"}
         </button>
         <button type="button" className="btn btn-ghost" disabled={resetting} onClick={handleReset}>
-          {resetting ? "Resetting…" : "Reset to default"}
+          {resetting ? "Resetting…" : "Reset generation prompt to default"}
         </button>
       </div>
 

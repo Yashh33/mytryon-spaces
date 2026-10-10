@@ -1492,6 +1492,25 @@ def _format_piece_list(numbers: list[int]) -> str:
     return ", ".join(labels[:-1]) + f" and {labels[-1]}"
 
 
+SEATER_TYPE_RE = re.compile(r"^(\d+)-seater$")
+
+
+def sofa_seat_count(category: str, label: str) -> int | None:
+    """Seat count for a sofa whose type (or sub-piece label) is "N-seater";
+    None for L-shape, Corner, Curved and every non-sofa item."""
+    match = SEATER_TYPE_RE.match(label) if category == "Sofa" else None
+    return int(match.group(1)) if match else None
+
+
+def sofa_seat_description(seats: int) -> str:
+    """Piece-header wording that makes the seat count countable, so the model
+    builds that many cushions instead of copying the reference photograph."""
+    if seats == 1:
+        return "single-seat sofa with exactly ONE seat cushion and ONE back cushion"
+    word = seat_count_word(seats)
+    return f"{word}-seater sofa with exactly {word.upper()} seat cushions and {word.upper()} back cushions"
+
+
 def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
     """One record per placed sub-piece, in item order then sub_index order.
     Sub-pieces with no placement are left out entirely — {{PLACEMENT}} only
@@ -1508,9 +1527,10 @@ def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
             sub_piece = sub_pieces.get(entry.get("sub_index"))
             if sub_piece is None or entry.get("geometry") is None:
                 continue
-            if is_split:
-                seats = int(sub_piece["label"].split("-")[0])
-                description = f"{seat_count_word(seats)}-seater {item.category.lower()}"
+            # split sub-pieces are labelled "N-seater", same as the straight sofa types
+            seats = sofa_seat_count(item.category, sub_piece["label"] if is_split else item.type)
+            if seats is not None:
+                description = sofa_seat_description(seats)
             else:
                 description = f"{item.category} ({item.type})"
             records.append(

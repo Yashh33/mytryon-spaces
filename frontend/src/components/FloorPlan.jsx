@@ -1,26 +1,14 @@
 import { useRef } from "react";
 import {
-  ARC_TYPES,
   ARM_SHAPES,
-  BAND_TYPES,
-  DASHED_GAP_TYPES,
-  DOUBLE_DASHED_GAP_TYPES,
-  GAP_TYPES,
-  POINT_TYPES,
-  WALL_KEY,
-  WINDOW_TYPES,
   armExtent,
   armFrame,
   armParams,
-  assignLabelRows,
   cameraGeometry,
-  cameraXFraction,
   clamp01,
   cornerFigure,
   curvedFigure,
-  featureColor,
   featureFootprint,
-  featureSpan,
   frameApply,
   frameCss,
   frameSize,
@@ -29,10 +17,10 @@ import {
   isDiningTable,
   isStraightSofa,
   lFigure,
-  labelPosition,
-  mergeAdjacentFeatures,
+  labelLines,
   nameLines,
   placementRects,
+  planFeatures,
   planGeometry,
   rectFrame,
   rectsOverlap,
@@ -45,7 +33,6 @@ import {
   straightFigure,
   translatePlacement,
 } from "../placement.js";
-import { featureLetters } from "./RoomPhotoReference.jsx";
 
 const WALLS = ["far", "left", "right", "near"];
 
@@ -53,6 +40,8 @@ const WALLS = ["far", "left", "right", "near"];
 const WALL_NAMES = { far: "FAR WALL", left: "LEFT WALL", right: "RIGHT WALL", near: "NEAR WALL" };
 const WALL_COLORS = { far: "#1D4ED8", left: "#6D28D9", right: "#15803D", near: "#1A1815" };
 const WALL_NAME_CHAR_PX = 8.6; // rough width of one 13px bold capital, for placing the name clear of feature labels
+const FEATURE_LABEL_CHAR_PX = 8.6; // same, for one 13.5px bold capital of a feature label
+const FEATURE_LABEL_LINE_PX = 15;
 
 // Wood tone for dining tables, and the fixed palette for bed pillows/sheet —
 // drawing-only constants, not part of the block's own PALETTE colour.
@@ -77,53 +66,10 @@ function wallPoint(wall, t, geom) {
   return { x: roomX + roomW, y: roomY + t * roomH, nx: -1, ny: 0 }; // right
 }
 
-function segmentBetween(line, from, to, geom) {
-  if (from >= to) return { x1: line.x1, y1: line.y1, x2: line.x1, y2: line.y1 };
-  if (line.axis === "x") {
-    return { x1: line.x1 + from * geom.roomW, y1: line.y1, x2: line.x1 + to * geom.roomW, y2: line.y1 };
-  }
-  return { x1: line.x1, y1: line.y1 + from * geom.roomH, x2: line.x1, y2: line.y1 + to * geom.roomH };
-}
-
-/** Two thin lines spanning a gap, straddling the wall line — used for
- * windows (solid) and glazed openings (dashed, "doubled"). */
-function parallelLines(a, b, dashed, stroke) {
-  const off1 = { x: a.nx * -2, y: a.ny * -2 };
-  const off2 = { x: a.nx * 2, y: a.ny * 2 };
-  const cls = "fp-window" + (dashed ? " fp-dashed" : "");
-  return (
-    <>
-      <line x1={a.x + off1.x} y1={a.y + off1.y} x2={b.x + off1.x} y2={b.y + off1.y} className={cls} stroke={stroke} />
-      <line x1={a.x + off2.x} y1={a.y + off2.y} x2={b.x + off2.x} y2={b.y + off2.y} className={cls} stroke={stroke} />
-    </>
-  );
-}
-
 /** Far/left/right walls are drawn thick in their own colour; the near wall
  * keeps the plain ink line. */
 function wallStyle(wall) {
   return wall === "near" ? undefined : { stroke: WALL_COLORS[wall], strokeWidth: 6 };
-}
-
-function featureLabel(group) {
-  if ((group.type === "unknown" || group.type === "other") && group.notes) return group.notes;
-  return group.type || "feature";
-}
-
-/** Feature types actually present on the plan right now, for the legend —
- * de-duplicated, in first-seen order. */
-function presentFeatureTypes(layout) {
-  const seen = [];
-  WALLS.forEach((wall) => {
-    const features = layout?.[WALL_KEY[wall]]?.features || [];
-    features.forEach((f) => {
-      if (f.type && !seen.includes(f.type)) seen.push(f.type);
-    });
-  });
-  (layout?.obstructions || []).forEach((o) => {
-    if (o.type && !seen.includes(o.type)) seen.push(o.type);
-  });
-  return seen;
 }
 
 const noop = () => {};
@@ -145,6 +91,7 @@ export function FloorPlan({
   onTapFeature = noop,
   onTapObstruction = noop,
   readOnly = false,
+  onSvg = null, // called with the <svg> node, for exporting the plan as an image
 }) {
   const svgRef = useRef(null);
   const dragRef = useRef(null); // { mode: "move"|"resize"|"rotate", key, pointerId, startX, startY, orig, moved, ... }
@@ -152,7 +99,7 @@ export function FloorPlan({
   const layout = room.layout_json;
   const geom = planGeometry(layout?.depth_vs_width);
   const feet = roomFeet(layout?.depth_vs_width);
-  const letters = featureLetters(layout);
+  const features = planFeatures(layout);
 
   function toNormalized(clientX, clientY) {
     const rect = svgRef.current.getBoundingClientRect();
@@ -263,122 +210,49 @@ export function FloorPlan({
     };
   }
 
+  /** One wall's features, each a thick coloured segment ON the wall line
+   * (dashed when uncertain) or a filled square for a pillar, plus its tap
+   * target. Drawn above the furniture, so a sofa against the wall can't
+   * hide a door or window; their labels follow in the same layer. */
   function renderWallFeatures(wall) {
-    const wallData = layout?.[WALL_KEY[wall]];
-    const partial = wallData?.confidence === "partial";
-    const groups = mergeAdjacentFeatures(wallData?.features || []);
-    const rows = assignLabelRows(groups, geom, wall);
-    const line = wallLine(wall, geom);
     const elements = [];
-    let cursor = 0;
 
-    groups.forEach((group, gi) => {
+    features.walls[wall].forEach((group, gi) => {
       const [start, end] = group.span;
       const a = wallPoint(wall, start, geom);
       const b = wallPoint(wall, end, geom);
       const mid = wallPoint(wall, (start + end) / 2, geom);
       const key = `${wall}-feature-${gi}`;
-      const type = group.type;
-      const color = featureColor(type);
 
-      if (GAP_TYPES.has(type)) {
-        elements.push(<line key={`${key}-pre`} {...segmentBetween(line, cursor, start, geom)} className="fp-wall" style={wallStyle(wall)} />);
-        cursor = end;
-        if (WINDOW_TYPES.has(type)) {
-          elements.push(<g key={`${key}-sym`}>{parallelLines(a, b, false, color.border)}</g>);
-          elements.push(
-            <line key={`${key}-fill`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={color.fill} strokeWidth="4" strokeOpacity="0.6" />
-          );
-        } else if (DOUBLE_DASHED_GAP_TYPES.has(type)) {
-          elements.push(<g key={`${key}-sym`}>{parallelLines(a, b, true, color.border)}</g>);
-        } else if (DASHED_GAP_TYPES.has(type)) {
-          elements.push(<line key={`${key}-d1`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="fp-dashed" stroke={color.border} strokeWidth="1.2" />);
-        } else {
-          // door / doorway / opening / unknown: a plain dashed gap-line in
-          // the type's own colour, so even the ones without a dedicated
-          // symbol below read as a coloured break in the wall.
-          elements.push(<line key={`${key}-gap`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="fp-dashed" stroke={color.border} strokeWidth="1.2" />);
-        }
-        if (ARC_TYPES.has(type)) {
-          const r = Math.hypot(b.x - a.x, b.y - a.y);
-          const swingX = a.x + a.nx * r;
-          const swingY = a.y + a.ny * r;
-          elements.push(
-            <path
-              key={`${key}-arc`}
-              d={`M ${b.x} ${b.y} A ${r} ${r} 0 0 1 ${swingX} ${swingY} M ${a.x} ${a.y} L ${swingX} ${swingY}`}
-              className="fp-door-arc"
-              stroke={color.border}
-            />
-          );
-          elements.push(
-            <path
-              key={`${key}-leaf`}
-              d={`M ${a.x} ${a.y} L ${swingX} ${swingY} L ${b.x} ${b.y} Z`}
-              fill={color.fill}
-              fillOpacity="0.5"
-              stroke="none"
-            />
-          );
-        }
-      } else if (BAND_TYPES.has(type)) {
-        elements.push(
-          <line
-            key={key}
-            x1={a.x + a.nx * 5} y1={a.y + a.ny * 5}
-            x2={b.x + a.nx * 5} y2={b.y + a.ny * 5}
-            className="fp-band"
-            stroke={color.border}
-          />
-        );
-      } else if (POINT_TYPES.has(type)) {
+      if (group.kind === "PILLAR") {
         elements.push(
           <rect
             key={key}
-            x={mid.x + mid.nx * 8 - 5} y={mid.y + mid.ny * 8 - 5} width="10" height="10"
-            fill={color.fill} stroke={color.border} strokeWidth="1.5" rx="2"
+            x={mid.x + mid.nx * 8 - 6} y={mid.y + mid.ny * 8 - 6} width="12" height="12"
+            fill={group.color} stroke="#fff" strokeWidth="1.5" rx="2"
           />
         );
       } else {
-        // recess / step / other / unknown-but-not-a-gap and anything else
-        // not otherwise symbolised: a neutral tinted band on the wall.
+        elements.push(<line key={`${key}-case`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="fp-feature-case" />);
         elements.push(
           <line
-            key={key}
-            x1={a.x + a.nx * 5} y1={a.y + a.ny * 5}
-            x2={b.x + a.nx * 5} y2={b.y + a.ny * 5}
-            stroke={color.border}
-            strokeWidth="3"
-            strokeOpacity="0.7"
+            key={key} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+            className={"fp-feature-seg" + (group.uncertain ? " fp-feature-unsure" : "")} stroke={group.color}
           />
         );
       }
 
-      if (partial && !GAP_TYPES.has(type)) {
-        elements.push(
-          <rect
-            key={`${key}-unsure`}
-            x={Math.min(a.x, b.x) - 4} y={Math.min(a.y, b.y) - 4}
-            width={Math.max(Math.abs(b.x - a.x), 8) + 8} height={Math.max(Math.abs(b.y - a.y), 8) + 8}
-            className="fp-unsure"
-          />
-        );
-      }
-
-      const label = labelPosition(wall, group.span, rows[gi], geom);
-      elements.push(<line key={`${key}-leader`} x1={mid.x} y1={mid.y} x2={label.x} y2={label.y} className="fp-leader" />);
-      elements.push(
-        <text key={`${key}-label`} x={label.x} y={label.y} className="fp-label fp-label-caps" textAnchor={label.anchor}>
-          {letters.walls[wall][gi]} &middot; {featureLabel(group)}
-          {partial ? " ?" : ""}
-        </text>
-      );
-
+      // Tap target: reaches well outside the wall but only a little into the
+      // room, so a tap on a sofa standing against the wall still hits the sofa.
+      const outX = a.nx < 0 ? 4 : a.nx > 0 ? 14 : 4;
+      const outY = a.ny < 0 ? 4 : a.ny > 0 ? 14 : 4;
+      const inX = a.nx > 0 ? 4 : a.nx < 0 ? 14 : 4;
+      const inY = a.ny > 0 ? 4 : a.ny < 0 ? 14 : 4;
       elements.push(
         <rect
           key={`${key}-hit`}
-          x={Math.min(a.x, b.x) - 6} y={Math.min(a.y, b.y) - 6}
-          width={Math.max(Math.abs(b.x - a.x), 12) + 12} height={Math.max(Math.abs(b.y - a.y), 12) + 12}
+          x={Math.min(a.x, b.x) - outX} y={Math.min(a.y, b.y) - outY}
+          width={Math.abs(b.x - a.x) + outX + inX} height={Math.abs(b.y - a.y) + outY + inY}
           className="fp-hit"
           onPointerUp={
             readOnly
@@ -391,41 +265,101 @@ export function FloorPlan({
         />
       );
     });
-
-    elements.push(<line key={`${wall}-tail`} {...segmentBetween(line, cursor, 1, geom)} className="fp-wall" style={wallStyle(wall)} />);
     return elements;
   }
 
+  function obstructionPx(o) {
+    return { px: geom.roomX + o.x * geom.roomW, py: geom.roomY + o.y * geom.roomH };
+  }
+
   function renderObstructions() {
-    const obstructions = layout?.obstructions || [];
-    return obstructions
-      .map((o, index) => (o.x != null && o.y != null ? { o, index } : null))
-      .filter(Boolean)
-      .map(({ o, index }) => {
-        const px = geom.roomX + o.x * geom.roomW;
-        const py = geom.roomY + o.y * geom.roomH;
-        const color = featureColor(o.type || "pillar");
-        return (
-          <g key={`obstruction-${index}`}>
-            <rect x={px - 6} y={py - 6} width="12" height="12" fill={color.fill} stroke={color.border} strokeWidth="1.5" rx="2" />
-            <text x={px} y={py - 12} className="fp-label fp-label-caps" textAnchor="middle">
-              {letters.obstructions[index]} &middot; {o.type || "obstruction"}
-            </text>
-            <rect
-              x={px - 14} y={py - 14} width="28" height="28"
-              className="fp-hit"
-              onPointerUp={
-                readOnly
-                  ? undefined
-                  : (e) => {
-                      e.stopPropagation();
-                      onTapObstruction(index);
-                    }
-              }
-            />
-          </g>
-        );
-      });
+    return features.obstructions.map((o) => {
+      const { px, py } = obstructionPx(o);
+      return (
+        <g key={`obstruction-${o.index}`}>
+          <rect x={px - 7} y={py - 7} width="14" height="14" fill={o.color} stroke="#fff" strokeWidth="1.5" rx="2" />
+          <rect
+            x={px - 15} y={py - 15} width="30" height="30"
+            className="fp-hit"
+            onPointerUp={
+              readOnly
+                ? undefined
+                : (e) => {
+                    e.stopPropagation();
+                    onTapObstruction(o.index);
+                  }
+            }
+          />
+        </g>
+      );
+    });
+  }
+
+  /** Where every feature label goes: horizontal capitals just outside the
+   * wall, centred on the feature's segment. Far/near labels that would run
+   * into each other step out a row; side-wall labels wrap into short lines
+   * and slide along the wall instead. Returns boxes too, so the wall names
+   * can keep clear of them. */
+  function featureLabelLayout() {
+    const { roomX, roomY, roomW, roomH, planW } = geom;
+    const out = [];
+
+    ["far", "near"].forEach((wall) => {
+      const rowsRight = []; // right edge of the last label in each row
+      [...features.walls[wall]]
+        .sort((p, q) => p.span[0] - q.span[0])
+        .forEach((group) => {
+          const width = group.label.length * FEATURE_LABEL_CHAR_PX;
+          const mid = roomX + ((group.span[0] + group.span[1]) / 2) * roomW;
+          const x = Math.min(Math.max(mid, width / 2 + 4), planW - width / 2 - 4);
+          let row = 0;
+          while (rowsRight[row] != null && x - width / 2 < rowsRight[row] + 6) row += 1;
+          rowsRight[row] = x + width / 2;
+          const y = wall === "far" ? roomY - 14 - row * FEATURE_LABEL_LINE_PX : roomY + roomH + 14 + row * FEATURE_LABEL_LINE_PX;
+          out.push({ key: `${wall}-${group.indices[0]}`, wall, color: group.color, lines: [group.label], x, y, anchor: "middle", x0: x - width / 2, x1: x + width / 2, y0: y - 7, y1: y + 7 });
+        });
+    });
+
+    ["left", "right"].forEach((wall) => {
+      let lastBottom = -Infinity;
+      [...features.walls[wall]]
+        .sort((p, q) => p.span[0] - q.span[0])
+        .forEach((group) => {
+          const lines = labelLines(group.label);
+          const height = lines.length * FEATURE_LABEL_LINE_PX;
+          const mid = roomY + ((group.span[0] + group.span[1]) / 2) * roomH;
+          const y = Math.max(mid, lastBottom + 4 + height / 2); // centre of the block of lines
+          lastBottom = y + height / 2;
+          const width = Math.max(...lines.map((l) => l.length)) * FEATURE_LABEL_CHAR_PX;
+          const x = wall === "left" ? roomX - 9 : roomX + roomW + 9;
+          out.push({
+            key: `${wall}-${group.indices[0]}`, wall, color: group.color, lines, x, y,
+            anchor: wall === "left" ? "end" : "start",
+            x0: wall === "left" ? x - width : x, x1: wall === "left" ? x : x + width, y0: y - height / 2, y1: y + height / 2,
+          });
+        });
+    });
+
+    features.obstructions.forEach((o) => {
+      const { px, py } = obstructionPx(o);
+      const width = o.label.length * FEATURE_LABEL_CHAR_PX;
+      const x = Math.min(Math.max(px, width / 2 + 4), planW - width / 2 - 4);
+      const y = py < roomY + 30 ? py + 19 : py - 17; // below it when it hugs the far wall
+      out.push({ key: `obstruction-${o.index}`, wall: null, color: o.color, lines: [o.label], x, y, anchor: "middle", x0: x - width / 2, x1: x + width / 2, y0: y - 7, y1: y + 7 });
+    });
+    return out;
+  }
+
+  function renderFeatureLabels(labels) {
+    return labels.map((l) => (
+      <text key={l.key} x={l.x} y={l.y} className="fp-feature-label" textAnchor={l.anchor} dominantBaseline="central" fill={l.color}>
+        {l.lines.map((line, i) => (
+          <tspan key={i} x={l.x} dy={i === 0 ? `${(-(l.lines.length - 1) * FEATURE_LABEL_LINE_PX) / 2}px` : `${FEATURE_LABEL_LINE_PX}px`}>
+            {line}
+          </tspan>
+        ))}
+      </text>
+    ));
   }
 
   function renderCamera() {
@@ -445,18 +379,13 @@ export function FloorPlan({
 
   function blockOverlapWarning(block) {
     for (const rect of placementRects(block.shape, block.placement)) {
-      for (const obstruction of layout?.obstructions || []) {
-        if (obstruction.x == null) continue;
+      for (const obstruction of features.obstructions) {
         const footprint = { x: obstruction.x - 0.02, y: obstruction.y - 0.02, w: 0.04, h: 0.04 };
         if (rectsOverlap(rect, footprint)) return "an obstruction";
       }
       for (const wall of WALLS) {
-        const wallData = layout?.[WALL_KEY[wall]];
-        for (const feature of wallData?.features || []) {
-          if (!feature.blocks_furniture) continue;
-          const span = featureSpan(feature.position, feature.size);
-          if (!span) continue;
-          if (rectsOverlap(rect, featureFootprint(wall, span))) return `the ${feature.type}`;
+        for (const group of features.walls[wall]) {
+          if (group.blocksFurniture && rectsOverlap(rect, featureFootprint(wall, group.span))) return `the ${group.type}`;
         }
       }
     }
@@ -661,7 +590,6 @@ export function FloorPlan({
       <>
         <g transform={frameCss(frame)}>{group}</g>
         {names}
-        {numberBadge(block, drawing.bbox)}
       </>
     );
   }
@@ -715,8 +643,14 @@ export function FloorPlan({
     );
   }
 
+  /** Sofas and chairs are drawn as figures with a number badge; tables and
+   * beds carry their number in the middle instead. */
+  function isFigure(block) {
+    return ARM_SHAPES.has(block.shape) || isStraightSofa(block) || isChair(block);
+  }
+
   function renderBlock(block, drawing) {
-    const figure = ARM_SHAPES.has(block.shape) || isStraightSofa(block) || isChair(block);
+    const figure = isFigure(block);
     let body;
     if (figure) {
       body = renderFigure(block, drawing);
@@ -753,49 +687,41 @@ export function FloorPlan({
     );
   }
 
-  /** "FAR WALL" etc. in the wall's own colour, sitting in the label margin
-   * at a spot that keeps clear of that wall's feature labels. Side walls
-   * read vertically; the near wall's name sits beside the camera. */
-  function renderWallName(wall) {
+  /** "FAR WALL" etc. in the wall's own colour, on the outer edge of the
+   * margin so it can never run into a feature label: the far wall's name
+   * sits above the label rows, side-wall names read vertically along the
+   * plan's edge at a height no label occupies, and the near wall's name
+   * sits beside the camera, below the near-wall labels. */
+  function renderWallName(wall, labels) {
     const color = WALL_COLORS[wall];
     const text = WALL_NAMES[wall];
-    const { roomX, roomY, roomW, roomH } = geom;
+    const { roomX, roomY, roomW, roomH, planW } = geom;
     const common = { className: "fp-wall-name", fill: color, textAnchor: "middle", dominantBaseline: "central" };
 
     if (wall === "near") {
-      const camX = roomX + cameraXFraction(layout?.camera_position) * roomW;
-      const toRight = camX < roomX + roomW * 0.65;
+      const cam = cameraGeometry(layout?.camera_position, geom);
+      const toRight = cam.cx < roomX + roomW * 0.65;
       return (
-        <text key={wall} {...common} textAnchor={toRight ? "start" : "end"} x={camX + (toRight ? 24 : -24)} y={roomY + roomH + 24}>
+        <text key={wall} {...common} textAnchor={toRight ? "start" : "end"} x={cam.cx + (toRight ? 26 : -26)} y={cam.cy}>
           {text}
         </text>
       );
     }
 
-    // along-the-wall pixel centres of the existing feature labels, so the
-    // wall name can take the first free slot
-    const isFarWall = wall === "far";
-    const along = isFarWall ? roomW : roomH;
-    const origin = isFarWall ? roomX : roomY;
-    const nameLen = text.length * WALL_NAME_CHAR_PX;
-    const groups = mergeAdjacentFeatures(layout?.[WALL_KEY[wall]]?.features || []);
-    const rows = assignLabelRows(groups, geom, wall);
-    const taken = groups.map((group, i) => {
-      const mid = origin + ((group.span[0] + group.span[1]) / 2) * along + (isFarWall ? 0 : rows[i] * 12);
-      return { mid, half: ((featureLabel(group).length + 4) * 5.4) / 2 + 6 };
-    });
-    const free = (centre) => taken.every((t) => Math.abs(centre - t.mid) > t.half + nameLen / 2);
-    const candidates = [0.5, 0.3, 0.7, 0.15, 0.85].map((t) => origin + Math.min(Math.max(t * along, nameLen / 2 + 4), along - nameLen / 2 - 4));
+    if (wall === "far") {
+      return (
+        <text key={wall} {...common} x={roomX + roomW / 2} y={11}>
+          {text}
+        </text>
+      );
+    }
+
+    const half = (text.length * WALL_NAME_CHAR_PX) / 2;
+    const taken = labels.filter((l) => l.wall === wall);
+    const free = (centre) => taken.every((l) => centre + half + 6 < l.y0 || centre - half - 6 > l.y1);
+    const candidates = [0.5, 0.3, 0.7, 0.2, 0.8].map((t) => roomY + Math.min(Math.max(t * roomH, half + 4), roomH - half - 4));
     const centre = candidates.find(free) ?? candidates[0];
-
-    if (isFarWall) {
-      return (
-        <text key={wall} {...common} x={centre} y={roomY - 12}>
-          {text}
-        </text>
-      );
-    }
-    const x = wall === "left" ? roomX - 12 : roomX + roomW + 12;
+    const x = wall === "left" ? 10 : planW - 10;
     return (
       <text key={wall} {...common} transform={`translate(${x} ${centre}) rotate(${wall === "left" ? -90 : 90})`}>
         {text}
@@ -866,69 +792,78 @@ export function FloorPlan({
     );
   }
 
-  const legendTypes = presentFeatureTypes(layout);
+  const labels = featureLabelLayout();
+  const placed = blocks.filter((b) => b.placement).map((block) => ({ block, drawing: blockDrawing(block) }));
+  const selected = readOnly ? null : placed.find(({ block }) => block.key === selectedKey) || null;
 
   return (
     <>
       <svg
-        ref={svgRef}
+        ref={(node) => {
+          svgRef.current = node;
+          if (onSvg) onSvg(node);
+        }}
         viewBox={`0 0 ${geom.planW} ${geom.planH}`}
         className="floor-plan-svg"
         style={{ aspectRatio: `${geom.planW} / ${geom.planH}` }}
         onPointerUp={readOnly ? undefined : handleBackgroundPointerUp}
       >
         <rect x={geom.roomX} y={geom.roomY} width={geom.roomW} height={geom.roomH} className="fp-floor" />
+        {WALLS.map((wall) => {
+          const line = wallLine(wall, geom);
+          return <line key={wall} x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2} className="fp-wall" style={wallStyle(wall)} />;
+        })}
+        {renderCamera()}
+
+        {placed.map(({ block, drawing }) => {
+          const warning = blockOverlapWarning(block);
+          return (
+            <g key={block.key} className="fp-block" opacity={pendingKey && block.key !== selectedKey ? 0.55 : 1}>
+              {renderBlock(block, drawing)}
+              {warning ? (
+                <>
+                  {placementRects(block.shape, block.placement).map((rect, i) => {
+                    const { X, Y, W, H } = pxRect(rect);
+                    return <rect key={i} x={X - 2} y={Y - 2} width={W + 4} height={H + 4} className="fp-warning-outline" />;
+                  })}
+                  <text x={drawing.bbox.x0} y={drawing.bbox.y0 - 6} className="fp-warning-label">
+                    Overlaps {warning}
+                  </text>
+                </>
+              ) : null}
+            </g>
+          );
+        })}
+
+        {/* Features, names, labels and piece numbers go on top of the furniture,
+           so a block can never cover one; the selected piece's handles go on
+           top of those. */}
         {WALLS.map((wall) => (
           <g key={wall}>{renderWallFeatures(wall)}</g>
         ))}
-        {WALLS.map((wall) => renderWallName(wall))}
         {renderObstructions()}
-        {renderCamera()}
+        <g pointerEvents="none">
+          {WALLS.map((wall) => renderWallName(wall, labels))}
+          {renderFeatureLabels(labels)}
+          {placed.map(({ block, drawing }) => (isFigure(block) ? <g key={block.key}>{numberBadge(block, drawing.bbox)}</g> : null))}
+        </g>
 
-        {blocks
-          .filter((b) => b.placement)
-          .map((block) => {
-            const selected = block.key === selectedKey;
-            const warning = blockOverlapWarning(block);
-            const drawing = blockDrawing(block);
-            return (
-              <g key={block.key} opacity={pendingKey && !selected ? 0.55 : 1}>
-                {renderBlock(block, drawing)}
-                {warning ? (
-                  <>
-                    {placementRects(block.shape, block.placement).map((rect, i) => {
-                      const { X, Y, W, H } = pxRect(rect);
-                      return <rect key={i} x={X - 2} y={Y - 2} width={W + 4} height={H + 4} className="fp-warning-outline" />;
-                    })}
-                    <text x={drawing.bbox.x0} y={drawing.bbox.y0 - 6} className="fp-warning-label">
-                      Overlaps {warning}
-                    </text>
-                  </>
-                ) : null}
-                {selected ? (
-                  <rect
-                    x={drawing.bbox.x0 - 6} y={drawing.bbox.y0 - 6}
-                    width={drawing.bbox.x1 - drawing.bbox.x0 + 12} height={drawing.bbox.y1 - drawing.bbox.y0 + 12}
-                    fill="none" stroke={block.color} strokeWidth="1.5" strokeDasharray="4 3" rx="6"
-                    pointerEvents="none"
-                  />
-                ) : null}
-                {!readOnly && selected ? renderResizeHandles(block, drawing) : null}
-                {!readOnly && selected && block.placement ? renderRotateHandle(block, drawing) : null}
-              </g>
-            );
-          })}
+        {/* Selection outline and handles are editing aids only — left out of
+           the exported plan image (see exportPlanPng). */}
+        {selected ? (
+          <g data-noexport="true">
+            <rect
+              x={selected.drawing.bbox.x0 - 6} y={selected.drawing.bbox.y0 - 6}
+              width={selected.drawing.bbox.x1 - selected.drawing.bbox.x0 + 12} height={selected.drawing.bbox.y1 - selected.drawing.bbox.y0 + 12}
+              fill="none" stroke={selected.block.color} strokeWidth="1.5" strokeDasharray="4 3" rx="6"
+              pointerEvents="none"
+            />
+            {renderResizeHandles(selected.block, selected.drawing)}
+            {renderRotateHandle(selected.block, selected.drawing)}
+          </g>
+        ) : null}
       </svg>
       <div className="fp-legend">
-        {legendTypes.map((t) => {
-          const color = featureColor(t);
-          return (
-            <span className="fp-legend-item" key={t}>
-              <span className="fp-legend-swatch" style={{ background: color.fill, borderColor: color.border }} />
-              {t}
-            </span>
-          );
-        })}
         <span className="fp-legend-item">Backrest = back of the sofa</span>
         <span className="fp-legend-item">
           <span className="fp-legend-dot" /> Blue dots = drag to resize

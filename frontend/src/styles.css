@@ -329,15 +329,14 @@ h2 { font-size: 19px; }
 }
 .fp-floor { fill: var(--page); }
 .fp-wall { stroke: var(--ink); stroke-width: 2; stroke-linecap: square; }
-.fp-dashed { stroke-dasharray: 5 5; }
-.fp-window { stroke: var(--ink); stroke-width: 1.2; }
-.fp-door-arc { stroke: var(--ink2); stroke-width: 1.2; fill: none; stroke-dasharray: 3 3; }
-.fp-band { stroke: var(--ink2); stroke-width: 1.2; stroke-dasharray: 4 3; }
-.fp-pillar { fill: var(--ink2); }
-.fp-unsure { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; rx: 3; }
+.fp-feature-case { stroke: #fff; stroke-width: 13; stroke-linecap: butt; }
+.fp-feature-seg { stroke-width: 9; stroke-linecap: butt; }
+.fp-feature-unsure { stroke-dasharray: 7 5; }
+.fp-feature-label {
+  font-family: var(--sans); font-size: 13.5px; font-weight: 800; letter-spacing: 0.02em;
+  paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round;
+}
 .fp-label { font-family: var(--mono); font-size: 9px; fill: var(--ink2); }
-.fp-label-caps { text-transform: lowercase; font-variant-caps: small-caps; font-weight: 700; }
-.fp-leader { stroke: var(--muted); stroke-width: 0.5; stroke-dasharray: 3 2; }
 .fp-hit { fill: transparent; cursor: pointer; }
 .fp-camera circle { fill: #fff; stroke: var(--ink2); stroke-width: 1.5; }
 .fp-camera-fan { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 3 3; }
@@ -368,7 +367,6 @@ h2 { font-size: 19px; }
 }
 .fp-legend-item { display: inline-flex; align-items: center; gap: 5px; text-transform: lowercase; }
 .fp-legend-item:first-letter { text-transform: uppercase; }
-.fp-legend-swatch { width: 10px; height: 10px; border-radius: 3px; border: 1.5px solid; display: inline-block; flex-shrink: 0; }
 .fp-legend-dot { width: 9px; height: 9px; border-radius: 50%; background: #fff; border: 2px solid #2563EB; display: inline-block; flex-shrink: 0; }
 .chip-placed { position: relative; }
 .chip-placed::after {
@@ -851,7 +849,8 @@ h2 { font-size: 19px; }
 .place-plan { position: relative; min-width: 0; }
 .place-side { min-width: 0; margin-top: 14px; }
 .place-thumb {
-  position: absolute; right: 8px; bottom: 8px; width: 72px; height: 54px; padding: 0; overflow: hidden;
+  /* top-left, level with the Full screen button — clear of the plan and its labels */
+  position: absolute; left: 0; top: 0; width: 58px; height: 44px; padding: 0; overflow: hidden;
   border: 2px solid #fff; border-radius: 8px; background: var(--line); box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
 .place-thumb img { width: 100%; height: 100%; object-fit: cover; }

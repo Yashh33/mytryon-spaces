@@ -23,37 +23,30 @@ export const BLOCK_DEPTH_RATIO = 0.35; // depth as a fraction of length, fixed p
 export const WALL_SNAP_TOLERANCE = 0.04;
 export const WALL_TOLERANCE = 0.06; // matches the backend resolver's "against a wall" threshold
 
-// The room rectangle fills ~70% of the plan's area, leaving a margin all
-// round (outside the room) for wall-feature labels, their leader lines and
-// the camera marker. Room area fraction = (1 - 2*ROOM_MARGIN_FRACTION)^2.
-export const ROOM_MARGIN_FRACTION = 0.083;
+// The plan canvas is larger than the room: fixed margins outside the walls
+// hold the wall names, the feature labels (DOOR, WINDOW 2, ...) and, below
+// the near wall, the camera marker. Fixed in plan pixels so a label fits
+// whatever the room's aspect.
 const PLAN_BASE_SIZE = 400;
-// A dedicated band below the near-wall label margin, just for the camera
-// marker and its "Camera" label — fixed in pixels so it fits regardless of
-// the room's aspect (a proportional margin can be too thin in portrait).
-const CAMERA_BAND = 36;
+const PLAN_MARGIN_SIDE = 84;
+const PLAN_MARGIN_TOP = 56;
+const PLAN_MARGIN_BOTTOM = 64;
 
 /** Plan-space geometry for a room of the given aspect: where the room
  * rectangle sits (roomX/roomY/roomW/roomH) inside the full plan canvas
- * (planW/planH), which is larger than the room to leave a label margin
- * (plus, at the bottom, the camera band). */
+ * (planW/planH). */
 export function planGeometry(depthVsWidth) {
   const [aw, ah] = roomAspect(depthVsWidth);
   const scale = PLAN_BASE_SIZE / Math.max(aw, ah);
   const roomW = aw * scale;
   const roomH = ah * scale;
-  const f = ROOM_MARGIN_FRACTION;
-  const marginX = (roomW * f) / (1 - 2 * f);
-  const marginY = (roomH * f) / (1 - 2 * f);
   return {
-    roomX: marginX,
-    roomY: marginY,
+    roomX: PLAN_MARGIN_SIDE,
+    roomY: PLAN_MARGIN_TOP,
     roomW,
     roomH,
-    marginX,
-    marginY,
-    planW: roomW + marginX * 2,
-    planH: roomH + marginY * 2 + CAMERA_BAND,
+    planW: roomW + PLAN_MARGIN_SIDE * 2,
+    planH: roomH + PLAN_MARGIN_TOP + PLAN_MARGIN_BOTTOM,
   };
 }
 
@@ -65,68 +58,21 @@ export function cameraXFraction(cameraPosition) {
   return 0.5;
 }
 
-/** Camera marker geometry: a circle just below the near wall, two short
- * dashed lines fanning up into the room to show the view direction, and
- * where its "Camera" label sits — all within CAMERA_BAND. */
+/** Camera marker geometry: a circle below the near wall (leaving a row for
+ * near-wall feature labels between), two dashed lines fanning up to the
+ * wall to show the view direction, and where its "Camera" label sits. */
 export function cameraGeometry(cameraPosition, geom) {
   const cx = geom.roomX + cameraXFraction(cameraPosition) * geom.roomW;
   const wallY = geom.roomY + geom.roomH;
-  const cy = wallY + 16;
+  const cy = wallY + 34;
   return {
     cx,
     cy,
     r: 6,
-    fanLeft: { x: cx - 14, y: wallY },
-    fanRight: { x: cx + 14, y: wallY },
-    labelY: cy + 16,
+    fanLeft: { x: cx - 16, y: wallY },
+    fanRight: { x: cx + 16, y: wallY },
+    labelY: cy + 18,
   };
-}
-
-// Label placement for merged wall-feature groups (see mergeAdjacentFeatures):
-// far/near labels sit above/below the room, side-wall labels sit outside
-// that wall, right-aligned on the left and left-aligned on the right.
-// Collisions (labels landing too close together) push the later one an
-// extra "row" further out — see assignLabelRows.
-const LABEL_BASE_OFFSET = 14;
-const LABEL_ROW_STEP = 12;
-const MIN_LABEL_GAP = 70; // px, along the wall's length axis
-
-/** Assigns each group (in wall order) a collision row: 0 normally, 1+ when
- * its label would otherwise land within MIN_LABEL_GAP of another group's,
- * so the later one stacks further from the wall instead of overlapping. */
-export function assignLabelRows(groups, geom, wall) {
-  const isFarNear = wall === "far" || wall === "near";
-  const mids = groups.map(({ span }) => {
-    const t = (span[0] + span[1]) / 2;
-    return isFarNear ? geom.roomX + t * geom.roomW : geom.roomY + t * geom.roomH;
-  });
-  const order = mids.map((_, i) => i).sort((a, b) => mids[a] - mids[b]);
-  const rowLastMid = [];
-  const rows = new Array(groups.length);
-  order.forEach((i) => {
-    let row = 0;
-    while (rowLastMid[row] != null && mids[i] - rowLastMid[row] < MIN_LABEL_GAP) row += 1;
-    rowLastMid[row] = mids[i];
-    rows[i] = row;
-  });
-  return rows;
-}
-
-/** Where a merged group's label and its text-anchor go, outside the room
- * rectangle on the wall's own side. */
-export function labelPosition(wall, span, row, geom) {
-  const mid = (span[0] + span[1]) / 2;
-  const { roomX, roomY, roomW, roomH } = geom;
-  if (wall === "far") {
-    return { x: roomX + mid * roomW, y: roomY - LABEL_BASE_OFFSET - row * LABEL_ROW_STEP, anchor: "middle" };
-  }
-  if (wall === "near") {
-    return { x: roomX + mid * roomW, y: roomY + roomH + LABEL_BASE_OFFSET + row * LABEL_ROW_STEP, anchor: "middle" };
-  }
-  if (wall === "left") {
-    return { x: roomX - LABEL_BASE_OFFSET, y: roomY + mid * roomH + row * LABEL_ROW_STEP, anchor: "end" };
-  }
-  return { x: roomX + roomW + LABEL_BASE_OFFSET, y: roomY + mid * roomH + row * LABEL_ROW_STEP, anchor: "start" }; // right
 }
 
 export const THIRD_BOUNDS = [
@@ -134,28 +80,14 @@ export const THIRD_BOUNDS = [
   [1 / 3, 2 / 3],
   [2 / 3, 1],
 ];
-export const POSITION_THIRD_INDEX = {
-  "left third": 0, centre: 1, "right third": 2,
-  "far third": 0, "middle third": 1, "near third": 2,
-};
 export const FAR_NEAR_POSITIONS = ["left third", "centre", "right third"];
 export const SIDE_POSITIONS = ["far third", "middle third", "near third"];
 export const SIZE_FILL = { small: 0.4, medium: 0.7, large: 1.0 };
 
 export const WALL_KEY = { far: "far_wall", left: "left_wall", right: "right_wall", near: "near_wall" };
+export const WALL_ORDER = ["far", "left", "right", "near"];
 export const ROTATION_FOR_WALL = { far: 0, left: 90, near: 180, right: 270 };
 export const WALL_FOR_ROTATION = { 0: "far", 90: "left", 180: "near", 270: "right" };
-
-// Feature types that create a gap in the wall line rather than sitting on
-// its solid face.
-export const GAP_TYPES = new Set(["door", "doorway", "opening", "balcony door", "glazed opening", "window", "unknown"]);
-export const DOUBLE_DASHED_GAP_TYPES = new Set(["glazed opening"]);
-export const DASHED_GAP_TYPES = new Set(["balcony door"]);
-export const WINDOW_TYPES = new Set(["window"]);
-export const ARC_TYPES = new Set(["door", "doorway"]);
-export const UNKNOWN_TYPES = new Set(["unknown"]);
-export const BAND_TYPES = new Set(["recess", "built-in"]);
-export const POINT_TYPES = new Set(["pillar", "column"]);
 
 // Feature types a salesman can add via "Add feature" (obstructions —
 // pillar/column — are added separately, via "Add obstruction").
@@ -163,24 +95,40 @@ export const ADDABLE_FEATURE_TYPES = [
   "window", "door", "doorway", "opening", "balcony door", "glazed opening", "built-in", "recess", "step", "other",
 ];
 
-// Fill/border colour for each wall-feature (and obstruction) type, for the
-// 2D floor-plan style. Anything not listed falls back to the neutral
-// recess/step/unknown/other pair. Drawing-only.
-export const FEATURE_COLORS = {
-  window: { fill: "#DBEAFE", border: "#2563EB" },
-  door: { fill: "#8B5A2B", border: "#6B4420" },
-  doorway: { fill: "#8B5A2B", border: "#6B4420" },
-  "balcony door": { fill: "#8B5A2B", border: "#6B4420" },
-  opening: { fill: "#ECEAE6", border: "#6B665F" },
-  "glazed opening": { fill: "#DBEAFE", border: "#2563EB" },
-  pillar: { fill: "#B42318", border: "#7A1710" },
-  column: { fill: "#B42318", border: "#7A1710" },
-  panelling: { fill: "#EDE4FF", border: "#7C3AED" },
+// Every wall feature is drawn the same way: a coloured segment on the wall
+// plus a capital label outside it. FEATURE_KIND maps a layout type to that
+// label; doorway and door both read DOOR, an unknown feature reads OPENING?.
+export const FEATURE_KIND = {
+  door: "DOOR",
+  doorway: "DOOR",
+  "balcony door": "BALCONY DOOR",
+  window: "WINDOW",
+  "glazed opening": "WINDOW",
+  opening: "OPENING",
+  unknown: "OPENING",
+  step: "STEP",
+  recess: "RECESS",
+  "built-in": "BUILT-IN",
+  pillar: "PILLAR",
+  column: "PILLAR",
 };
-export const DEFAULT_FEATURE_COLOR = { fill: "#ECEAE6", border: "#6B665F" };
+// Chosen to stand apart from the wall colours (blue far, purple left, green
+// right) the segments sit on.
+export const KIND_COLOR = {
+  DOOR: "#B45309",
+  "BALCONY DOOR": "#B45309",
+  WINDOW: "#0891B2",
+  OPENING: "#BE185D",
+  PILLAR: "#B42318",
+};
+export const DEFAULT_KIND_COLOR = "#57534E";
 
-export function featureColor(type) {
-  return FEATURE_COLORS[type] || DEFAULT_FEATURE_COLOR;
+export function featureKind(type) {
+  return FEATURE_KIND[type] || String(type || "feature").toUpperCase();
+}
+
+export function kindColor(kind) {
+  return KIND_COLOR[kind] || DEFAULT_KIND_COLOR;
 }
 
 // Whether a feature type physically blocks furniture from standing in
@@ -203,54 +151,146 @@ export function roomAspect(depthVsWidth) {
   return ROOM_ASPECT[depthVsWidth] || ROOM_ASPECT["about square"];
 }
 
-/** Normalised [start, end] span of a wall feature, centred within its third. */
-export function featureSpan(position, size) {
-  const idx = POSITION_THIRD_INDEX[position];
-  if (idx == null) return null;
-  const [lo, hi] = THIRD_BOUNDS[idx];
-  const thirdWidth = hi - lo;
-  const fill = SIZE_FILL[size] || SIZE_FILL.medium;
-  const span = thirdWidth * fill;
-  const start = lo + (thirdWidth - span) / 2;
-  return [round4(start), round4(start + span)];
+/** The thirds of `wall` a feature covers, as sorted indices. Tolerant of the
+ * vision model's free-text positions ("centre, extending into the right
+ * third") — mirrors _feature_thirds in the backend. */
+export function featureThirds(position, wall) {
+  const text = String(position || "").toLowerCase();
+  const words =
+    wall === "far" || wall === "near"
+      ? [/\bleft\b/, /\b(centre|center|middle)\b/, /\bright\b/]
+      : [/\bfar\b/, /\b(centre|center|middle)\b/, /\bnear\b/];
+  if (/\b(full|whole|entire)\b/.test(text)) return [0, 1, 2];
+  const found = words.map((re, i) => (re.test(text) ? i : null)).filter((i) => i != null);
+  if (!found.length) return [];
+  const out = [];
+  for (let i = Math.min(...found); i <= Math.max(...found); i += 1) out.push(i);
+  return out;
+}
+
+/** Normalised [start, end] span of a wall feature along its wall: centred
+ * in its third and scaled by size, or running across every third it names. */
+export function featureSpan(position, size, wall) {
+  const thirds = featureThirds(position, wall);
+  if (!thirds.length) return null;
+  const lo = THIRD_BOUNDS[thirds[0]][0];
+  const hi = THIRD_BOUNDS[thirds[thirds.length - 1]][1];
+  const pad = ((1 / 3) * (1 - (SIZE_FILL[size] || SIZE_FILL.medium))) / 2;
+  return [round4(lo + pad), round4(hi - pad)];
 }
 
 /** Groups a wall's features into render-ready groups, merging runs of
- * consecutive-third features of the same type into one wider span (e.g.
- * three "unknown" features across left/centre/right thirds become one band
- * across the whole wall) instead of drawing three overlapping symbols.
- * Each group carries the original `indices` it was built from, so deleting
- * a merged band can remove every feature it represents. */
-export function mergeAdjacentFeatures(features) {
-  const withSlots = features
-    .map((feature, index) => ({ feature, index, slot: POSITION_THIRD_INDEX[feature.position] }))
-    .filter((f) => f.slot != null)
-    .sort((a, b) => a.slot - b.slot);
+ * touching features of the same type into one wider span instead of drawing
+ * several overlapping segments. Each group carries the original `indices`
+ * it was built from, so removing a merged segment removes all of them. */
+export function mergeAdjacentFeatures(features, wall) {
+  const entries = features
+    .map((feature, index) => ({ feature, index, thirds: featureThirds(feature.position, wall) }))
+    .filter((e) => e.thirds.length)
+    .sort((a, b) => a.thirds[0] - b.thirds[0]);
 
   const groups = [];
-  withSlots.forEach((entry) => {
+  entries.forEach((entry) => {
     const prev = groups[groups.length - 1];
-    if (prev && prev.type === entry.feature.type && entry.slot === prev.lastSlot + 1) {
+    if (prev && prev.type === entry.feature.type && entry.thirds[0] <= prev.lastSlot + 1) {
       prev.members.push(entry);
-      prev.lastSlot = entry.slot;
+      prev.lastSlot = Math.max(prev.lastSlot, entry.thirds[entry.thirds.length - 1]);
     } else {
-      groups.push({ type: entry.feature.type, members: [entry], lastSlot: entry.slot });
+      groups.push({ type: entry.feature.type, members: [entry], lastSlot: entry.thirds[entry.thirds.length - 1] });
     }
   });
 
   return groups.map((group) => {
-    const spans = group.members.map((m) => featureSpan(m.feature.position, m.feature.size)).filter(Boolean);
-    const start = Math.min(...spans.map((s) => s[0]));
-    const end = Math.max(...spans.map((s) => s[1]));
-    const primary = group.members[0].feature;
+    const spans = group.members.map((m) => featureSpan(m.feature.position, m.feature.size, wall));
     return {
       type: group.type,
-      notes: primary.notes,
-      span: [start, end],
+      notes: group.members[0].feature.notes,
+      span: [Math.min(...spans.map((s) => s[0])), Math.max(...spans.map((s) => s[1]))],
+      positions: group.members.map((m) => m.feature.position),
       blocksFurniture: group.members.some((m) => m.feature.blocks_furniture),
       indices: group.members.map((m) => m.index),
     };
   });
+}
+
+/** Where an obstruction stands, normalised: its own x/y when the salesman
+ * placed it on the plan, otherwise a rough spot read from the vision
+ * model's text location ("At the far-right end of the room"). Null when the
+ * text names no part of the room. */
+export function obstructionPoint(obstruction) {
+  if (obstruction.x != null && obstruction.y != null) return { x: obstruction.x, y: obstruction.y };
+  const text = String(obstruction.location || "").toLowerCase();
+  const side = /\bleft\b/.test(text) ? 0.07 : /\bright\b/.test(text) ? 0.93 : null;
+  const depth = /\bfar\b/.test(text) ? 0.07 : /\bnear\b/.test(text) ? 0.93 : null;
+  if (side == null && depth == null && !/\b(centre|center|middle)\b/.test(text)) return null;
+  return { x: side ?? 0.5, y: depth ?? 0.5 };
+}
+
+/** Everything the plan draws for the room's fixed features, with the label
+ * each one carries. Kinds that occur more than once are numbered across the
+ * whole room, left to right then far to near (DOOR 1, DOOR 2); a feature on
+ * a partly-seen wall, or of unknown type, is `uncertain` and its label ends
+ * in "?". Returns { walls: { far: [group…], … }, obstructions: [{ index, x, y, … }] }
+ * — the photo's feature list reads the same labels, so a name always means
+ * the same thing in both places. */
+export function planFeatures(layout) {
+  const walls = {};
+  const all = [];
+
+  WALL_ORDER.forEach((wall) => {
+    const wallData = layout?.[WALL_KEY[wall]];
+    const partial = wallData?.confidence === "partial";
+    walls[wall] = mergeAdjacentFeatures(wallData?.features || [], wall).map((group) => {
+      const mid = (group.span[0] + group.span[1]) / 2;
+      const at = { far: [mid, 0], near: [mid, 1], left: [0, mid], right: [1, mid] }[wall];
+      const entry = {
+        ...group,
+        wall,
+        kind: featureKind(group.type),
+        uncertain: partial || group.type === "unknown",
+        sortX: at[0],
+        sortY: at[1],
+      };
+      all.push(entry);
+      return entry;
+    });
+  });
+
+  const obstructions = [];
+  (layout?.obstructions || []).forEach((o, index) => {
+    const point = obstructionPoint(o);
+    if (!point) return; // nothing says where it is, so the plan can't draw it
+    const entry = { index, ...point, type: o.type, location: o.location, kind: featureKind(o.type || "pillar"), uncertain: false, sortX: point.x, sortY: point.y };
+    obstructions.push(entry);
+    all.push(entry);
+  });
+
+  const counts = {};
+  all.forEach((e) => {
+    counts[e.kind] = (counts[e.kind] || 0) + 1;
+  });
+  const seen = {};
+  [...all]
+    .sort((a, b) => Math.round(a.sortX * 50) - Math.round(b.sortX * 50) || a.sortY - b.sortY)
+    .forEach((e) => {
+      seen[e.kind] = (seen[e.kind] || 0) + 1;
+      e.color = kindColor(e.kind);
+      e.label = e.kind + (counts[e.kind] > 1 ? ` ${seen[e.kind]}` : "") + (e.uncertain ? "?" : "");
+    });
+
+  return { walls, obstructions };
+}
+
+/** Breaks a label into short lines for the narrow side margins:
+ * "BALCONY DOOR 2" -> ["BALCONY", "DOOR 2"]. */
+export function labelLines(label, maxChars = 8) {
+  const lines = [];
+  label.split(" ").forEach((word) => {
+    const last = lines[lines.length - 1];
+    if (last != null && `${last} ${word}`.length <= maxChars) lines[lines.length - 1] = `${last} ${word}`;
+    else lines.push(word);
+  });
+  return lines;
 }
 
 /** Builds the flat list of placeable "blocks" from an attempt's items — one

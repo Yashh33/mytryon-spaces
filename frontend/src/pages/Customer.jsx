@@ -83,47 +83,45 @@ export default function Customer() {
         backTo="/"
         crumbs={customer ? [{ label: "Customers", to: "/" }, { label: customer.name }] : undefined}
       />
-      <div className="eyebrow">Customer</div>
-      {customer ? (
-        <h1 style={{ marginBottom: 18 }}>{customer.name}</h1>
-      ) : (
-        <div className="skel skel-line w-60" style={{ height: 28, marginBottom: 18 }} />
-      )}
+      <div className="customer-layout">
+        <div className="customer-head">
+          <div className="eyebrow">Customer</div>
+          {customer ? <h1>{customer.name}</h1> : <div className="skel skel-line w-60" style={{ height: 28 }} />}
+        </div>
 
-      {rooms == null ? (
-        <RoomCardSkeleton />
-      ) : rooms.length ? (
-        rooms.map((r) => (
-          <Link key={r.id} to={`/room/${r.id}`} className="room-card">
-            <img className="thumb" src={r.thumbnail_url} alt="" loading="lazy" />
-            <div className="body">
-              <div className="info">
-                <div className="title">{r.room_type}</div>
-                <div className="sub">
-                  {r.attempt_count} ATTEMPT{r.attempt_count === 1 ? "" : "S"} &middot; {formatShortDate(r.created_at)}
+        <div className="customer-rooms">
+          {rooms == null ? (
+            <RoomCardSkeleton />
+          ) : rooms.length ? (
+            rooms.map((r) => (
+              <Link key={r.id} to={`/room/${r.id}`} className="room-card">
+                <img className="thumb" src={r.thumbnail_url} alt="" loading="lazy" />
+                <div className="body">
+                  <div className="info">
+                    <div className="title">{r.room_type}</div>
+                    <div className="sub">
+                      {r.attempt_count} ATTEMPT{r.attempt_count === 1 ? "" : "S"} &middot; {formatShortDate(r.created_at)}
+                    </div>
+                  </div>
+                  <div className="chevron">&#8250;</div>
                 </div>
-              </div>
-              <div className="chevron">&#8250;</div>
-            </div>
+              </Link>
+            ))
+          ) : (
+            <div className="empty-state">No rooms yet.</div>
+          )}
+
+          <Link to={`/customer/${id}/room/new`} className="dashed-row">
+            + Add a room
           </Link>
-        ))
-      ) : (
-        <div className="empty-state">No rooms yet.</div>
-      )}
+        </div>
 
-      <Link to={`/customer/${id}/room/new`} className="dashed-row" style={{ display: "block" }}>
-        + Add a room
-      </Link>
-
-      <button
-        type="button"
-        className="btn btn-whatsapp"
-        style={{ marginTop: 18 }}
-        disabled={sharing || rooms == null}
-        onClick={handleSendAll}
-      >
-        {sharing ? "Preparing…" : "Send all to WhatsApp"}
-      </button>
+        <div className="customer-actions">
+          <button type="button" className="btn btn-whatsapp" disabled={sharing || rooms == null} onClick={handleSendAll}>
+            {sharing ? "Preparing…" : "Send all to WhatsApp"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

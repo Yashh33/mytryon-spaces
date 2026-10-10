@@ -122,6 +122,8 @@ export default function Result() {
         </div>
       </div>
 
+      <div className="result-layout">
+      <div className="result-main">
       <div className="result-image-wrap" onClick={() => renderUrl && setZoom(true)}>
         <img src={imgUrl} alt="" />
       </div>
@@ -141,6 +143,9 @@ export default function Result() {
         </p>
       )}
 
+      </div>
+
+      <div className="result-side">
       <div className="summary-box">
         <div>
           <span className="mono muted">Look</span>
@@ -180,6 +185,9 @@ export default function Result() {
         >
           {attempt.is_picked ? "★ Picked" : picking ? "Marking…" : "★ Mark as picked"}
         </button>
+      </div>
+
+      </div>
       </div>
 
       {zoom ? (

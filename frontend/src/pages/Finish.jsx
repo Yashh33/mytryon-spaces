@@ -76,30 +76,59 @@ export default function Finish() {
       <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} />
       <h1 style={{ marginBottom: 20 }}>Finishing touches</h1>
 
-      <div className="field">
-        <label>How should the room look?</label>
-        <div className="chips">
-          {ROOM_TREATMENTS.map((o) => (
-            <Chip key={o.value} selected={o.value === roomTreatment} onClick={() => setRoomTreatment(o.value)}>
-              {o.label}
-            </Chip>
-          ))}
+      <div className="finish-layout">
+        <div className="finish-options">
+          <div className="field">
+            <label>How should the room look?</label>
+            <div className="chips">
+              {ROOM_TREATMENTS.map((o) => (
+                <Chip key={o.value} selected={o.value === roomTreatment} onClick={() => setRoomTreatment(o.value)}>
+                  {o.label}
+                </Chip>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <label>Lighting</label>
+            <div className="chips">
+              {LIGHTINGS.map((o) => (
+                <Chip key={o.value} selected={o.value === lighting} onClick={() => setLighting(o.value)}>
+                  {o.label}
+                </Chip>
+              ))}
+            </div>
+          </div>
         </div>
-      </div>
-      <div className="field">
-        <label>Lighting</label>
-        <div className="chips">
-          {LIGHTINGS.map((o) => (
-            <Chip key={o.value} selected={o.value === lighting} onClick={() => setLighting(o.value)}>
-              {o.label}
-            </Chip>
-          ))}
-        </div>
-      </div>
 
-      <button type="button" className="btn btn-primary" style={{ marginTop: 12 }} disabled={starting} onClick={handleGenerate}>
-        {starting ? "Starting…" : "Generate"}
-      </button>
+        <div className="summary-box finish-summary">
+          <div>
+            <span className="mono muted">Room</span>
+            <span className="mono">
+              {attempt.room.customer_name} &middot; {attempt.room.room_type}
+            </span>
+          </div>
+          <div>
+            <span className="mono muted">Look</span>
+            <span className="mono">{ROOM_TREATMENTS.find((o) => o.value === roomTreatment)?.label}</span>
+          </div>
+          <div>
+            <span className="mono muted">Lighting</span>
+            <span className="mono">{LIGHTINGS.find((o) => o.value === lighting)?.label}</span>
+          </div>
+          {attempt.items.map((it) => (
+            <div key={it.id}>
+              <span>
+                {it.category} &middot; {it.type}
+              </span>
+              <span className="mono">{it.width_ft}ft</span>
+            </div>
+          ))}
+        </div>
+
+        <button type="button" className="btn btn-primary finish-btn" style={{ marginTop: 12 }} disabled={starting} onClick={handleGenerate}>
+          {starting ? "Starting…" : "Generate"}
+        </button>
+      </div>
     </div>
   );
 }

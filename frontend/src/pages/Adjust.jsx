@@ -88,11 +88,11 @@ export default function Adjust() {
     }
   }
 
-  if (error) return <div className="screen"><ErrorBlock message={error} onRetry={init} /></div>;
-  if (!draft || sourceNumber == null) return <div className="screen"><Loading label="Preparing a new attempt…" /></div>;
+  if (error) return <div className="screen screen-narrow"><ErrorBlock message={error} onRetry={init} /></div>;
+  if (!draft || sourceNumber == null) return <div className="screen screen-narrow"><Loading label="Preparing a new attempt…" /></div>;
 
   return (
-    <div className="screen">
+    <div className="screen screen-narrow">
       <TopBar
         backTo={`/attempt/${id}/result`}
         crumbs={[

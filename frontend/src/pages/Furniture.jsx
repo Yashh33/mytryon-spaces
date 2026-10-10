@@ -256,6 +256,8 @@ export default function Furniture() {
         </button>
       </div>
 
+      <div className="furn-layout">
+        <div className="furn-items">
       {attempt.items.map((it) => (
         <div key={it.id} className="item-row">
           <img src={it.photo_url} alt="" />
@@ -270,7 +272,9 @@ export default function Furniture() {
           </button>
         </div>
       ))}
-
+        {attempt.items.length === 0 ? <div className="furn-empty">Pieces you add appear here.</div> : null}
+        </div>
+        <div className="furn-card">
       {atMax ? (
         <div className="count-hint">Maximum of {MAX_ITEMS} pieces reached.</div>
       ) : (
@@ -366,16 +370,17 @@ export default function Furniture() {
           )}
         </div>
       )}
-
+        </div>
       <button
         type="button"
-        className="btn btn-primary"
+        className="btn btn-primary furn-next"
         style={{ marginTop: 20 }}
         disabled={!attempt.items.length}
         onClick={() => navigate(`/attempt/${id}/place`)}
       >
         Next — placement
       </button>
+      </div>
 
       {showPlan ? (
         <BottomSheet title="Room plan" onClose={() => setShowPlan(false)}>

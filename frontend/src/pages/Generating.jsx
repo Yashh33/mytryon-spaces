@@ -115,25 +115,42 @@ export default function Generating() {
 
   const phaseIdx = Math.min(PHASES.length - 1, Math.floor(elapsed / 4000));
 
+  const photoUrl = summary?.room?.photo_url;
+
   return (
     <div className="generating-screen">
-      <div className="ring" />
-      <div className="timer">{mmss(elapsed)}</div>
-      <div className="status-line">{PHASES[phaseIdx]}</div>
-      {summary ? (
-        <div className="gen-box">
-          <div className="cust">{summary.room.customer_name}</div>
-          <div className="room">{summary.room.room_type}</div>
-          {summary.items.map((it) => (
-            <div key={it.id} className="piece">
-              <span>
-                {it.category} &middot; {it.type}
-              </span>
-              <span className="w">{it.width_ft}ft</span>
-            </div>
-          ))}
+      <div className="gen-layout">
+        <div className="gen-photo">
+          {photoUrl ? <img src={photoUrl} alt="" /> : null}
+          <div className="gen-scan" />
         </div>
-      ) : null}
+        <div className="gen-side">
+          <div className="ring" />
+          <div className="timer">{mmss(elapsed)}</div>
+          <ol className="gen-steps">
+            {PHASES.map((label, i) => (
+              <li key={label} className={"gen-step" + (i < phaseIdx ? " done" : i === phaseIdx ? " active" : "")}>
+                <span className="gen-step-dot">{i < phaseIdx ? "✓" : i + 1}</span>
+                {label}
+              </li>
+            ))}
+          </ol>
+          {summary ? (
+            <div className="gen-box">
+              <div className="cust">{summary.room.customer_name}</div>
+              <div className="room">{summary.room.room_type}</div>
+              {summary.items.map((it) => (
+                <div key={it.id} className="piece">
+                  <span>
+                    {it.category} &middot; {it.type}
+                  </span>
+                  <span className="w">{it.width_ft}ft</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }

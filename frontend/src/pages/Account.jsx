@@ -24,15 +24,17 @@ export default function Account() {
   const pct = credits ? Math.min(100, Math.max(0, (credits.balance / credits.monthly_credits) * 100)) : 0;
 
   return (
-    <div className="screen has-bottom-nav">
+    <div className="screen screen-medium has-bottom-nav">
       <TopBar backTo="/" />
       <div className="eyebrow">Account</div>
+      <div className="account-top">
+        <div className="account-profile">
       <h1 style={{ marginBottom: 4 }}>{user.name}</h1>
       <div className="mono muted" style={{ marginBottom: 18 }}>
         {user.mobile ? `${user.mobile} · ` : ""}
         {ROLE_LABELS[user.role] || user.role}
       </div>
-
+        </div>
       {user.role !== "superadmin" ? (
         <div className="account-credits-card">
           {credits ? (
@@ -52,6 +54,7 @@ export default function Account() {
           )}
         </div>
       ) : null}
+      </div>
 
       <div className="row-list" style={{ marginTop: 18 }}>
         {user.role === "owner" ? (

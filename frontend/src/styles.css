@@ -26,8 +26,6 @@ html, body {
 body { min-height: 100vh; }
 
 #root {
-  max-width: 480px;
-  margin: 0 auto;
   min-height: 100vh;
   background: var(--page);
   position: relative;
@@ -62,6 +60,8 @@ h2 { font-size: 19px; }
 .ink2 { color: var(--ink2); }
 
 .screen { padding: 20px 18px 40px; min-height: 100vh; }
+@media (min-width: 600px) { .screen { max-width: calc(960px + 48px); padding-inline: 24px; } }
+@media (min-width: 1024px) { .screen { max-width: calc(1240px + 64px); padding-inline: 32px; } }
 
 .btn {
   display: inline-flex;
@@ -552,7 +552,7 @@ h2 { font-size: 19px; }
 .app-header {
   position: sticky; top: 0; z-index: 25; background: #fff; border-bottom: 1px solid #DDD8D0;
   height: 56px; padding: 8px 16px; display: flex; align-items: center; justify-content: space-between;
-  max-width: 480px; margin: 0 auto;
+  margin: 0;
 }
 .app-header-logo { display: flex; align-items: center; line-height: 0; }
 .app-header-logo img { height: 36px; width: auto; object-fit: contain; }
@@ -631,3 +631,216 @@ h2 { font-size: 19px; }
 .seat-buttons { display: flex; gap: 8px; }
 .seat-btn { flex: 1; height: 48px; border-radius: 10px; border: 1px solid var(--line); background: #fff; font-size: 18px; font-weight: 700; }
 .seat-btn.selected { background: #EF7B1C; border-color: #EF7B1C; color: #fff; }
+
+/* ==========================================================================
+   Responsive layout. Phone (< 600px) keeps the single-column layout above.
+   Tablet 600-1023px: content max 960px. Desktop >= 1024px: content max 1240px.
+   ========================================================================== */
+
+/* Page container (replaces the old 480px lock on #root) */
+.screen { width: 100%; margin: 0 auto; }
+
+/* Sizes: buttons >= 44px, text >= 13px */
+.chip, .toggle-btn, .btn-small, .link-btn, .fp-fullscreen-btn, .toggle-pill, .upload-change { min-height: 44px; }
+.link-btn, .toggle-pill { display: inline-flex; align-items: center; }
+.back-btn, .item-row .del { min-width: 44px; min-height: 44px; justify-content: center; }
+.menu-drawer-close { width: 44px; height: 44px; }
+.eyebrow, .field label, .section-label, .hint-line, .count-hint, .row-item .sub, .card-tile .sub,
+.room-card .sub, .customer-card .csub, .crumb-row, .step-seg, .link-btn, .fp-legend, .usage-head,
+.badge-inactive, .badge-owner, .badge-low, .toggle-pill, .menu-credits .reset, .account-credits-card .reset,
+.credit-warning-strip .note, .placeholder-desc, .low-credits-note, .adjust-row .sub, .item-row .width,
+.result-header .room, .toggle-btn, .fp-control-bar-size, .fp-fullscreen-btn, .upload-change, .btn-small,
+.menu-drawer-user .role, .login-logo-sub, .login-tagline, .admin-count, .stat-label { font-size: 13px; }
+
+/* Customers: search + new button on one row, cards grid */
+@media (min-width: 600px) {
+  .customers-toolbar { display: flex; flex-direction: row-reverse; align-items: center; gap: 12px; margin: 14px 0 16px; }
+  .customers-toolbar .divider { display: none; }
+  .customers-toolbar .search-box { margin: 0; flex: 1; }
+  .customers-toolbar .btn { width: auto; white-space: nowrap; padding-inline: 22px; }
+  .customer-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .customer-grid .row-item { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+}
+@media (min-width: 1024px) {
+  .customer-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* Customer: name + actions on one row, room cards grid */
+.customer-head { margin-bottom: 18px; }
+.customer-actions { margin-top: 18px; }
+.room-main .section-label { margin-top: 22px; }
+@media (min-width: 600px) {
+  .customer-layout {
+    display: grid; grid-template-columns: 1fr auto; column-gap: 24px; align-items: end;
+    grid-template-areas: "head actions" "rooms rooms";
+  }
+  .customer-head { grid-area: head; }
+  .customer-actions { grid-area: actions; margin: 0 0 18px; }
+  .customer-actions .btn { width: auto; padding-inline: 24px; white-space: nowrap; }
+  .customer-rooms { grid-area: rooms; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; align-items: stretch; }
+  .customer-rooms .room-card { margin: 0; }
+  .customer-rooms .empty-state { grid-column: 1 / -1; }
+  .customer-rooms .dashed-row {
+    margin: 0; display: flex; align-items: center; justify-content: center; min-height: 120px;
+  }
+}
+@media (min-width: 1024px) {
+  .customer-rooms { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* Room (attempts) */
+.room-new-side { display: none; }
+@media (min-width: 600px) {
+  .room-side img { max-height: 480px; object-fit: cover; }
+  .card-grid { grid-template-columns: repeat(3, 1fr); gap: 16px; }
+}
+@media (min-width: 1024px) {
+  .room-layout { display: grid; grid-template-columns: 360px 1fr; column-gap: 32px; align-items: start; }
+  .room-side { position: sticky; top: 76px; }
+  .room-main .section-label { margin-top: 0; }
+  .room-new-side { display: flex; width: 100%; margin-top: 16px; min-height: 64px; }
+  .room-new-inline { display: none; }
+}
+
+/* Add a room */
+.rn-photo { margin-bottom: 0; }
+.rn-hint { margin: 10px 0 16px; }
+@media (min-width: 1024px) {
+  .roomnew-layout {
+    display: grid; grid-template-columns: 1fr 440px; column-gap: 40px; align-items: start;
+    grid-template-areas: "photo type" "photo hint" "photo btn" "photo .";
+    grid-template-rows: auto auto auto 1fr;
+  }
+  .rn-photo { grid-area: photo; }
+  .rn-type { grid-area: type; }
+  .rn-hint { grid-area: hint; margin-top: 0; }
+  .rn-btn { grid-area: btn; }
+}
+
+/* Add furniture */
+.furn-empty { display: none; }
+@media (min-width: 1024px) {
+  .furn-layout {
+    display: grid; grid-template-columns: 1fr 520px; column-gap: 32px; align-items: start;
+    grid-template-areas: "items card" "next card"; grid-template-rows: auto 1fr;
+  }
+  .furn-items { grid-area: items; }
+  .furn-card { grid-area: card; }
+  .furn-card .add-piece-card { margin-top: 0; }
+  .furn-next { grid-area: next; margin-top: 8px !important; }
+  .furn-empty {
+    display: block; border: 1.5px dashed var(--line); border-radius: 12px; padding: 28px 16px;
+    text-align: center; color: var(--muted); font-size: 14px;
+  }
+}
+
+/* Finishing */
+.finish-summary { display: none; }
+@media (min-width: 1024px) {
+  .finish-layout {
+    display: grid; grid-template-columns: 1fr 400px; column-gap: 40px; align-items: start;
+    grid-template-areas: "opts summary" "opts btn" "opts ."; grid-template-rows: auto auto 1fr;
+  }
+  .finish-options { grid-area: opts; }
+  .finish-summary { grid-area: summary; display: block; margin-top: 0; }
+  .finish-btn { grid-area: btn; }
+}
+
+/* Result */
+@media (min-width: 1024px) {
+  .result-layout { display: grid; grid-template-columns: 1fr 400px; gap: 32px; align-items: start; }
+  .result-side .summary-box { margin-top: 0; }
+  .result-side .result-actions { margin-top: 16px; }
+}
+
+/* Account */
+@media (min-width: 600px) {
+  .account-top { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
+  .account-profile { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .account-profile .mono { margin-bottom: 0 !important; }
+  .account-top .account-credits-card { margin-top: 0; }
+}
+@media (min-width: 1024px) {
+  .screen-medium { max-width: calc(960px + 64px); }
+}
+
+/* Narrow single-form pages */
+@media (min-width: 600px) {
+  .screen-narrow { max-width: calc(720px + 48px); }
+}
+@media (min-width: 1024px) {
+  .screen-narrow { max-width: calc(720px + 64px); }
+}
+
+/* Stat cards (admin / usage) and scrolling tables */
+.table-scroll { overflow-x: auto; }
+.stat-card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.stat-label { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+.stat-value { font-weight: 800; font-size: 26px; margin-top: 4px; }
+.stat-extra { display: none; }
+@media (min-width: 600px) {
+  .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+  .stat-row .account-credits-card { margin: 0 !important; }
+  .stat-extra { display: block; }
+  .stat-row-extra { margin-bottom: 18px; }
+}
+
+/* Header: full width, inner content aligned to the page container */
+.app-header { max-width: none; margin: 0; }
+@media (min-width: 600px) {
+  .app-header { padding-inline: max(24px, calc((100% - 960px) / 2)); }
+  .menu-drawer { width: min(400px, 85vw); }
+  .bottom-nav { width: min(960px, 100%); }
+}
+@media (min-width: 1024px) {
+  .app-header { padding-inline: max(32px, calc((100% - 1240px) / 2)); }
+  .bottom-nav { display: none; }
+  .screen.has-bottom-nav { padding-bottom: 40px; }
+}
+
+/* Login: image half + form half */
+.login-hero { display: none; }
+@media (min-width: 600px) {
+  .login-split { display: grid; grid-template-columns: 2fr 3fr; min-height: 100vh; }
+  .login-hero {
+    display: flex; align-items: flex-end; padding: 40px 32px;
+    background: linear-gradient(to top, rgba(26, 24, 21, 0.55), rgba(26, 24, 21, 0) 55%), url("/login-hero.jpg") center / cover no-repeat, var(--orange);
+  }
+  .login-hero-line { margin: 0; color: #fff; font-size: 24px; font-weight: 800; line-height: 1.25; letter-spacing: -0.01em; max-width: 380px; }
+  .login-form { max-width: 380px; }
+}
+@media (min-width: 1024px) {
+  .login-split { grid-template-columns: 1fr 1fr; }
+  .login-hero { padding: 56px 48px; }
+  .login-hero-line { font-size: 34px; max-width: 460px; }
+}
+
+/* Generating: room photo with a scanner line + step list */
+.gen-layout { width: 100%; max-width: 640px; display: flex; flex-direction: column; align-items: center; gap: 24px; }
+.gen-photo { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 12px; overflow: hidden; background: #2A2622; }
+.gen-photo img { width: 100%; height: 100%; object-fit: cover; }
+.gen-scan {
+  position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--orange);
+  box-shadow: 0 0 18px 6px rgba(239, 123, 28, 0.55); animation: gen-scan 3.2s ease-in-out infinite;
+}
+@keyframes gen-scan { 0% { top: 0; } 50% { top: calc(100% - 3px); } 100% { top: 0; } }
+@media (prefers-reduced-motion: reduce) { .gen-scan { animation: none; top: 50%; } }
+.gen-side { width: 100%; display: flex; flex-direction: column; align-items: center; }
+.gen-side .ring { width: 64px; height: 64px; margin-bottom: 16px; }
+.gen-steps { list-style: none; margin: 0 0 28px; padding: 0; width: 100%; max-width: 340px; }
+.gen-step { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 15px; color: rgba(255, 255, 255, 0.4); }
+.gen-step.active { color: #fff; font-weight: 700; }
+.gen-step.done { color: rgba(255, 255, 255, 0.75); }
+.gen-step-dot {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 13px; font-weight: 700; border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.gen-step.active .gen-step-dot { background: var(--orange); border-color: var(--orange); color: #fff; }
+.gen-step.done .gen-step-dot { background: rgba(255, 255, 255, 0.15); }
+@media (min-width: 1024px) {
+  .generating-screen { padding-top: 72px; }
+  .gen-layout { max-width: 1100px; flex-direction: row; align-items: flex-start; gap: 56px; }
+  .gen-photo { width: 480px; flex: none; }
+  .gen-side { flex: 1; align-items: flex-start; }
+  .gen-side .ring { width: 80px; height: 80px; }
+}

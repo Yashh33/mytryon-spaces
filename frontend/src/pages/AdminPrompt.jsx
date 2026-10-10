@@ -74,11 +74,11 @@ export default function AdminPrompt() {
 
   const crumbs = [{ label: "Admin", to: backTo }, { label: "Generation prompt" }];
 
-  if (!data && !error) return <div className="screen"><TopBar backTo={backTo} crumbs={crumbs} /><Loading /></div>;
-  if (error) return <div className="screen"><TopBar backTo={backTo} crumbs={crumbs} /><ErrorBlock message={error} onRetry={load} /></div>;
+  if (!data && !error) return <div className="screen screen-narrow"><TopBar backTo={backTo} crumbs={crumbs} /><Loading /></div>;
+  if (error) return <div className="screen screen-narrow"><TopBar backTo={backTo} crumbs={crumbs} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   return (
-    <div className="screen">
+    <div className="screen screen-narrow">
       <TopBar backTo={backTo} crumbs={crumbs} />
       <div className="eyebrow">Admin</div>
       <h1 style={{ marginBottom: 4 }}>Generation prompt</h1>

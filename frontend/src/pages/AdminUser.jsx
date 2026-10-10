@@ -70,8 +70,8 @@ export default function AdminUser() {
     }
   }
 
-  if (!data && !error) return <div className="screen"><TopBar backTo={backTo} /><Loading /></div>;
-  if (error) return <div className="screen"><TopBar backTo={backTo} /><ErrorBlock message={error} onRetry={load} /></div>;
+  if (!data && !error) return <div className="screen screen-narrow"><TopBar backTo={backTo} /><Loading /></div>;
+  if (error) return <div className="screen screen-narrow"><TopBar backTo={backTo} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   const { user, customer_count, customers } = data;
   const crumbs = [{ label: "Admin", to: backTo }, { label: user.name }];
@@ -80,7 +80,7 @@ export default function AdminUser() {
   const canManage = viewer.role === "superadmin" || user.role === "salesman";
 
   return (
-    <div className="screen">
+    <div className="screen screen-narrow">
       <TopBar
         backTo={backTo}
         crumbs={crumbs}

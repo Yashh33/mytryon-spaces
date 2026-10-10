@@ -70,6 +70,7 @@ export default function Customers() {
         </div>
       ) : null}
 
+      <div className="customers-toolbar">
       <button type="button" className="btn btn-primary" onClick={() => setShowAdd(true)}>
         + New customer
       </button>
@@ -82,12 +83,13 @@ export default function Customers() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
+      </div>
 
       {customers === null && !error ? <RowSkeleton /> : null}
       {error ? <ErrorBlock message={error} onRetry={load} /> : null}
       {customers !== null ? (
         filtered.length ? (
-          <div className="row-list">
+          <div className="row-list customer-grid">
             {filtered.map((c) => (
               <Link key={c.id} to={`/customer/${c.id}`} className="row-item">
                 <div className="avatar">{initials(c.name)}</div>

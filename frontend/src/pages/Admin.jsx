@@ -81,8 +81,9 @@ export default function Admin() {
       />
       <div className="eyebrow">Admin</div>
 
-      {isOwner && credits ? (
-        <div className="account-credits-card" style={{ marginBottom: 16 }}>
+      <div className="stat-row">
+        {isOwner && credits ? (
+          <div className="account-credits-card">
           <div className="amount">
             {credits.balance.toLocaleString()} of {credits.monthly_credits.toLocaleString()} credits left
           </div>
@@ -92,7 +93,16 @@ export default function Admin() {
           <div className="reset">Resets {formatDate(credits.cycle_ends_on)}</div>
           {creditsLow ? <div className="low-credits-note">Low credits</div> : null}
         </div>
-      ) : null}
+        ) : null}
+        <div className="stat-card stat-extra">
+          <div className="stat-label">Salesmen</div>
+          <div className="stat-value">{users ? users.length : "–"}</div>
+        </div>
+        <div className="stat-card stat-extra">
+          <div className="stat-label">Active</div>
+          <div className="stat-value">{users ? users.filter((u) => u.active).length : "–"}</div>
+        </div>
+      </div>
 
       <div className="admin-header">
         <h1>Salesmen</h1>

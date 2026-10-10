@@ -26,11 +26,11 @@ export default function SuperShop() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  if (!shop && !error) return <div className="screen"><TopBar backTo="/super" /><Loading /></div>;
-  if (error) return <div className="screen"><TopBar backTo="/super" /><ErrorBlock message={error} onRetry={load} /></div>;
+  if (!shop && !error) return <div className="screen screen-narrow"><TopBar backTo="/super" /><Loading /></div>;
+  if (error) return <div className="screen screen-narrow"><TopBar backTo="/super" /><ErrorBlock message={error} onRetry={load} /></div>;
 
   return (
-    <div className="screen">
+    <div className="screen screen-narrow">
       <TopBar backTo="/super" crumbs={[{ label: "Shops", to: "/super" }, { label: shop.name }]} />
       <div className="eyebrow">Superadmin</div>
       <h1 style={{ marginBottom: 4 }}>{shop.name}</h1>

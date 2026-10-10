@@ -27,7 +27,11 @@ export default function Login() {
   }
 
   return (
-    <div className="login-screen">
+    <div className="login-split">
+      <div className="login-hero">
+        <p className="login-hero-line">Show the customer their own room, with your furniture in it.</p>
+      </div>
+      <div className="login-screen">
       <img src="/logo.png" alt="Reflection Lifestyle" className="login-logo" />
       <div className="login-tagline">Visualization tool</div>
       <form className="login-form" onSubmit={handleSubmit}>
@@ -57,6 +61,7 @@ export default function Login() {
           {submitting ? "Signing in…" : "Sign in"}
         </button>
       </form>
+      </div>
     </div>
   );
 }

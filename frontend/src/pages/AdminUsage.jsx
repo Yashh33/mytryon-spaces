@@ -51,7 +51,23 @@ export default function AdminUsage() {
         {formatDate(data.cycle_start)} &ndash; {formatDate(data.cycle_end)}
       </div>
 
+      <div className="stat-row stat-row-extra">
+        <div className="stat-card stat-extra">
+          <div className="stat-label">Salesmen</div>
+          <div className="stat-value">{data.salesmen.length}</div>
+        </div>
+        <div className="stat-card stat-extra">
+          <div className="stat-label">Generations</div>
+          <div className="stat-value">{data.salesmen.reduce((n, x) => n + x.generations, 0)}</div>
+        </div>
+        <div className="stat-card stat-extra">
+          <div className="stat-label">Credits spent</div>
+          <div className="stat-value">{data.salesmen.reduce((n, x) => n + x.credits_spent, 0).toLocaleString()}</div>
+        </div>
+      </div>
+
       {data.salesmen.length ? (
+        <div className="table-scroll">
         <div className="usage-table">
           <div className="usage-row usage-head">
             <div className="usage-name">Salesman</div>
@@ -66,6 +82,7 @@ export default function AdminUsage() {
             </div>
           ))}
         </div>
+        </div>
       ) : (
         <div className="empty-state">No salesmen yet.</div>
       )}
@@ -76,6 +93,7 @@ export default function AdminUsage() {
 
       <div className="section-label" style={{ marginTop: 22 }}>Daily</div>
       {data.daily && data.daily.length ? (
+        <div className="table-scroll">
         <div className="usage-table">
           {[...data.daily].reverse().map((d) => (
             <div key={d.date} className="usage-row">
@@ -84,6 +102,7 @@ export default function AdminUsage() {
               <div className="usage-num mono">{d.credits_spent.toLocaleString()}</div>
             </div>
           ))}
+        </div>
         </div>
       ) : (
         <div className="empty-state">No activity yet.</div>

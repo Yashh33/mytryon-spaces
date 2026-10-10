@@ -40,24 +40,26 @@ export default function RoomNew() {
       <TopBar backTo={`/customer/${id}`} />
       <div className="eyebrow">Step 1 of 4</div>
       <h1 style={{ marginBottom: 20 }}>Add a room</h1>
-      <div className="field">
-        <label>Which room?</label>
-        <div className="chips">
-          {ROOM_TYPES.map((r) => (
-            <Chip key={r} selected={r === roomType} onClick={() => setRoomType(r)}>
-              {r}
-            </Chip>
-          ))}
+      <div className="roomnew-layout">
+        <div className="field rn-type">
+          <label>Which room?</label>
+          <div className="chips">
+            {ROOM_TYPES.map((r) => (
+              <Chip key={r} selected={r === roomType} onClick={() => setRoomType(r)}>
+                {r}
+              </Chip>
+            ))}
+          </div>
         </div>
+        <div className="field rn-photo">
+          <label>Photo of the space</label>
+          <UploadBox file={photo} onChange={setPhoto} />
+        </div>
+        <div className="hint-line rn-hint">Stand at the opposite wall, phone at chest height, keep the floor visible.</div>
+        <button type="button" className="btn btn-primary rn-btn" disabled={submitting} onClick={handleSubmit}>
+          {submitting ? "Creating…" : "Add room"}
+        </button>
       </div>
-      <div className="field">
-        <label>Photo of the space</label>
-        <UploadBox file={photo} onChange={setPhoto} />
-        <div className="hint-line">Stand at the opposite wall, phone at chest height, keep the floor visible.</div>
-      </div>
-      <button type="button" className="btn btn-primary" disabled={submitting} onClick={handleSubmit}>
-        {submitting ? "Creating…" : "Add room"}
-      </button>
     </div>
   );
 }

@@ -45,6 +45,7 @@ import {
   straightFigure,
   translatePlacement,
 } from "../placement.js";
+import { featureLetters } from "./RoomPhotoReference.jsx";
 
 const WALLS = ["far", "left", "right", "near"];
 
@@ -151,6 +152,7 @@ export function FloorPlan({
   const layout = room.layout_json;
   const geom = planGeometry(layout?.depth_vs_width);
   const feet = roomFeet(layout?.depth_vs_width);
+  const letters = featureLetters(layout);
 
   function toNormalized(clientX, clientY) {
     const rect = svgRef.current.getBoundingClientRect();
@@ -367,7 +369,7 @@ export function FloorPlan({
       elements.push(<line key={`${key}-leader`} x1={mid.x} y1={mid.y} x2={label.x} y2={label.y} className="fp-leader" />);
       elements.push(
         <text key={`${key}-label`} x={label.x} y={label.y} className="fp-label fp-label-caps" textAnchor={label.anchor}>
-          {featureLabel(group)}
+          {letters.walls[wall][gi]} &middot; {featureLabel(group)}
           {partial ? " ?" : ""}
         </text>
       );
@@ -407,7 +409,7 @@ export function FloorPlan({
           <g key={`obstruction-${index}`}>
             <rect x={px - 6} y={py - 6} width="12" height="12" fill={color.fill} stroke={color.border} strokeWidth="1.5" rx="2" />
             <text x={px} y={py - 12} className="fp-label fp-label-caps" textAnchor="middle">
-              {o.type || "obstruction"}
+              {letters.obstructions[index]} &middot; {o.type || "obstruction"}
             </text>
             <rect
               x={px - 14} y={py - 14} width="28" height="28"
@@ -780,7 +782,7 @@ export function FloorPlan({
     const rows = assignLabelRows(groups, geom, wall);
     const taken = groups.map((group, i) => {
       const mid = origin + ((group.span[0] + group.span[1]) / 2) * along + (isFarWall ? 0 : rows[i] * 12);
-      return { mid, half: (featureLabel(group).length * 5.4) / 2 + 6 };
+      return { mid, half: ((featureLabel(group).length + 4) * 5.4) / 2 + 6 };
     });
     const free = (centre) => taken.every((t) => Math.abs(centre - t.mid) > t.half + nameLen / 2);
     const candidates = [0.5, 0.3, 0.7, 0.15, 0.85].map((t) => origin + Math.min(Math.max(t * along, nameLen / 2 + 4), along - nameLen / 2 - 4));

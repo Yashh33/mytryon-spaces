@@ -6,7 +6,8 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { PlacementCard } from "../components/PlacementCard.jsx";
+import { PieceControls, PlacementCard } from "../components/PlacementCard.jsx";
+import { RoomPhotoReference } from "../components/RoomPhotoReference.jsx";
 import {
   ADDABLE_FEATURE_TYPES,
   FAR_NEAR_POSITIONS,
@@ -52,6 +53,7 @@ export default function Place() {
   const [addObstructionMode, setAddObstructionMode] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null); // { kind: "piece"|"feature"|"obstruction", label, onConfirm }
   const [fullScreen, setFullScreen] = useState(false);
+  const [phoneView, setPhoneView] = useState("plan"); // phone only: "plan" | "photo"
   // Guards against stale server replies: every local change to a block's
   // placement bumps its counter; a reply is only applied if no newer change
   // happened meanwhile. Blocks with unsaved local changes are also kept as-is
@@ -350,47 +352,81 @@ export default function Place() {
         {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}
       </div>
 
-      {!fullScreen ? (
-        <PlacementCard {...placementCardProps} fullScreen={false} onToggleFullScreen={() => setFullScreen(true)} />
-      ) : null}
-
-      {room.layout_status !== "pending" ? (
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-          <button type="button" className="btn btn-ghost btn-small" style={{ flex: 1 }} onClick={() => setShowAddFeature(true)}>
-            + Add feature
+      <div className="place-layout" data-view={phoneView}>
+        <div className="place-switch toggle-row">
+          <button type="button" className={"toggle-btn" + (phoneView === "plan" ? " active" : "")} onClick={() => setPhoneView("plan")}>
+            Plan
           </button>
-          <button
-            type="button"
-            className={"btn btn-small" + (addObstructionMode ? " btn-primary" : " btn-ghost")}
-            style={{ flex: 1 }}
-            onClick={() => setAddObstructionMode((v) => !v)}
-          >
-            {addObstructionMode ? "Tap the plan…" : "+ Add obstruction"}
+          <button type="button" className={"toggle-btn" + (phoneView === "photo" ? " active" : "")} onClick={() => setPhoneView("photo")}>
+            Room photo
           </button>
         </div>
-      ) : null}
 
-      <div className="chips" style={{ marginTop: 16 }}>
-        {blocks.map((b) => (
-          <button
-            key={b.key}
-            type="button"
-            className={"chip" + (b.key === selectedKey ? " selected" : "") + (b.placement ? " chip-placed" : "")}
-            onClick={() => handleSelectBlock(b.key)}
-          >
-            <span className="chip-dot" style={{ background: b.color }} />
-            {b.number} &middot; {b.label}
+        <div className="place-photo">
+          <RoomPhotoReference room={room} />
+          <button type="button" className="btn btn-ghost btn-small place-back" onClick={() => setPhoneView("plan")}>
+            Back to plan
           </button>
-        ))}
-      </div>
+        </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 24 }}>
-        <button type="button" className="btn btn-primary" onClick={() => navigate(`/attempt/${id}/finish`)}>
-          Next
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/finish?ignore_placement=true`)}>
-          Skip placement
-        </button>
+        <div className="place-plan">
+          {!fullScreen ? (
+            <PlacementCard {...placementCardProps} hideControls fullScreen={false} onToggleFullScreen={() => setFullScreen(true)} />
+          ) : null}
+          {!fullScreen && room.photo_url ? (
+            <button type="button" className="place-thumb" onClick={() => setPhoneView("photo")} aria-label="Show the room photo">
+              <img src={room.photo_url} alt="" />
+            </button>
+          ) : null}
+        </div>
+
+        <div className="place-side">
+          <PieceControls
+            selectedBlock={selectedBlock}
+            onRotate={placementCardProps.onRotate}
+            onFlip={placementCardProps.onFlip}
+            onRequestRemove={placementCardProps.onRequestRemove}
+          />
+
+          <div className="chips" style={{ marginTop: 12 }}>
+            {blocks.map((b) => (
+              <button
+                key={b.key}
+                type="button"
+                className={"chip" + (b.key === selectedKey ? " selected" : "") + (b.placement ? " chip-placed" : "")}
+                onClick={() => handleSelectBlock(b.key)}
+              >
+                <span className="chip-dot" style={{ background: b.color }} />
+                {b.number} &middot; {b.label}
+              </button>
+            ))}
+          </div>
+
+          {room.layout_status !== "pending" ? (
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button type="button" className="btn btn-ghost btn-small" style={{ flex: 1 }} onClick={() => setShowAddFeature(true)}>
+                + Add feature
+              </button>
+              <button
+                type="button"
+                className={"btn btn-small" + (addObstructionMode ? " btn-primary" : " btn-ghost")}
+                style={{ flex: 1 }}
+                onClick={() => setAddObstructionMode((v) => !v)}
+              >
+                {addObstructionMode ? "Tap the plan…" : "+ Add obstruction"}
+              </button>
+            </div>
+          ) : null}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 20 }}>
+            <button type="button" className="btn btn-primary" onClick={() => navigate(`/attempt/${id}/finish`)}>
+              Next
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/finish?ignore_placement=true`)}>
+              Skip placement
+            </button>
+          </div>
+        </div>
       </div>
 
       {showAddFeature ? <AddFeatureSheet onClose={() => setShowAddFeature(false)} onAdd={handleAddFeature} /> : null}

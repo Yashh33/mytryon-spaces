@@ -27,6 +27,7 @@ export function PlacementCard({
   onRequestRemove,
   fullScreen,
   onToggleFullScreen,
+  hideControls = false,
 }) {
   return (
     <div className="placement-card">
@@ -55,31 +56,40 @@ export function PlacementCard({
         onTapObstruction={onTapObstruction}
       />
 
-      {selectedBlock && selectedBlock.placement ? (
-        <div className="fp-control-bar">
-          <div className="fp-control-bar-title">
-            <span className="chip-dot" style={{ background: selectedBlock.color }} />
-            {selectedBlock.label}
-            <span className="fp-control-bar-size">{formatFeet(selectedBlock.widthFt)} ft</span>
-          </div>
-          <div className="fp-control-bar-buttons">
-            <button type="button" className="fp-control-btn" onClick={onRotate}>
-              <img src="/icons/rotate.svg" alt="" width={20} height={20} />
-              Rotate
-            </button>
-            {ARM_SHAPES.has(selectedBlock.shape) ? (
-              <button type="button" className="fp-control-btn" onClick={onFlip}>
-                <img src="/icons/flip.svg" alt="" width={20} height={20} />
-                Flip
-              </button>
-            ) : null}
-            <button type="button" className="fp-control-btn fp-control-btn-danger" onClick={onRequestRemove}>
-              <img src="/icons/remove.svg" alt="" width={20} height={20} />
-              Remove
-            </button>
-          </div>
-        </div>
-      ) : null}
+      {hideControls ? null : (
+        <PieceControls selectedBlock={selectedBlock} onRotate={onRotate} onFlip={onFlip} onRequestRemove={onRequestRemove} />
+      )}
+    </div>
+  );
+}
+
+/** Rotate / Flip / Remove for the selected, placed piece. Shown under the plan
+ * in full screen, and in the pieces panel on the normal placement layout. */
+export function PieceControls({ selectedBlock, onRotate, onFlip, onRequestRemove }) {
+  if (!selectedBlock || !selectedBlock.placement) return null;
+  return (
+    <div className="fp-control-bar">
+      <div className="fp-control-bar-title">
+        <span className="chip-dot" style={{ background: selectedBlock.color }} />
+        {selectedBlock.label}
+        <span className="fp-control-bar-size">{formatFeet(selectedBlock.widthFt)} ft</span>
+      </div>
+      <div className="fp-control-bar-buttons">
+        <button type="button" className="fp-control-btn" onClick={onRotate}>
+          <img src="/icons/rotate.svg" alt="" width={20} height={20} />
+          Rotate
+        </button>
+        {ARM_SHAPES.has(selectedBlock.shape) ? (
+          <button type="button" className="fp-control-btn" onClick={onFlip}>
+            <img src="/icons/flip.svg" alt="" width={20} height={20} />
+            Flip
+          </button>
+        ) : null}
+        <button type="button" className="fp-control-btn fp-control-btn-danger" onClick={onRequestRemove}>
+          <img src="/icons/remove.svg" alt="" width={20} height={20} />
+          Remove
+        </button>
+      </div>
     </div>
   );
 }

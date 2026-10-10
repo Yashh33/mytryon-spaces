@@ -10,28 +10,47 @@ import {
   WALL_KEY,
   WINDOW_TYPES,
   armExtent,
+  armFrame,
   armParams,
   assignLabelRows,
   cameraGeometry,
+  cameraXFraction,
   clamp01,
+  curvedFigure,
   featureColor,
   featureFootprint,
   featureSpan,
+  frameApply,
+  frameCss,
+  frameSize,
   isBed,
+  isChair,
   isDiningTable,
   isStraightSofa,
+  lFigure,
   labelPosition,
   mergeAdjacentFeatures,
+  nameLines,
   placementRects,
   planGeometry,
+  rectFrame,
   rectsOverlap,
   roomFeet,
+  rotateBy,
+  rotateSteps,
   shadeColor,
+  sofaName,
   sofaSeatCount,
+  straightFigure,
   translatePlacement,
 } from "../placement.js";
 
 const WALLS = ["far", "left", "right", "near"];
+
+// Wall names and the colour of each wall line on the plan.
+const WALL_NAMES = { far: "FAR WALL", left: "LEFT WALL", right: "RIGHT WALL", near: "NEAR WALL" };
+const WALL_COLORS = { far: "#1D4ED8", left: "#6D28D9", right: "#15803D", near: "#1A1815" };
+const WALL_NAME_CHAR_PX = 8.6; // rough width of one 13px bold capital, for placing the name clear of feature labels
 
 // Wood tone for dining tables, and the fixed palette for bed pillows/sheet —
 // drawing-only constants, not part of the block's own PALETTE colour.
@@ -78,6 +97,12 @@ function parallelLines(a, b, dashed, stroke) {
   );
 }
 
+/** Far/left/right walls are drawn thick in their own colour; the near wall
+ * keeps the plain ink line. */
+function wallStyle(wall) {
+  return wall === "near" ? undefined : { stroke: WALL_COLORS[wall], strokeWidth: 6 };
+}
+
 function featureLabel(group) {
   if ((group.type === "unknown" || group.type === "other") && group.notes) return group.notes;
   return group.type || "feature";
@@ -110,6 +135,7 @@ export function FloorPlan({
   onCommitBlock = noop,
   onResizeBlock = noop,
   onCommitResize = noop,
+  onRotateBlock = noop,
   onDropPendingAt = noop,
   pendingKey = null,
   addObstructionMode = false,
@@ -119,7 +145,7 @@ export function FloorPlan({
   readOnly = false,
 }) {
   const svgRef = useRef(null);
-  const dragRef = useRef(null); // { mode: "move"|"resize", key, pointerId, startX, startY, orig, moved }
+  const dragRef = useRef(null); // { mode: "move"|"resize"|"rotate", key, pointerId, startX, startY, orig, moved, ... }
 
   const layout = room.layout_json;
   const geom = planGeometry(layout?.depth_vs_width);
@@ -132,6 +158,16 @@ export function FloorPlan({
     return {
       x: clamp01((px - geom.roomX) / geom.roomW),
       y: clamp01((py - geom.roomY) / geom.roomH),
+    };
+  }
+
+  /** Pointer position in plan pixels (the svg keeps its aspect, so angles
+   * measured here are true angles). */
+  function toPlanPx(clientX, clientY) {
+    const rect = svgRef.current.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * geom.planW,
+      y: ((clientY - rect.top) / rect.height) * geom.planH,
     };
   }
 
@@ -154,12 +190,37 @@ export function FloorPlan({
     e.currentTarget.setPointerCapture(e.pointerId);
     const p = toNormalized(e.clientX, e.clientY);
     dragRef.current = { mode, key: block.key, pointerId: e.pointerId, startX: p.x, startY: p.y, orig: block.placement, moved: false };
+    if (mode === "rotate") {
+      // angle of the pointer about the piece centre, compared on every move
+      const { bbox } = blockDrawing(block);
+      const centre = { x: (bbox.x0 + bbox.x1) / 2, y: (bbox.y0 + bbox.y1) / 2 };
+      const pp = toPlanPx(e.clientX, e.clientY);
+      Object.assign(dragRef.current, {
+        centre,
+        angle0: Math.atan2(pp.y - centre.y, pp.x - centre.x),
+        clientX: e.clientX,
+        clientY: e.clientY,
+        steps: 0,
+      });
+    }
     onSelectBlock(block.key);
   }
 
   function moveDrag(e, block) {
     const drag = dragRef.current;
     if (!drag || drag.key !== block.key || drag.pointerId !== e.pointerId) return;
+    if (drag.mode === "rotate") {
+      // a few pixels of jitter is still a tap
+      if (!drag.moved && Math.hypot(e.clientX - drag.clientX, e.clientY - drag.clientY) < 6) return;
+      drag.moved = true;
+      const pp = toPlanPx(e.clientX, e.clientY);
+      const steps = rotateSteps(Math.atan2(pp.y - drag.centre.y, pp.x - drag.centre.x), drag.angle0);
+      if (steps !== drag.steps) {
+        drag.steps = steps;
+        onMoveBlock(block.key, rotateBy(block.shape, drag.orig, feet, steps));
+      }
+      return;
+    }
     const p = toNormalized(e.clientX, e.clientY);
     drag.moved = true;
     const resizeHandle = { resize: "length", "resize-short": "short", "resize-depth": "depth" }[drag.mode];
@@ -176,6 +237,14 @@ export function FloorPlan({
     // the svg's own pointerup would otherwise read this as a background tap and deselect
     e.stopPropagation();
     dragRef.current = null;
+    if (drag.mode === "rotate") {
+      if (!drag.moved) {
+        if (e.type !== "pointercancel") onRotateBlock(block.key); // a plain tap turns it 90 degrees once
+      } else {
+        onCommitBlock(block.key, block.placement); // saved ONCE, on release
+      }
+      return;
+    }
     if (!drag.moved) return;
     if (drag.mode === "resize" || drag.mode === "resize-short" || drag.mode === "resize-depth") onCommitResize(block.key);
     else onCommitBlock(block.key, block.placement);
@@ -210,7 +279,7 @@ export function FloorPlan({
       const color = featureColor(type);
 
       if (GAP_TYPES.has(type)) {
-        elements.push(<line key={`${key}-pre`} {...segmentBetween(line, cursor, start, geom)} className="fp-wall" />);
+        elements.push(<line key={`${key}-pre`} {...segmentBetween(line, cursor, start, geom)} className="fp-wall" style={wallStyle(wall)} />);
         cursor = end;
         if (WINDOW_TYPES.has(type)) {
           elements.push(<g key={`${key}-sym`}>{parallelLines(a, b, false, color.border)}</g>);
@@ -320,7 +389,7 @@ export function FloorPlan({
       );
     });
 
-    elements.push(<line key={`${wall}-tail`} {...segmentBetween(line, cursor, 1, geom)} className="fp-wall" />);
+    elements.push(<line key={`${wall}-tail`} {...segmentBetween(line, cursor, 1, geom)} className="fp-wall" style={wallStyle(wall)} />);
     return elements;
   }
 
@@ -417,88 +486,17 @@ export function FloorPlan({
       const bbox = { x0: e.x0, y0: e.y0, x1: e.x1, y1: e.y1 };
       const handle = p.longAxis === "x" ? at(hLen, d) : at(d, vLen);
       const secondHandle = { pos: p.longAxis === "x" ? at(d, vLen) : at(hLen, d), kind: "short" };
-
-      if (shape === "curved") {
-        const C = at(hLen, vLen);
-        const rx = hLen;
-        const ry = vLen;
-        const irx = Math.max(rx - d, 1);
-        const iry = Math.max(ry - d, 1);
-        const sweep = sx * sy > 0 ? 1 : 0;
-        const pt = (ex, ey, deg) => {
-          const t = (deg * Math.PI) / 180;
-          return [C[0] - sx * ex * Math.cos(t), C[1] - sy * ey * Math.sin(t)];
-        };
-        const o0 = pt(rx, ry, 0);
-        const o90 = pt(rx, ry, 90);
-        const i0 = pt(irx, iry, 0);
-        const i90 = pt(irx, iry, 90);
-        const outline =
-          `M ${o0[0]} ${o0[1]} A ${rx} ${ry} 0 0 ${sweep} ${o90[0]} ${o90[1]} ` +
-          `L ${i90[0]} ${i90[1]} A ${irx} ${iry} 0 0 ${1 - sweep} ${i0[0]} ${i0[1]} Z`;
-        const bandOuter0 = pt(rx, ry, 4);
-        const bandOuter1 = pt(rx, ry, 86);
-        const bandInner0 = pt(rx - d * 0.3, ry - d * 0.3, 86);
-        const bandInner1 = pt(rx - d * 0.3, ry - d * 0.3, 4);
-        const backBand =
-          `M ${bandOuter0[0]} ${bandOuter0[1]} A ${rx} ${ry} 0 0 ${sweep} ${bandOuter1[0]} ${bandOuter1[1]} ` +
-          `L ${bandInner0[0]} ${bandInner0[1]} A ${rx - d * 0.3} ${ry - d * 0.3} 0 0 ${1 - sweep} ${bandInner1[0]} ${bandInner1[1]} Z`;
-        const seatOuter0 = pt(rx - d * 0.3, ry - d * 0.3, 4);
-        const seatOuter1 = pt(rx - d * 0.3, ry - d * 0.3, 86);
-        const seat =
-          `M ${seatOuter0[0]} ${seatOuter0[1]} A ${rx - d * 0.3} ${ry - d * 0.3} 0 0 ${sweep} ${seatOuter1[0]} ${seatOuter1[1]} ` +
-          `L ${i90[0]} ${i90[1]} A ${irx} ${iry} 0 0 ${1 - sweep} ${i0[0]} ${i0[1]} Z`;
-        const labelAtArr = pt((rx + irx) / 2, (ry + iry) / 2, 45);
-        const labelAt = { x: labelAtArr[0], y: labelAtArr[1] };
-        return { kind: "curved", outline, backBand, seat, bbox, handle, secondHandle, labelAt };
-      }
-
-      // L: one outline with a square inner turn and rounded outer corners
-      const corners = [[0, 0], [hLen, 0], [hLen, d], [d, d], [d, vLen], [0, vLen]].map(([u, v]) => at(u, v));
-      const outline = roundedPolygon(corners, [6, 6, 6, 0, 6, 6]);
-      // Backrest runs along the FULL outer edge of the long arm (the arm
-      // along longAxis), continuing behind the corner — i.e. the horizontal
-      // top edge from x0 to x1 when long is horizontal, else the vertical
-      // edge from y0 to y1. The short arm gets no backrest.
-      const longIsHoriz = p.longAxis === "x";
-      const backThick = Math.max(6, d * 0.22);
-      const backRect = longIsHoriz
-        ? { x0: e.x0, y0: sy > 0 ? e.y0 : e.y1 - backThick, x1: e.x1, y1: sy > 0 ? e.y0 + backThick : e.y1 }
-        : { x0: sx > 0 ? e.x0 : e.x1 - backThick, y0: e.y0, x1: sx > 0 ? e.x0 + backThick : e.x1, y1: e.y1 };
-      // Arm only at the far end of the long arm, away from the corner.
-      const armLen = Math.min(d * 0.9, hLen * 0.22, vLen * 0.22) || d * 0.6;
-      const armRect = longIsHoriz
-        ? { x0: sx > 0 ? e.x1 - armLen : e.x0, y0: e.y0, x1: sx > 0 ? e.x1 : e.x0 + armLen, y1: e.y0 + d }
-        : { x0: e.x0, y0: sy > 0 ? e.y1 - armLen : e.y0, x1: e.x0 + d, y1: sy > 0 ? e.y1 : e.y0 + armLen };
-      // Long-arm seat cushions, excluding the backrest thickness and the arm.
-      const longSeatStart = longIsHoriz ? (sx > 0 ? e.x0 : armRect.x1) : (sy > 0 ? e.y0 : armRect.y1);
-      const longSeatEnd = longIsHoriz ? (sx > 0 ? armRect.x0 : e.x1) : (sy > 0 ? armRect.y0 : e.y1);
-      const seatDepthStart = longIsHoriz ? backRect.y1 : backRect.x1;
-      const seatDepthEnd = longIsHoriz ? (sy > 0 ? e.y1 : e.y0) : (sx > 0 ? e.x1 : e.x0);
-      const seatDepth0 = Math.min(seatDepthStart, seatDepthEnd);
-      const seatDepth1 = Math.max(seatDepthStart, seatDepthEnd);
-      const n = Math.max(1, Math.round(Math.abs(longSeatEnd - longSeatStart) / Math.max(d, 1)));
-      const seatRects = [];
-      const span = longSeatEnd - longSeatStart;
-      for (let i = 0; i < n; i += 1) {
-        const a0 = longSeatStart + (span * i) / n;
-        const a1 = longSeatStart + (span * (i + 1)) / n;
-        seatRects.push(
-          longIsHoriz
-            ? { x0: Math.min(a0, a1), y0: seatDepth0, x1: Math.max(a0, a1), y1: seatDepth1 }
-            : { x0: seatDepth0, y0: Math.min(a0, a1), x1: seatDepth1, y1: Math.max(a0, a1) }
-        );
-      }
-      // Short arm: one long lounge cushion, no backrest, no outer arm.
-      const shortSeat = longIsHoriz
-        ? { x0: e.x0, y0: sy > 0 ? e.y0 : e.y1 - vLen, x1: e.x0 + d, y1: sy > 0 ? e.y0 + vLen : e.y1 }
-        : { x0: sx > 0 ? e.x0 : e.x1 - hLen, y0: e.y0, x1: sx > 0 ? e.x0 + hLen : e.x1, y1: e.y0 + d };
-      const labelAt = {
-        x: (backRect.x0 + backRect.x1) / 2,
-        y: (backRect.y0 + backRect.y1) / 2,
-      };
+      // The figure is built in a local frame (origin = outer bend corner, u
+      // along the long arm, back at v = 0) and placed with this one matrix.
       return {
-        kind: "L", outline, backRect, armRect, seatRects, shortSeat, bbox, handle, secondHandle, labelAt, longIsHoriz,
+        kind: shape === "curved" ? "curved" : "L",
+        frame: armFrame(p),
+        longPx: p.longFt,
+        shortPx: p.shortFt,
+        depthPx: d,
+        bbox,
+        handle,
+        secondHandle,
       };
     }
 
@@ -543,76 +541,113 @@ export function FloorPlan({
     };
   }
 
-  function renderStraightSofa(block, drawing) {
-    const { X, Y, W, H } = drawing.rectXYWH;
-    const rotation = drawing.rotation;
-    const alongX = rotation % 180 === 0;
-    const back = shadeColor(block.color, -0.35);
-    const seatFill = shadeColor(block.color, 0.6);
-    const seatBorder = shadeColor(block.color, 0.15);
-    const arm = shadeColor(block.color, -0.1);
+  /** A rounded "pill" (hand-rest or back cushion) from a local u/v box. */
+  function pill(r, key, props) {
+    const w = r.u1 - r.u0;
+    const h = r.v1 - r.v0;
+    return <rect key={key} x={r.u0} y={r.v0} width={Math.max(w, 0)} height={Math.max(h, 0)} rx={Math.max(Math.min(w, h) / 2, 0)} {...props} />;
+  }
 
-    // Thickness of the backrest strip and the arm caps, as a fraction of
-    // the block's own depth/length so it scales with the piece.
-    const depthPx = alongX ? H : W;
-    const lengthPx = alongX ? W : H;
-    const backThick = Math.max(6, depthPx * 0.26);
-    const armThick = Math.max(10, Math.min(lengthPx * 0.16, depthPx * 1.1));
-    const n = sofaSeatCount(block);
+  /** The seat name, written ON the seat and drawn outside the rotated
+   * group so it stays upright. Two lines when the seat is narrow + tall. */
+  function seatName(text, frame, r, color, key) {
+    const c = frameApply(frame, (r.u0 + r.u1) / 2, (r.v0 + r.v1) / 2);
+    const [w, h] = frameSize(frame, r.u1 - r.u0, r.v1 - r.v0);
+    const lines = nameLines(text, w, h);
+    return (
+      <text key={key} x={c[0]} y={c[1]} className="fp-fig-name" textAnchor="middle" dominantBaseline="central" fill={shadeColor(color, -0.5)}>
+        {lines.map((line, i) => (
+          <tspan key={i} x={c[0]} dy={i === 0 ? (lines.length > 1 ? "-0.55em" : 0) : "1.1em"}>
+            {line}
+          </tspan>
+        ))}
+      </text>
+    );
+  }
 
-    // Build everything in a "local" frame where length runs along u (0..L)
-    // and depth runs along v (0..D), back at v=0, then map to plan XY
-    // depending on rotation (back = side opposite FACING_VECTOR, matching
-    // the existing per-rotation back-edge mapping used throughout).
-    const L = lengthPx;
-    const D = depthPx;
-    const toXY = {
-      0: (u, v) => [X + u, Y + v], // back at top (far wall)
-      180: (u, v) => [X + (L - u), Y + (D - v)], // back at bottom (near wall)
-      90: (u, v) => [X + v, Y + (L - u)], // back at left wall
-      270: (u, v) => [X + (D - v), Y + u], // back at right wall
-    }[rotation];
-    const rect = (u0, v0, u1, v1) => {
-      const [x0, y0] = toXY(u0, v0);
-      const [x1, y1] = toXY(u1, v1);
-      return { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) };
-    };
+  /** Small white number badge on the piece's corner, clear of the name. */
+  function numberBadge(block, bbox) {
+    const cx = bbox.x1 - 8;
+    const cy = bbox.y0 + 8;
+    return (
+      <g pointerEvents="none">
+        <circle cx={cx} cy={cy} r="7.5" fill="#fff" stroke={block.color} strokeWidth="2" />
+        <text x={cx} y={cy} className="fp-badge-num" textAnchor="middle" dominantBaseline="central" fill={block.color}>
+          {block.number}
+        </text>
+      </g>
+    );
+  }
 
-    const parts = [];
-    // Backrest strip along the full back edge.
-    parts.push({ r: rect(0, 0, L, backThick), fill: back, stroke: back, label: `${n} SEATER` });
-    // Arms at both short ends, full depth.
-    parts.push({ r: rect(0, 0, armThick, D), fill: arm, stroke: arm });
-    parts.push({ r: rect(L - armThick, 0, L, D), fill: arm, stroke: arm });
-    // n seat cushions between the arms.
-    const seatStart = armThick;
-    const seatEnd = L - armThick;
-    const seatSpan = Math.max(seatEnd - seatStart, 1);
-    for (let i = 0; i < n; i += 1) {
-      const u0 = seatStart + (seatSpan * i) / n + 1.5;
-      const u1 = seatStart + (seatSpan * (i + 1)) / n - 1.5;
-      parts.push({ r: rect(u0, backThick, u1, D - 2), fill: seatFill, stroke: seatBorder, isSeat: true });
+  /** Sofa / chair / L / curved: one local-frame figure placed with ONE
+   * transform, its names drawn on top, upright, and a number badge. */
+  function renderFigure(block, drawing) {
+    const color = block.color;
+    const seatFill = shadeColor(color, 0.82);
+    const seatBorder = shadeColor(color, 0.05);
+    const seatShape = (fig, key) => (
+      <path key={key} d={roundedPolygon(fig.seatPoints, fig.seatRadii)} fill={seatFill} stroke={seatBorder} strokeWidth="1.5" strokeLinejoin="round" />
+    );
+    const handRests = (fig) => fig.handRests.map((r, i) => pill(r, `h${i}`, { fill: color, fillOpacity: 0.7 }));
+    const backPills = (fig) => fig.backPills.map((r, i) => pill(r, `b${i}`, { fill: color }));
+    let frame;
+    let group;
+    let names;
+
+    if (drawing.kind === "curved") {
+      frame = drawing.frame;
+      const fig = curvedFigure(drawing.longPx, drawing.shortPx, drawing.depthPx);
+      group = (
+        <>
+          <path d={fig.seat.d} fill={seatFill} stroke={seatBorder} strokeWidth={fig.seat.r * 2 + 3} strokeLinejoin="round" />
+          <path d={fig.seat.d} fill={seatFill} stroke={seatFill} strokeWidth={fig.seat.r * 2} strokeLinejoin="round" />
+          <path
+            d={fig.back.d} fill="none" stroke={color} strokeWidth={fig.back.width} strokeLinecap="round"
+            strokeDasharray={`${fig.back.dash} ${fig.back.gap}`} strokeDashoffset={fig.back.offset}
+          />
+          {handRests(fig)}
+        </>
+      );
+      names = seatName("CURVED", frame, { u0: fig.label.u - fig.label.w / 2, u1: fig.label.u + fig.label.w / 2, v0: fig.label.v - fig.label.h / 2, v1: fig.label.v + fig.label.h / 2 }, color, "n");
+    } else if (drawing.kind === "L") {
+      frame = drawing.frame;
+      const fig = lFigure(drawing.longPx, drawing.shortPx, drawing.depthPx);
+      group = (
+        <>
+          {seatShape(fig, "seat")}
+          {backPills(fig)}
+          {handRests(fig)}
+        </>
+      );
+      names = (
+        <>
+          {seatName("L-SHAPE", frame, fig.labelLong, color, "n1")}
+          {seatName("LOUNGE", frame, fig.labelLounge, color, "n2")}
+        </>
+      );
+    } else {
+      const { X, Y, W, H } = drawing.rectXYWH;
+      const alongX = drawing.rotation % 180 === 0;
+      const L = alongX ? W : H;
+      const D = alongX ? H : W;
+      frame = rectFrame(X, Y, L, D, drawing.rotation);
+      const chair = isChair(block);
+      const fig = straightFigure(L, D, chair ? 1 : sofaSeatCount(block));
+      group = (
+        <>
+          {seatShape(fig, "seat")}
+          {backPills(fig)}
+          {handRests(fig)}
+        </>
+      );
+      names = seatName(chair ? "CHAIR" : sofaName(sofaSeatCount(block)), frame, fig.label, color, "n");
     }
-
-    const labelXY = toXY(L / 2, backThick / 2);
-    const labelRotated = rotation === 90 || rotation === 270;
 
     return (
       <>
-        {parts.map((part, i) => (
-          <rect
-            key={i}
-            x={part.r.x} y={part.r.y} width={Math.max(part.r.w, 0)} height={Math.max(part.r.h, 0)}
-            fill={part.fill} stroke={part.stroke} strokeWidth={part.isSeat ? 1 : 0.5} rx="5"
-          />
-        ))}
-        <text
-          x={labelXY[0]} y={labelXY[1] + 3}
-          transform={labelRotated ? `rotate(-90 ${labelXY[0]} ${labelXY[1]})` : undefined}
-          className="fp-sofa-label" textAnchor="middle"
-        >
-          {n} SEATER
-        </text>
+        <g transform={frameCss(frame)}>{group}</g>
+        {names}
+        {numberBadge(block, drawing.bbox)}
       </>
     );
   }
@@ -666,63 +701,11 @@ export function FloorPlan({
     );
   }
 
-  function renderArmShape(block, drawing) {
-    const back = shadeColor(block.color, -0.35);
-    const seatFill = shadeColor(block.color, 0.6);
-    const seatBorder = shadeColor(block.color, 0.15);
-    const arm = shadeColor(block.color, -0.1);
-
-    if (drawing.kind === "curved") {
-      return (
-        <>
-          <path d={drawing.outline} fill={seatFill} stroke={seatBorder} strokeWidth="1" />
-          <path d={drawing.backBand} fill={back} stroke={back} />
-          <text x={drawing.labelAt.x} y={drawing.labelAt.y + 3} className="fp-sofa-label" textAnchor="middle">
-            CURVED
-          </text>
-        </>
-      );
-    }
-
-    // L shape
-    const { backRect, armRect, seatRects, shortSeat, longIsHoriz } = drawing;
-    const toRect = (r) => ({ x: Math.min(r.x0, r.x1), y: Math.min(r.y0, r.y1), w: Math.abs(r.x1 - r.x0), h: Math.abs(r.y1 - r.y0) });
-    const br = toRect(backRect);
-    const ar = toRect(armRect);
-    const sr = toRect(shortSeat);
-    const labelRotated = !longIsHoriz;
-    return (
-      <>
-        <path d={drawing.outline} fill={seatFill} fillOpacity="0.5" stroke={seatBorder} strokeWidth="1" strokeLinejoin="round" />
-        {seatRects.map((r, i) => {
-          const rr = toRect(r);
-          return <rect key={i} x={rr.x + 1.5} y={rr.y + 1.5} width={Math.max(rr.w - 3, 0)} height={Math.max(rr.h - 3, 0)} fill={seatFill} stroke={seatBorder} rx="5" />;
-        })}
-        <rect x={sr.x + 1.5} y={sr.y + 1.5} width={Math.max(sr.w - 3, 0)} height={Math.max(sr.h - 3, 0)} fill={seatFill} stroke={seatBorder} rx="5" />
-        <rect x={ar.x} y={ar.y} width={ar.w} height={ar.h} fill={arm} stroke={arm} rx="5" />
-        <rect x={br.x} y={br.y} width={br.w} height={br.h} fill={back} stroke={back} rx="5" />
-        <text
-          x={drawing.labelAt.x} y={drawing.labelAt.y + 3}
-          transform={labelRotated ? `rotate(-90 ${drawing.labelAt.x} ${drawing.labelAt.y})` : undefined}
-          className="fp-sofa-label" textAnchor="middle"
-        >
-          L-SHAPE
-        </text>
-      </>
-    );
-  }
-
   function renderBlock(block, drawing) {
+    const figure = ARM_SHAPES.has(block.shape) || isStraightSofa(block) || isChair(block);
     let body;
-    if (ARM_SHAPES.has(block.shape)) {
-      body = renderArmShape(block, drawing);
-    } else if (isStraightSofa(block)) {
-      body = (
-        <>
-          <path d={drawing.outline} fill={block.color} fillOpacity="0.12" stroke={block.color} strokeWidth="1" />
-          {renderStraightSofa(block, drawing)}
-        </>
-      );
+    if (figure) {
+      body = renderFigure(block, drawing);
     } else if (isDiningTable(block)) {
       body = renderDiningTable(drawing);
     } else if (isBed(block)) {
@@ -747,8 +730,85 @@ export function FloorPlan({
           className="fp-hit"
         />
         {body}
-        <text x={drawing.labelAt.x} y={drawing.labelAt.y + 4} className="fp-block-number" textAnchor="middle">
-          {block.number}
+        {figure ? null : (
+          <text x={drawing.labelAt.x} y={drawing.labelAt.y + 4} className="fp-block-number" textAnchor="middle">
+            {block.number}
+          </text>
+        )}
+      </g>
+    );
+  }
+
+  /** "FAR WALL" etc. in the wall's own colour, sitting in the label margin
+   * at a spot that keeps clear of that wall's feature labels. Side walls
+   * read vertically; the near wall's name sits beside the camera. */
+  function renderWallName(wall) {
+    const color = WALL_COLORS[wall];
+    const text = WALL_NAMES[wall];
+    const { roomX, roomY, roomW, roomH } = geom;
+    const common = { className: "fp-wall-name", fill: color, textAnchor: "middle", dominantBaseline: "central" };
+
+    if (wall === "near") {
+      const camX = roomX + cameraXFraction(layout?.camera_position) * roomW;
+      const toRight = camX < roomX + roomW * 0.65;
+      return (
+        <text key={wall} {...common} textAnchor={toRight ? "start" : "end"} x={camX + (toRight ? 24 : -24)} y={roomY + roomH + 24}>
+          {text}
+        </text>
+      );
+    }
+
+    // along-the-wall pixel centres of the existing feature labels, so the
+    // wall name can take the first free slot
+    const isFarWall = wall === "far";
+    const along = isFarWall ? roomW : roomH;
+    const origin = isFarWall ? roomX : roomY;
+    const nameLen = text.length * WALL_NAME_CHAR_PX;
+    const groups = mergeAdjacentFeatures(layout?.[WALL_KEY[wall]]?.features || []);
+    const rows = assignLabelRows(groups, geom, wall);
+    const taken = groups.map((group, i) => {
+      const mid = origin + ((group.span[0] + group.span[1]) / 2) * along + (isFarWall ? 0 : rows[i] * 12);
+      return { mid, half: (featureLabel(group).length * 5.4) / 2 + 6 };
+    });
+    const free = (centre) => taken.every((t) => Math.abs(centre - t.mid) > t.half + nameLen / 2);
+    const candidates = [0.5, 0.3, 0.7, 0.15, 0.85].map((t) => origin + Math.min(Math.max(t * along, nameLen / 2 + 4), along - nameLen / 2 - 4));
+    const centre = candidates.find(free) ?? candidates[0];
+
+    if (isFarWall) {
+      return (
+        <text key={wall} {...common} x={centre} y={roomY - 12}>
+          {text}
+        </text>
+      );
+    }
+    const x = wall === "left" ? roomX - 12 : roomX + roomW + 12;
+    return (
+      <text key={wall} {...common} transform={`translate(${x} ${centre}) rotate(${wall === "left" ? -90 : 90})`}>
+        {text}
+      </text>
+    );
+  }
+
+  /** Blue rotate handle at the selected piece's bottom-left corner: drag
+   * about the piece to turn it in 90-degree steps; a tap turns it once. */
+  function renderRotateHandle(block, drawing) {
+    const { bbox } = drawing;
+    const r = 16;
+    const cx = Math.min(Math.max(bbox.x0 - 20, r + 2), geom.planW - r - 2);
+    const cy = Math.min(Math.max(bbox.y1 + 20, r + 2), geom.planH - r - 18);
+    return (
+      <g key={`${block.key}-rotate`}>
+        <line x1={bbox.x0} y1={bbox.y1} x2={cx} y2={cy} className="fp-rotate-link" />
+        <g {...dragHandlers(block, "rotate")} style={{ touchAction: "none", cursor: "grab" }}>
+          <circle cx={cx} cy={cy} r="24" className="fp-hit" />
+          <circle cx={cx} cy={cy} r={r} className="fp-rotate-handle" />
+          <g transform={`translate(${cx - 10} ${cy - 10}) scale(0.8333)`} className="fp-rotate-icon">
+            <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+            <path d="M21 3v5h-5" />
+          </g>
+        </g>
+        <text x={cx} y={cy + r + 12} className="fp-rotate-label" textAnchor="middle">
+          drag to rotate
         </text>
       </g>
     );
@@ -807,6 +867,7 @@ export function FloorPlan({
         {WALLS.map((wall) => (
           <g key={wall}>{renderWallFeatures(wall)}</g>
         ))}
+        {WALLS.map((wall) => renderWallName(wall))}
         {renderObstructions()}
         {renderCamera()}
 
@@ -839,6 +900,7 @@ export function FloorPlan({
                   />
                 ) : null}
                 {!readOnly && selected ? renderResizeHandles(block, drawing) : null}
+                {!readOnly && selected && block.placement ? renderRotateHandle(block, drawing) : null}
               </g>
             );
           })}

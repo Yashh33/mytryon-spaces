@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
@@ -52,6 +52,12 @@ export default function Place() {
   const [addObstructionMode, setAddObstructionMode] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null); // { kind: "piece"|"feature"|"obstruction", label, onConfirm }
   const [fullScreen, setFullScreen] = useState(false);
+  // Guards against stale server replies: every local change to a block's
+  // placement bumps its counter; a reply is only applied if no newer change
+  // happened meanwhile. Blocks with unsaved local changes are also kept as-is
+  // when another block's reply resyncs the list.
+  const changeSeq = useRef({});
+  const dirtyKeys = useRef(new Set());
 
   async function load() {
     setError(null);
@@ -108,28 +114,43 @@ export default function Place() {
   const pendingKey = selectedBlock && !selectedBlock.placement ? selectedBlock.key : null;
 
   function updateBlock(key, patch) {
+    if ("placement" in patch || "widthFt" in patch) {
+      changeSeq.current[key] = (changeSeq.current[key] || 0) + 1;
+      dirtyKeys.current.add(key);
+    }
     setBlocks((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
   }
 
   // Both calls resync attempt + blocks from the server's response rather
   // than trusting the optimistic local update alone, so the chip/canvas
   // placed-state can never drift from what's actually persisted.
+  // Applies a save/remove reply unless a newer change to that block has been
+  // made since the request went out (that change's own reply will follow).
+  function applyReply(block, seq, data) {
+    if ((changeSeq.current[block.key] || 0) !== seq) return;
+    dirtyKeys.current.delete(block.key);
+    setAttempt(data.attempt);
+    setBlocks((prev) =>
+      itemsToBlocks(data.attempt.items).map((fresh) => (dirtyKeys.current.has(fresh.key) ? prev.find((b) => b.key === fresh.key) || fresh : fresh))
+    );
+  }
+
   async function persistPlacement(block, placement, widthFt) {
     const json = widthFt == null ? { placement } : { placement, width_ft: widthFt };
+    const seq = changeSeq.current[block.key] || 0;
     try {
       const data = await api.post(`/api/attempts/${id}/items/${block.itemId}/placement/${block.subIndex}`, { json });
-      setAttempt(data.attempt);
-      setBlocks(itemsToBlocks(data.attempt.items));
+      applyReply(block, seq, data);
     } catch (err) {
       toast(err.message);
     }
   }
 
   async function removePlacement(block) {
+    const seq = changeSeq.current[block.key] || 0;
     try {
       const data = await api.del(`/api/attempts/${id}/items/${block.itemId}/placement/${block.subIndex}`);
-      setAttempt(data.attempt);
-      setBlocks(itemsToBlocks(data.attempt.items));
+      applyReply(block, seq, data);
     } catch (err) {
       toast(err.message);
     }

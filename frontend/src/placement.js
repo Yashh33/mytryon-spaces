@@ -318,6 +318,10 @@ export function isStraightSofa(block) {
   return block.category === "Sofa" && block.shape === "rect";
 }
 
+export function isChair(block) {
+  return block.category === "Chair" && block.shape === "rect";
+}
+
 export function isDiningTable(block) {
   return block.category === "Dining table";
 }
@@ -498,7 +502,7 @@ export function defaultPlacement(shape, widthFt, feet, nx, ny) {
   const cy = ny * feet.hFt;
   if (ARM_SHAPES.has(shape)) {
     const longFt = Math.min(widthFt, feet.wFt);
-    const shortFt = shape === "curved" ? Math.min(longFt, feet.hFt) : longFt * 0.55;
+    const shortFt = shape === "curved" ? Math.min(longFt, feet.hFt) : Math.min(longFt, longFt * BLOCK_DEPTH_RATIO + 2.5);
     const p = {
       corner: "far-left",
       longAxis: "x",
@@ -684,4 +688,180 @@ export function featureFootprint(wall, span) {
   if (wall === "near") return { x: start, y: 1 - THICK, w: end - start, h: THICK };
   if (wall === "left") return { x: 0, y: start, w: THICK, h: end - start };
   return { x: 1 - THICK, y: start, w: THICK, h: end - start }; // "right"
+}
+
+// ---------------------------------------------------------------------------
+// 2D figure geometry (drawing only). Every sofa/chair figure is built in ONE
+// local frame — u along the length, v along the depth, the BACK at v = 0 —
+// and placed on the plan with ONE affine matrix, so no part can end up on the
+// wrong side after Rotate/Flip. Matrices are SVG-style [a, b, c, d, e, f]:
+//   x' = a*u + c*v + e,   y' = b*u + d*v + f
+// ---------------------------------------------------------------------------
+
+const clampNum = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+export function frameApply(m, u, v) {
+  return [m[0] * u + m[2] * v + m[4], m[1] * u + m[3] * v + m[5]];
+}
+
+export function frameCss(m) {
+  return `matrix(${m.join(" ")})`;
+}
+
+/** Screen size of a local w x h box under frame `m` (axes swap on 90/270). */
+export function frameSize(m, w, h) {
+  return m[0] === 0 ? [h, w] : [w, h];
+}
+
+/** Local -> plan matrix for a straight piece (rect) of length L, depth D
+ * whose bounding box top-left is (X, Y); `rotation` names the wall the back
+ * faces (0 far, 90 left, 180 near, 270 right). */
+export function rectFrame(X, Y, L, D, rotation) {
+  if (rotation === 90) return [0, -1, 1, 0, X, Y + L];
+  if (rotation === 180) return [-1, 0, 0, -1, X + L, Y + D];
+  if (rotation === 270) return [0, 1, -1, 0, X + D, Y];
+  return [1, 0, 0, 1, X, Y];
+}
+
+/** Local -> plan matrix for an L/curved block from armParams (any units).
+ * Local origin = the outer bend corner, u runs along the LONG arm, v runs
+ * along the short arm; the back is the outer edge of the long arm (v = 0). */
+export function armFrame(p) {
+  const { sx, sy } = cornerSigns(p.corner);
+  return p.longAxis === "x" ? [sx, 0, 0, sy, p.bx, p.by] : [0, sy, sx, 0, p.bx, p.by];
+}
+
+export function figureMetrics(L, D) {
+  return { t: clampNum(L * 0.08, 5, 11), bt: clampNum(D * 0.26, 5, 11), g: 2 };
+}
+
+function pillRow(u0, u1, bt, n) {
+  const gap = 2;
+  const w = Math.max((u1 - u0 - gap * (n - 1)) / n, 1);
+  return Array.from({ length: n }, (_, i) => ({ u0: u0 + i * (w + gap), v0: 0, u1: u0 + i * (w + gap) + w, v1: bt }));
+}
+
+/** Straight sofa (n seats) or chair (n = 1): back pills along the back,
+ * a hand-rest at both ends across the full depth, one seat. */
+export function straightFigure(L, D, n) {
+  const { t, bt, g } = figureMetrics(L, D);
+  const u0 = t + g;
+  const u1 = L - t - g;
+  const seat = { u0, v0: bt + g, u1, v1: D - 1 };
+  return {
+    handRests: [{ u0: 0, v0: 0, u1: t, v1: D }, { u0: L - t, v0: 0, u1: L, v1: D }],
+    backPills: pillRow(u0, u1, bt, n),
+    seatPoints: [[seat.u0, seat.v0], [seat.u1, seat.v0], [seat.u1, seat.v1], [seat.u0, seat.v1]],
+    seatRadii: [6, 6, 6, 6],
+    label: seat,
+  };
+}
+
+/** L-shape: long arm Lf x d with the back along its full outer side, plus a
+ * lounge (short arm) at the u = 0 end running to S. The lounge has no back;
+ * ONE hand-rest sits outside it at the lounge end; the other end is open. */
+export function lFigure(Lf, S, d) {
+  const { t, bt, g } = figureMetrics(Lf, d);
+  const Sx = Math.max(S, d + 1);
+  const span = Lf - t - g;
+  const n = Math.max(2, Math.round(span / Math.max(d * 0.95, 1)));
+  return {
+    lounge: { u0: 0, v0: 0, u1: d, v1: Sx },
+    handRests: [{ u0: 0, v0: 0, u1: t, v1: Sx }],
+    backPills: pillRow(t + g, Lf, bt, n),
+    seatPoints: [[t + g, bt + g], [Lf - 1, bt + g], [Lf - 1, d - 1], [d - 1, d - 1], [d - 1, Sx - 1], [t + g, Sx - 1]],
+    seatRadii: [6, 6, 6, 2, 6, 6],
+    labelLong: { u0: d, v0: bt + g, u1: Lf - 1, v1: d - 1 },
+    labelLounge: { u0: t + g, v0: d, u1: d - 1, v1: Sx - 1 },
+  };
+}
+
+/** Curved sofa: quarter-annulus around centre (Lf, S) in the local frame.
+ * The back is a thick round-capped dashed stroke along the outer arc, one
+ * seat band, a hand-rest at each end. */
+export function curvedFigure(Lf, S, d) {
+  const { bt, g } = figureMetrics(Lf, d);
+  const rx = Math.max(Lf, d + 2);
+  const ry = Math.max(S, d + 2);
+  const ht = clampNum(d * 0.22, 5, 11);
+  const pt = (ex, ey, a) => [Lf - ex * Math.cos(a), S - ey * Math.sin(a)];
+  const mid = (rx - (bt + d) / 2 + (ry - (bt + d) / 2)) / 2;
+  let a0 = Math.asin(clampNum((ht + g) / Math.max(ry - (bt + d) / 2, 1), 0, 0.95));
+  let a1 = Math.acos(clampNum((ht + g) / Math.max(rx - (bt + d) / 2, 1), 0, 0.95));
+  if (a1 - a0 < 0.3) {
+    a0 = 0.15;
+    a1 = Math.PI / 2 - 0.15;
+  }
+  // back: dashed round-capped stroke on the outer arc's centre line
+  const bx = rx - bt / 2;
+  const by = ry - bt / 2;
+  const b0 = pt(bx, by, a0);
+  const b1 = pt(bx, by, a1);
+  let arcLen = 0;
+  let prev = b0;
+  for (let i = 1; i <= 24; i += 1) {
+    const cur = pt(bx, by, a0 + ((a1 - a0) * i) / 24);
+    arcLen += Math.hypot(cur[0] - prev[0], cur[1] - prev[1]);
+    prev = cur;
+  }
+  const n = Math.max(2, Math.round(arcLen / Math.max(d * 0.95, 1)));
+  const pitch = arcLen / n;
+  const back = {
+    d: `M ${b0[0]} ${b0[1]} A ${bx} ${by} 0 0 1 ${b1[0]} ${b1[1]}`,
+    width: bt,
+    dash: Math.max(pitch - 2 - bt, 0.1),
+    gap: bt + 2,
+    offset: -bt / 2,
+  };
+  // seat band: an inset annular sector; FloorPlan rounds it by stroking it
+  const r = clampNum((d - bt - g) / 4, 1.5, 4);
+  const sox = Math.max(rx - bt - g - r, 1);
+  const soy = Math.max(ry - bt - g - r, 1);
+  const six = Math.max(rx - d + r, 1);
+  const siy = Math.max(ry - d + r, 1);
+  const da = r / Math.max(mid, 1);
+  const s0 = a0 + da;
+  const s1 = a1 - da;
+  const p0 = pt(sox, soy, s0);
+  const p1 = pt(sox, soy, s1);
+  const q1 = pt(six, siy, s1);
+  const q0 = pt(six, siy, s0);
+  const c = pt((sox + six) / 2, (soy + siy) / 2, (s0 + s1) / 2);
+  const band = Math.max(Math.min(sox - six, soy - siy), 1);
+  return {
+    back,
+    seat: {
+      d: `M ${p0[0]} ${p0[1]} A ${sox} ${soy} 0 0 1 ${p1[0]} ${p1[1]} L ${q1[0]} ${q1[1]} A ${six} ${siy} 0 0 0 ${q0[0]} ${q0[1]} Z`,
+      r,
+    },
+    handRests: [{ u0: 0, v0: S - ht, u1: d, v1: S }, { u0: Lf - ht, v0: 0, u1: Lf, v1: d }],
+    label: { u: c[0], v: c[1], w: band, h: band },
+  };
+}
+
+export function sofaName(n) {
+  return n === 1 ? "1 SEAT" : `${n} SEATER`;
+}
+
+/** Lines to print a seat name on: one line normally, two ("2" / "SEATER")
+ * when the seat is narrower than the text and taller than wide. Text is
+ * never rotated. */
+export function nameLines(text, w, h) {
+  const space = text.indexOf(" ");
+  if (space < 0 || text.length * 7.4 <= w || h <= w) return [text];
+  return [text.slice(0, space), text.slice(space + 1)];
+}
+
+/** Whole quarter-turns (0-3) a drag has turned a piece: the pointer's angle
+ * about the piece centre now vs at pointer-down, in 90-degree steps. */
+export function rotateSteps(angleNow, angleStart) {
+  const steps = Math.round((angleNow - angleStart) / (Math.PI / 2));
+  return ((steps % 4) + 4) % 4;
+}
+
+/** Applies rotatePlacement `steps` times to the ORIGINAL placement. */
+export function rotateBy(shape, placement, feet, steps) {
+  let result = placement;
+  for (let i = 0; i < steps; i += 1) result = rotatePlacement(shape, result, feet);
+  return result;
 }

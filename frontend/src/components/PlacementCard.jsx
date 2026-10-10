@@ -46,6 +46,7 @@ export function PlacementCard({
         onCommitBlock={onCommitBlock}
         onResizeBlock={onResizeBlock}
         onCommitResize={onCommitResize}
+        onRotateBlock={onRotate}
         onDropPendingAt={onDropPendingAt}
         pendingKey={pendingKey}
         addObstructionMode={addObstructionMode}

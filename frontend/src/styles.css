@@ -347,6 +347,17 @@ h2 { font-size: 19px; }
   paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 2.5px;
 }
 .fp-sofa-label { font-family: var(--mono); font-size: 7.5px; font-weight: 700; fill: #fff; pointer-events: none; letter-spacing: 0.03em; }
+.fp-fig-name {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 800; letter-spacing: 0.02em; pointer-events: none;
+  paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round;
+}
+.fp-badge-num { font-family: var(--mono); font-size: 9px; font-weight: 800; pointer-events: none; }
+.fp-wall-name { font-size: 13px; font-weight: 800; letter-spacing: 0.03em; pointer-events: none; }
+.fp-rotate-link { stroke: #2563EB; stroke-width: 2; }
+.fp-rotate-handle { fill: #2563EB; stroke: #fff; stroke-width: 2; cursor: grab; }
+.fp-rotate-icon { fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.fp-rotate-label { display: none; font-size: 10px; font-weight: 700; fill: #2563EB; pointer-events: none; }
+@media (min-width: 1024px) { .fp-rotate-label { display: block; } }
 .fp-resize-handle { fill: #fff; stroke: #2563EB; stroke-width: 3; cursor: nwse-resize; }
 .fp-size-label { font-family: var(--mono); font-size: 8.5px; font-weight: 700; fill: var(--ink2); pointer-events: none; }
 .fp-warning-outline { fill: none; stroke: #C77700; stroke-width: 2; stroke-dasharray: 4 3; rx: 3; }

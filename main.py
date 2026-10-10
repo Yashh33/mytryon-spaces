@@ -72,70 +72,78 @@ MODEL_NAME = "gpt-image-2"
 # reference photo in order — see PROMPT_PLACEHOLDERS below.
 # ---------------------------------------------------------------------------
 DEFAULT_GENERATION_PROMPT = """\
-You are compositing furniture into a photograph of a real room.
+{{IMAGE_MANIFEST}}
 
-CAMERA — highest priority
-Reproduce the room photograph from the exact same camera position,
-height, angle and focal length. Do not re-frame, re-crop, zoom, pan or
-change the perspective in any way. The output must look like the same
-photograph with furniture added, not a new photograph of the same room.
+Add the furniture into the room photograph (Image 1).
 
-ROOM — do not alter
-Preserve the room exactly: wall positions, room width, depth and
-ceiling height, floor material and pattern, windows, doors, balcony
-openings, curtains, ceiling fan, light fixtures, and the direction and
-colour of the existing light. Do not enlarge, shrink or reproportion
-the space. Do not add or remove architectural features.
+CAMERA — this requirement overrides every other instruction
+The output must be the same photograph as Image 1, taken from the
+identical camera position, height, angle, tilt, rotation and focal
+length. Do not re-frame, re-crop, zoom, pan, straighten or centre the
+view. Every wall, edge, corner and ceiling line must appear at exactly
+the same angle and in exactly the same place in the frame as in Image 1.
+If a wall is seen obliquely in Image 1, it must still be seen obliquely
+at the same angle. The result must look like Image 1 with furniture added
+to it, never like a new photograph of the same room.
 
-PRODUCT DESIGN — take from the reference photograph
-For each piece, reproduce its design language exactly as shown in its
-reference photograph: fabric, colour, texture, weave, stitching,
-tufting pattern, arm profile, back profile, leg or plinth style,
-cushion style and overall visual character.
+Any description below of where the camera stands is given only to help
+you work out where the furniture goes. It must never change the camera
+position, angle or framing of your output. Match Image 1 exactly.
 
-PRODUCT CONFIGURATION — take from the written specification
-Each piece has a written type and width. Build the piece at that size
-and in that seating configuration, even where the reference photograph
-shows a different one. A two-seater reference at a stated seven feet
-must be rendered as a seven-foot version of that same design, with
-seat count and proportions extended naturally and consistently.
+ROOM LAYOUT, as seen in Image 1
+{{ROOM_LAYOUT}}
 
-When the photograph and the specification disagree:
-- the photograph decides material, colour, texture and design detail
-- the specification decides length, seat count and configuration
+PLACEMENT
+Read these as strict requirements.
 
-PLACEMENT AND SCALE
-Place each piece flat on the floor plane with correct contact shadows.
-Scale each piece to its stated width relative to the room's visible
-architecture — door heights, window sills, floor tiles and ceiling
-height are the references. A seven-foot sofa must measure seven feet
-against those cues.
-Remove any existing furniture occupying the target area and rebuild the
-floor and wall behind it consistently.
+{{PLACEMENT}}
 
-CLEAR THE SPACE
-Remove people, workers, ladders, tools, paint buckets, cement bags,
-stacked tiles, packaging and construction debris. Finish any visibly
-unfinished surfaces — bare plaster becomes painted wall, exposed screed
-becomes finished flooring — while keeping the same materials, layout
-and proportions.
+Keep everything else exactly the same. Preserve the walls, doorways,
+windows, floor, ceiling and room proportions precisely as they appear.
+Change nothing except adding the furniture.
 
-EXCLUDE FROM THE PRODUCT REFERENCE
-Transfer only the furniture itself. Do not bring across rugs, cushions,
-coffee tables, plants, lamps, artwork or any staging visible in the
-product photograph unless that item was separately specified.
+Remove any people from the photograph.
 
-FINISH
-Render a warm, inviting, lived-in interior. Soft warm lighting, gentle
-shadows, clean finished surfaces. Photographic realism at the same
-exposure and white balance as the room photograph. This is an
-aspirational image for a customer deciding on a purchase.
+Each piece takes its fabric, colour, texture, arm, leg and cushion style
+from ITS OWN reference photograph. The NUMBER of seats and cushions is
+never taken from the photograph — it comes only from the configuration
+stated above. Where a photograph shows fewer or more seats than the
+stated configuration, rebuild that piece longer or shorter in the same
+design, adding or removing matching seat and back cushions. Do not apply
+one piece's material or colour to another.
 
-THIS REQUEST
-Room type: {{ROOM_TYPE}}
-Pieces, in the same order as the product reference photographs:
-{{PIECES}}
-"""
+{{CONFIG_NOTES}}
+
+Clear away people, tools, ladders, cement bags, rubble and loose building
+material, and finish all bare surfaces — plaster becomes painted wall,
+screed becomes finished flooring.
+
+Surfaces are often covered with newspaper, plastic sheeting, masking tape
+or protective film during painting and finishing work. Remove the
+covering, but never remove what lies underneath it. Where the covering
+follows the outline of panelling, moulding, recesses, niches, a built-in
+unit, cladding or similar permanent joinery, render that feature complete
+and finished — as it will look once the work is done. A wall with five
+recessed panels must still have five recessed panels. Never replace a
+covered feature with a flat blank wall.
+
+{{ROOM_TREATMENT}}
+
+Add no decorative objects of any kind. No plants, no artwork, no vases,
+no books, no trays, no lamps, no ornaments. A plain rug and a simple
+coffee table are permitted, nothing else. The room must otherwise contain
+only the furniture pieces listed below.
+
+{{LIGHTING}}
+
+The furniture being placed must be the visual focal point of the image.
+Compose, light and stage the room so the eye goes to it first. Anything
+else added to the space must stay secondary and must never compete with
+it for attention.
+
+Room: {{ROOM_TYPE}}
+Furniture:
+{{PIECES}}"""
 
 PROMPT_SETTING_KEY = "generation_prompt"
 PROMPT_PLACEHOLDERS = [

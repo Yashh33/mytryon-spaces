@@ -1144,14 +1144,14 @@ CONFIG_NOTES_BLOCK_RE = re.compile(r"\{\{#CONFIG_NOTES\}\}(.*?)\{\{/CONFIG_NOTES
 # here ever produce a note; "3+2+1" isn't a selectable type yet but is kept
 # for when it is.
 CONFIG_NOTES = {
-    ("Sofa", "3+2"): "A set of two separate sofas: one three-seater and one two-seater, placed as a pair around the same coffee table, usually at right angles or facing each other. Not one continuous sofa.",
-    ("Sofa", "3+3"): "A set of two separate three-seater sofas, placed as a pair, usually facing each other or at right angles. Not one continuous sofa.",
-    ("Sofa", "3+2+1"): "A set of three separate pieces: a three-seater sofa, a two-seater sofa and a single armchair.",
-    ("Sofa", "1-seater"): "One single-seat sofa / armchair in the same design. A single piece.",
-    ("Sofa", "2-seater"): "One straight sofa seating two people. A single piece, not a set.",
-    ("Sofa", "3-seater"): "One straight sofa seating three people. A single piece, not a set.",
-    ("Sofa", "4-seater"): "One straight sofa seating four people. A single piece, not a set.",
-    ("Sofa", "5-seater"): "One straight sofa seating five people. A single piece, not a set.",
+    ("Sofa", "3+2"): "A set of two separate sofas: one three-seater with exactly three seat cushions and three back cushions, and one two-seater with exactly two seat cushions and two back cushions, placed as a pair around the same coffee table, usually at right angles or facing each other. Not one continuous sofa.",
+    ("Sofa", "3+3"): "A set of two separate three-seater sofas, each with exactly three seat cushions and three back cushions, placed as a pair, usually facing each other or at right angles. Not one continuous sofa.",
+    ("Sofa", "3+2+1"): "A set of three separate pieces: a three-seater sofa with exactly three seat cushions and three back cushions, a two-seater sofa with exactly two seat cushions and two back cushions, and a single armchair with exactly one seat cushion and one back cushion.",
+    ("Sofa", "1-seater"): "One single-seat sofa / armchair with exactly one seat cushion and one back cushion. If the reference photograph shows more, rebuild it as a single seat in the same design. A single piece.",
+    ("Sofa", "2-seater"): "One straight sofa with exactly two seat cushions side by side and two back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
+    ("Sofa", "3-seater"): "One straight sofa with exactly three seat cushions side by side and three back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
+    ("Sofa", "4-seater"): "One straight sofa with exactly four seat cushions side by side and four back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
+    ("Sofa", "5-seater"): "One straight sofa with exactly five seat cushions side by side and five back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
     ("Sofa", "L-shape"): "One continuous sectional sofa with a single right-angle turn forming an L. A single piece, not a set.",
     ("Sofa", "Corner"): "One corner sofa with a square corner and a backrest on BOTH arms, hand-rests at both ends. Not curved, no chaise lounge. A single piece.",
     ("Sofa", "Curved"): "One continuous sofa with a gently curved, arcing back rather than straight sections. A single piece.",

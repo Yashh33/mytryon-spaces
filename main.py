@@ -1297,12 +1297,6 @@ FACING_FOR_ROTATION = {
     180: "toward the far wall",
     270: "left, into the room",
 }
-FAR_NEAR_POSITION_THIRDS = ("left third", "centre", "right third")
-SIDE_POSITION_THIRDS = ("far third", "middle third", "near third")
-FEATURE_POSITION_INDEX = {
-    "left third": 0, "centre": 1, "right third": 2,
-    "far third": 0, "middle third": 1, "near third": 2,
-}
 WALL_LAYOUT_KEY = {"far": "far_wall", "left": "left_wall", "right": "right_wall", "near": "near_wall"}
 NO_PLACEMENT_LINE = "Place the furniture where a professional interior stylist would position it in this room."
 
@@ -1332,14 +1326,6 @@ def resolve_rect_wall(rect: dict) -> tuple[str | None, str]:
     return (candidate if against else None), candidate
 
 
-def resolve_wall_position(rect: dict, wall: str) -> str:
-    if wall in ("far", "near"):
-        mid = rect["x"] + rect["w"] / 2
-        return FAR_NEAR_POSITION_THIRDS[_third_index(mid)]
-    mid = rect["y"] + rect["h"] / 2
-    return SIDE_POSITION_THIRDS[_third_index(mid)]
-
-
 def resolve_free_area(rect: dict) -> str:
     x_label = ("left", "centre", "right")[_third_index(rect["x"] + rect["w"] / 2)]
     y_label = ("far", "middle", "near")[_third_index(rect["y"] + rect["h"] / 2)]
@@ -1365,104 +1351,242 @@ def _occupied_thirds(start: float, end: float) -> set[int]:
     return indices
 
 
-def resolve_rect_placement(rect: dict) -> dict:
+FRACTION_WORDS = (
+    (0.1, "a tenth"), (0.2, "a fifth"), (0.25, "a quarter"), (1 / 3, "a third"), (0.4, "two-fifths"),
+    (0.5, "half"), (0.6, "three-fifths"), (2 / 3, "two-thirds"), (0.7, "seven-tenths"),
+    (0.75, "three-quarters"), (0.8, "four-fifths"), (0.9, "nine-tenths"),
+)
+EDGE_TOLERANCE = 0.05  # closer than this to a wall reads as "at" that wall, not a fraction
+CENTRED_TOLERANCE = 0.08
+CORNER_CLEARANCE = 0.08
+NEAR_CORNER_CLEARANCE = 0.15
+FAR_GAP_THRESHOLD = 0.1
+EMPTY_FOREGROUND_THRESHOLD = 0.15
+DOORWAY_TYPES = {"door", "doorway"}
+# The direction an L's short arm leaves its long arm: always the way the long arm's seats face.
+RUN_DIRECTION = {0: "toward the camera", 90: "right", 180: "toward the far wall", 270: "left"}
+DOORWAY_NEGATION = "It is NOT beside the doorway. Clear, empty wall stays visible between its end and the corner."
+
+
+def _fraction_word(value: float) -> str:
+    return min(FRACTION_WORDS, key=lambda fw: abs(fw[0] - value))[1]
+
+
+def _span_sentence(subject: str, wall: str, start: float, end: float, on_wall: bool = True) -> str:
+    """Where along `wall` a piece starts and stops. Far/near walls are measured
+    from the left wall; side walls from the far wall toward the camera."""
+    if wall in ("far", "near"):
+        if abs((start + end) / 2 - 0.5) < CENTRED_TOLERANCE:
+            if not on_wall:
+                return f"{subject} is CENTRED between the left and right walls."
+            return f"{subject} is CENTRED on the {wall} wall: its middle lines up with the MIDDLE of the {wall} wall."
+        origin, first_wall, last_wall, joiner = "from the left wall", "the left wall", "the right wall", " and"
+    else:
+        origin, first_wall, last_wall, joiner = "from the far wall toward the camera", "the far wall", "the near wall", ", and"
+    at_first = start <= EDGE_TOLERANCE
+    starts = f"at {first_wall}" if at_first else f"about {_fraction_word(start)} of the way {origin}"
+    if end >= 1 - EDGE_TOLERANCE:
+        ends = f"at {last_wall}"
+    else:
+        ends = f"about {_fraction_word(end)} of the way" + (f" {origin}" if at_first else "")
+    return f"{subject} starts {starts}{joiner} ends {ends}."
+
+
+def _feature_thirds(position: object, wall: str) -> set[int]:
+    """The thirds of `wall` a feature covers. Tolerant of free-text positions
+    from the vision model, e.g. "centre, extending into the right third"."""
+    text = str(position or "").lower()
+    if wall in ("far", "near"):
+        words = ((0, r"\bleft\b"), (1, r"\b(centre|center|middle)\b"), (2, r"\bright\b"))
+    else:
+        words = ((0, r"\bfar\b"), (1, r"\b(centre|center|middle)\b"), (2, r"\bnear\b"))
+    found = {idx for idx, pattern in words if re.search(pattern, text)}
+    if re.search(r"\b(full|whole|entire)\b", text):
+        return {0, 1, 2}
+    return set(range(min(found), max(found) + 1)) if found else set()
+
+
+def _wall_features(layout_json: dict | None, wall: str) -> list[dict]:
+    return ((layout_json or {}).get(WALL_LAYOUT_KEY[wall]) or {}).get("features") or []
+
+
+def _feature_clauses_for(wall: str, span: tuple[float, float], layout_json: dict | None) -> list[str]:
+    start, end = span
+    occupied = _occupied_thirds(start, end)
+    clauses = []
+    for feature in _wall_features(layout_json, wall):
+        thirds = _feature_thirds(feature.get("position"), wall)
+        if not thirds:
+            continue
+        label = _feature_label(feature)
+        overlaps = start < (max(thirds) + 1) / 3 and end > min(thirds) / 3
+        if overlaps and wall == "far" and feature.get("type") == "window":
+            clauses.append("It stands in front of the window, below the sill.")
+        elif overlaps:
+            clauses.append(f"It does not obstruct the {label}.")
+        elif min(abs(t - o) for t in thirds for o in occupied) == 1:
+            clauses.append(f"It stops before reaching the {label}, leaving it fully visible.")
+    return clauses
+
+
+def _clear_of_adjacent_doorway(wall: str, start: float, end: float, layout_json: dict | None) -> bool:
+    """True when a doorway sits on a neighbouring wall, at the end that meets
+    this piece's wall, and the piece stops short of that corner."""
+    if wall in ("far", "near"):
+        door_third = 0 if wall == "far" else 2  # far/near end of the side wall
+        ends = (("left", start), ("right", 1 - end))
+    else:
+        door_third = 0 if wall == "left" else 2  # left/right end of the far or near wall
+        ends = (("far", start), ("near", 1 - end))
+    for adjacent, gap in ends:
+        if gap <= CORNER_CLEARANCE:
+            continue
+        for feature in _wall_features(layout_json, adjacent):
+            if feature.get("type") in DOORWAY_TYPES and door_third in _feature_thirds(feature.get("position"), adjacent):
+                return True
+    return False
+
+
+def _wall_negations(wall: str, start: float, end: float, layout_json: dict | None) -> list[str]:
+    """The model's habit is to push pieces into corners and beside doors, so
+    say what NOT to do whenever the plan shows otherwise."""
+    out = []
+    if start > CORNER_CLEARANCE and 1 - end > CORNER_CLEARANCE:
+        out.append("It is NOT in a corner.")
+    if wall in ("left", "right") and 1 - end > NEAR_CORNER_CLEARANCE:
+        out.append("It is NOT in the corner nearest the camera.")
+    if _clear_of_adjacent_doorway(wall, start, end, layout_json):
+        out.append(DOORWAY_NEGATION)
+    return out
+
+
+def _centre_sentence(subject: str, rect: dict) -> str:
+    cx = rect["x"] + rect["w"] / 2
+    cy = rect["y"] + rect["h"] / 2
+    return (
+        f"{subject} middle is about {_fraction_word(cx)} of the way from the left wall and about "
+        f"{_fraction_word(cy)} of the way from the far wall toward the camera."
+    )
+
+
+def _resolution(wall: str | None, span: tuple[float, float], sentence: str, rects: list[dict], layout_json: dict | None) -> dict:
+    extras = []
+    if wall:
+        extras = _feature_clauses_for(wall, span, layout_json) + _wall_negations(wall, span[0], span[1], layout_json)
+    return {
+        "wall": wall,
+        "sentence": sentence,
+        "extras": extras,
+        "span": span if wall else (None, None),
+        "sort_key": span[0] if wall else None,
+        "near_edge": max(r["y"] + r["h"] for r in rects),
+    }
+
+
+def resolve_rect_placement(rect: dict, layout_json: dict | None = None) -> dict:
     wall, _candidate = resolve_rect_wall(rect)
     facing = FACING_FOR_ROTATION[rect["rotation"]]
-    if wall:
-        position = resolve_wall_position(rect, wall)
+    if not wall:
         sentence = (
-            f"It stands against the {wall} wall, back flat against that wall, "
-            f"in the {position} of that wall. Its seats face {facing}."
+            f"It stands in {resolve_free_area(rect)}, clear of the walls. {_centre_sentence('Its', rect)} "
+            f"Its seats face {facing}."
         )
-        start, end = _rect_span(rect, wall)
-        sort_key = start
-    else:
-        sentence = f"It stands in {resolve_free_area(rect)}, clear of the walls. Its seats face {facing}."
-        start = end = sort_key = None
-    return {"wall": wall, "sentence": sentence, "span": (start, end), "sort_key": sort_key}
+        return _resolution(None, (0, 0), sentence, [rect], layout_json)
+    start, end = _rect_span(rect, wall)
+    parts = [f"It stands against the {wall} wall, back flat against that wall.", _span_sentence("It", wall, start, end)]
+    if wall in ("left", "right") and start > FAR_GAP_THRESHOLD:
+        parts.append("A stretch of empty floor stays between it and the far wall.")
+    parts.append(f"Its seats face {facing}.")
+    return _resolution(wall, (start, end), " ".join(parts), [rect], layout_json)
 
 
-def _direction_from_corner(corner: str, wall_candidate: str) -> str:
-    depth_word, _, side_word = corner.partition("-")
-    if wall_candidate in ("far", "near"):
-        return "right" if side_word == "left" else "left"
-    return "toward the camera" if depth_word == "far" else "toward the far wall"
+def resolve_l_placement(
+    placement: dict,
+    layout_json: dict | None = None,
+    intro: str = "It is one L-shaped sofa.",
+    bend_name: str = "The bend of the L",
+) -> dict:
+    """Describes an L (or corner sofa) from where its two arm boxes actually
+    are. geometry.corner only says which end of the L the bend is on, so it
+    is never used as a position in the room."""
+    long_rect, short_rect = placement["long"], placement["short"]
+    long_wall, along = resolve_rect_wall(long_rect)  # `along`: the wall the long arm runs parallel to
+    side_wall = along in ("left", "right")
+    start, end = _rect_span(long_rect, along)
+    short_start, short_end = _rect_span(short_rect, along)
 
-
-def _l_arm_line(lead: str, wall_candidate: str, against: bool, direction: str, include_back_flat: bool) -> str:
-    if against:
-        if include_back_flat:
-            return f"{lead} runs along the {wall_candidate} wall, back flat against that wall, extending {direction} from the corner."
-        return f"{lead} runs from that corner {direction}."
-    if include_back_flat:
-        return f"{lead} runs extending {direction} from the corner, parallel to the {wall_candidate} wall but standing clear of it."
-    return f"{lead} runs from that corner {direction}, parallel to the {wall_candidate} wall but standing clear of it."
-
-
-def resolve_l_placement(placement: dict, corner_line: str | None = None) -> dict:
-    long_rect, short_rect, corner = placement["long"], placement["short"], placement["corner"]
-    long_wall, long_candidate = resolve_rect_wall(long_rect)
-    short_wall, short_candidate = resolve_rect_wall(short_rect)
-    long_direction = _direction_from_corner(corner, long_candidate)
-    short_direction = _direction_from_corner(corner, short_candidate)
-
-    sentence = " ".join(
-        [
-            corner_line or f"The corner of the L sits in the {corner} of the room.",
-            _l_arm_line("Its long arm", long_candidate, long_wall is not None, long_direction, True),
-            _l_arm_line("Its short arm", short_candidate, short_wall is not None, short_direction, False),
-            f"The seats on the long arm face {FACING_FOR_ROTATION[long_rect['rotation']]}.",
-            f"The seats on the short arm face {FACING_FOR_ROTATION[short_rect['rotation']]}.",
-        ]
-    )
-    return _arm_resolution(long_rect, long_wall, sentence)
-
-
-def _arm_resolution(long_rect: dict, long_wall: str | None, sentence: str) -> dict:
-    # the long arm anchors NEIGHBOURS/FEATURES grouping, since it's the one
-    # that runs the full length of a wall
     if long_wall:
-        start, end = _rect_span(long_rect, long_wall)
-        sort_key = start
+        parts = [intro, f"Its long arm stands against the {long_wall} wall, back flat against that wall."]
     else:
-        start = end = sort_key = None
-    return {"wall": long_wall, "sentence": sentence, "span": (start, end), "sort_key": sort_key}
+        parts = [intro, f"Its long arm stands in {resolve_free_area(long_rect)}, parallel to the {along} wall but clear of it."]
+    parts.append(_span_sentence("The long arm", along, start, end, on_wall=long_wall is not None))
+    if long_wall and side_wall and start > FAR_GAP_THRESHOLD:
+        parts.append("A stretch of empty floor stays between it and the far wall.")
+
+    bend_at_high_end = (short_start + short_end) / 2 > (start + end) / 2
+    if side_wall:
+        bend_end = "the end of the long arm nearest the camera" if bend_at_high_end else "the end of the long arm nearest the far wall"
+    else:
+        bend_end = "the right end of the long arm" if bend_at_high_end else "the left end of the long arm"
+    parts.append(f"{bend_name} is at {bend_end}.")
+
+    direction = RUN_DIRECTION[long_rect["rotation"]]
+    if side_wall:
+        # how far across the room the short arm reaches, measured from the long arm's own wall
+        reach = short_rect["x"] + short_rect["w"] if along == "left" else 1 - short_rect["x"]
+        measure = "width"
+    else:
+        reach = short_rect["y"] + short_rect["h"] if along == "far" else 1 - short_rect["y"]
+        measure = "depth"
+    if long_wall:
+        parts.append(f"The short arm runs {direction} from the {along} wall to about {_fraction_word(reach)} of the room's {measure}.")
+    else:
+        parts.append(
+            f"The short arm runs {direction} from the long arm, reaching about {_fraction_word(reach)} of the "
+            f"room's {measure} measured from the {along} wall."
+        )
+    parts.append(f"Its seats face {FACING_FOR_ROTATION[short_rect['rotation']]}.")
+    parts.append(f"The seats on the long arm face {FACING_FOR_ROTATION[long_rect['rotation']]}.")
+
+    span = (min(start, short_start), max(end, short_end))
+    return _resolution(long_wall, span, " ".join(parts), [long_rect, short_rect], layout_json)
 
 
-def _curved_end_clause(lead: str, wall_candidate: str, against: bool) -> str:
-    if against:
-        return f"{lead} reaches along the {wall_candidate} wall, close against it."
-    return f"{lead} reaches toward the {wall_candidate} wall but stands clear of it."
+def resolve_curved_placement(placement: dict, layout_json: dict | None = None) -> dict:
+    """A curved sofa shares the L's {long, short} arm boxes but is one
+    arc-backed piece. Its orientation comes from which sides the two arms'
+    backs are on, and its position from where the boxes actually are."""
+    long_rect, short_rect = placement["long"], placement["short"]
+    long_wall, along = resolve_rect_wall(long_rect)
+    backs = {WALL_FOR_ROTATION[long_rect["rotation"]], WALL_FOR_ROTATION[short_rect["rotation"]]}
+    depth_word = "far" if "far" in backs else "near"
+    side_word = "left" if "left" in backs else "right"
+    opposite = f"{'near' if depth_word == 'far' else 'far'}-{'right' if side_word == 'left' else 'left'}"
+    x0 = min(long_rect["x"], short_rect["x"])
+    y0 = min(long_rect["y"], short_rect["y"])
+    x1 = max(long_rect["x"] + long_rect["w"], short_rect["x"] + short_rect["w"])
+    y1 = max(long_rect["y"] + long_rect["h"], short_rect["y"] + short_rect["h"])
+    bbox = {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+    parts = [
+        f"It is one continuous curved sofa. Its back bulges toward the {depth_word}-{side_word} and its seats face "
+        f"the opposite way, diagonally toward the {opposite}.",
+        f"It stands in {resolve_free_area(bbox)}." if not long_wall else f"One end runs along the {long_wall} wall, close against it.",
+        _centre_sentence("Its", bbox),
+    ]
+    span = _rect_span(bbox, along)
+    return _resolution(long_wall, span, " ".join(parts), [long_rect, short_rect], layout_json)
 
 
-def resolve_curved_placement(placement: dict) -> dict:
-    """A curved sofa shares the L's {long, short, corner} geometry, but is
-    one arc-backed piece: its back curves around `corner` and its two ends
-    run toward the walls either side of that corner."""
-    long_rect, short_rect, corner = placement["long"], placement["short"], placement["corner"]
-    long_wall, long_candidate = resolve_rect_wall(long_rect)
-    short_wall, short_candidate = resolve_rect_wall(short_rect)
-    sentence = " ".join(
-        [
-            f"It is one continuous curved sofa whose back arcs around the {corner} of the room.",
-            _curved_end_clause("One end", long_candidate, long_wall is not None),
-            _curved_end_clause("The other end", short_candidate, short_wall is not None),
-            f"Its seats face diagonally into the room, away from the {corner}.",
-        ]
-    )
-    return _arm_resolution(long_rect, long_wall, sentence)
-
-
-def resolve_round_placement(rect: dict) -> dict:
+def resolve_round_placement(rect: dict, layout_json: dict | None = None) -> dict:
     """A round piece (e.g. a round dining table) has no back to set against
     a wall and no single seat direction, so it's described by position only."""
-    resolved = resolve_rect_placement(rect)
-    if resolved["wall"]:
-        position = resolve_wall_position(rect, resolved["wall"])
-        resolved["sentence"] = f"It stands close to the {resolved['wall']} wall, in the {position} of that wall."
-    else:
-        resolved["sentence"] = f"It stands in {resolve_free_area(rect)}, clear of the walls."
-    return resolved
+    wall, _candidate = resolve_rect_wall(rect)
+    if wall:
+        start, end = _rect_span(rect, wall)
+        sentence = f"It stands close to the {wall} wall. {_span_sentence('It', wall, start, end)}"
+        return _resolution(wall, (start, end), sentence, [rect], layout_json)
+    sentence = f"It stands in {resolve_free_area(rect)}, clear of the walls. {_centre_sentence('Its', rect)}"
+    return _resolution(None, (0, 0), sentence, [rect], layout_json)
 
 
 def _feature_label(feature: dict) -> str:
@@ -1471,24 +1595,6 @@ def _feature_label(feature: dict) -> str:
         notes = (feature.get("notes") or "").strip()
         return notes if notes else "feature"
     return feature_type
-
-
-def _feature_clauses_for(span: tuple[float, float], wall_data: dict | None) -> list[str]:
-    features = (wall_data or {}).get("features") or []
-    if not features or span[0] is None:
-        return []
-    occupied = _occupied_thirds(*span)
-    clauses = []
-    for feature in features:
-        idx = FEATURE_POSITION_INDEX.get(feature.get("position"))
-        if idx is None:
-            continue
-        label = _feature_label(feature)
-        if idx in occupied:
-            clauses.append(f"It does not obstruct the {label}.")
-        elif min(abs(idx - o) for o in occupied) == 1:
-            clauses.append(f"It stops before reaching the {label}, leaving it fully visible.")
-    return clauses
 
 
 def _format_piece_list(numbers: list[int]) -> str:
@@ -1563,21 +1669,19 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
     resolved = []
     for rec in records:
         if rec["shape"] == "L":
-            resolved.append(resolve_l_placement(rec["geometry"]))
+            resolved.append(resolve_l_placement(rec["geometry"], layout_json))
         elif rec["shape"] == "corner":
-            corner = rec["geometry"]["corner"]
             resolved.append(
                 resolve_l_placement(
-                    rec["geometry"],
-                    f"It is one corner sofa with backrests along both arms; its corner sits in the {corner} of the room.",
+                    rec["geometry"], layout_json, "It is one corner sofa with backrests along both arms.", "The corner of the sofa"
                 )
             )
         elif rec["shape"] == "curved":
-            resolved.append(resolve_curved_placement(rec["geometry"]))
+            resolved.append(resolve_curved_placement(rec["geometry"], layout_json))
         elif rec["shape"] == "round":
-            resolved.append(resolve_round_placement(rec["geometry"]))
+            resolved.append(resolve_round_placement(rec["geometry"], layout_json))
         else:
-            resolved.append(resolve_rect_placement(rec["geometry"]))
+            resolved.append(resolve_rect_placement(rec["geometry"], layout_json))
 
     wall_groups: dict[str, list[int]] = {}
     for idx, r in enumerate(resolved):
@@ -1594,12 +1698,6 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
             else:
                 neighbour_clause[ordered[pos]] = f"beyond Piece {prev_piece_number}, toward the camera."
 
-    feature_clauses: list[list[str]] = []
-    for r in resolved:
-        wall = r["wall"]
-        wall_data = (layout_json or {}).get(WALL_LAYOUT_KEY[wall]) if wall else None
-        feature_clauses.append(_feature_clauses_for(r["span"], wall_data) if wall else [])
-
     lines: list[str] = []
     counter = 1
     item_groups: dict[int, dict] = {}
@@ -1615,7 +1713,7 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
         extra_parts = []
         if neighbour_clause[idx]:
             extra_parts.append(neighbour_clause[idx])
-        extra_parts.extend(feature_clauses[idx])
+        extra_parts.extend(resolved[idx]["extras"])
         if extra_parts:
             combined = " ".join(extra_parts)
             combined = combined[0].upper() + combined[1:]
@@ -1668,6 +1766,14 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
         counter += 1
 
     lines.append(f"{counter}. The rest of the floor stays open and empty.")
+    counter += 1
+
+    foreground = 1 - max(r["near_edge"] for r in resolved)
+    if foreground >= EMPTY_FOREGROUND_THRESHOLD:
+        lines.append(
+            f"{counter}. Between the furniture and the camera, the nearest {_fraction_word(foreground).removeprefix('a ')} of the "
+            "floor stays completely empty. No piece reaches the bottom edge of the frame."
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1703,8 +1809,10 @@ def _wall_features_clause(wall_data: dict | None) -> str:
 
 def _obstruction_phrase(obstruction: dict) -> str:
     obstruction_type = obstruction.get("type") or "obstruction"
-    location = (obstruction.get("location") or "").strip()
-    return f"a {obstruction_type} {location}" if location else f"a {obstruction_type}"
+    location = (obstruction.get("location") or "").strip().rstrip(".")
+    if not location:
+        return f"a {obstruction_type}"
+    return f"a {obstruction_type} {location[0].lower()}{location[1:]}"
 
 
 def build_room_layout_text(layout_json: dict | None) -> str:
@@ -1715,17 +1823,20 @@ def build_room_layout_text(layout_json: dict | None) -> str:
     left_clause = _wall_features_clause(layout_json.get("left_wall"))
     right_clause = _wall_features_clause(layout_json.get("right_wall"))
 
-    obstructions = layout_json.get("obstructions") or []
-    if obstructions:
-        left_clause += ", and " + " and ".join(_obstruction_phrase(o) for o in obstructions)
-
     lines = [
         f"The room is {layout_json.get('depth_vs_width') or 'about square'}.",
         f"Far wall: {far_clause}.",
         f"Left wall: {left_clause}.",
         f"Right wall: {right_clause}.",
-        f"For placement purposes only, the camera stands at the {layout_json.get('camera_position') or 'near end of the room'}.",
     ]
+    # obstructions stand anywhere in the room, so they get their own line
+    # rather than being attached to a wall they may not be on
+    obstructions = layout_json.get("obstructions") or []
+    if obstructions:
+        lines.append("Obstructions: " + "; ".join(_obstruction_phrase(o) for o in obstructions) + ".")
+    lines.append(
+        f"For placement purposes only, the camera stands at the {layout_json.get('camera_position') or 'near end of the room'}."
+    )
     return "\n".join(lines) + "\n"
 
 

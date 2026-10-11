@@ -5,13 +5,6 @@ import { useToast } from "../components/Toast.jsx";
 
 const PHASES = ["Reading the room…", "Placing the furniture…", "Setting the light…", "Adding final touches…"];
 
-function mmss(ms) {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
-}
-
 export default function Generating() {
   const { id } = useParams();
   const location = useLocation();
@@ -126,7 +119,6 @@ export default function Generating() {
         </div>
         <div className="gen-side">
           <div className="ring" />
-          <div className="timer">{mmss(elapsed)}</div>
           <ol className="gen-steps">
             {PHASES.map((label, i) => (
               <li key={label} className={"gen-step" + (i < phaseIdx ? " done" : i === phaseIdx ? " active" : "")}>

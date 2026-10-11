@@ -38,8 +38,11 @@ export default function Customers() {
       .catch(() => {});
   }, []);
 
+  // Re-runs when "new" appears in the URL (e.g. Menu → New visualisation while already on Home).
+  // Removing the param flips wantsNew back to false, so this cannot loop.
+  const wantsNew = searchParams.get("new") === "1";
   useEffect(() => {
-    if (searchParams.get("new") === "1") {
+    if (wantsNew) {
       setShowAdd(true);
       setSearchParams((params) => {
         params.delete("new");
@@ -47,7 +50,7 @@ export default function Customers() {
       }, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [wantsNew]);
 
   const isOwnerRole = OWNER_ROLES.includes(user.role);
   const showLowCreditStrip = isOwnerRole && credits && credits.balance < credits.monthly_credits * 0.1;

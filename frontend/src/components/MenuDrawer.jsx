@@ -23,7 +23,7 @@ export function MenuDrawer({ open, onClose }) {
   useEffect(() => {
     onClose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname]);
+  }, [location.pathname, location.search]);
 
   if (!user) return null;
 
@@ -64,6 +64,7 @@ export function MenuDrawer({ open, onClose }) {
             <Link
               key={r.key}
               to={r.to}
+              onClick={onClose}
               className={"menu-drawer-row" + (location.pathname === r.to.split("?")[0] ? " active" : "")}
             >
               <span className="menu-drawer-row-tile">

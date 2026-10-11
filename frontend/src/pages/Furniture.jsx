@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
+import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { debugLog } from "../utils.js";
@@ -117,6 +118,7 @@ function QtyStepper({ count, onChange, canAdd, label }) {
 
 export default function Furniture() {
   const { id } = useParams();
+  const adjust = useAdjustMode(id); // set when opened from "Adjust & try again"
   const navigate = useNavigate();
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
@@ -240,7 +242,7 @@ export default function Furniture() {
   return (
     <div className="screen">
       <TopBar
-        backTo={`/room/${attempt.room.id}`}
+        backTo={adjust.backTo || `/room/${attempt.room.id}`}
         crumbs={[
           { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
           { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
@@ -248,7 +250,7 @@ export default function Furniture() {
         ]}
       />
       <div className="eyebrow">Step 2 of 4</div>
-      <StepBar current={2} attemptId={attempt.id} roomId={attempt.room.id} />
+      <StepBar current={2} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
         <h1 style={{ marginBottom: 0 }}>Add furniture</h1>
         <button type="button" className="link-btn" onClick={() => setShowPlan(true)}>
@@ -376,7 +378,7 @@ export default function Furniture() {
         className="btn btn-primary furn-next"
         style={{ marginTop: 20 }}
         disabled={!attempt.items.length}
-        onClick={() => navigate(`/attempt/${id}/place`)}
+        onClick={() => navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`)}
       >
         Next — placement
       </button>

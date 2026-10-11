@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
+import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
 
 const ROOM_TREATMENTS = [
@@ -19,6 +20,7 @@ const LIGHTINGS = [
 
 export default function Finish() {
   const { id } = useParams();
+  const adjust = useAdjustMode(id); // set when opened from "Adjust & try again"
   const [searchParams] = useSearchParams();
   const ignorePlacement = searchParams.get("ignore_placement") === "true";
   const navigate = useNavigate();
@@ -65,7 +67,7 @@ export default function Finish() {
   return (
     <div className="screen">
       <TopBar
-        backTo={`/attempt/${id}/place`}
+        backTo={adjust.backTo || `/attempt/${id}/place`}
         crumbs={[
           { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
           { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
@@ -73,7 +75,7 @@ export default function Finish() {
         ]}
       />
       <div className="eyebrow">Step 4 of 4</div>
-      <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} />
+      <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} />
       <h1 style={{ marginBottom: 20 }}>Finishing touches</h1>
 
       <div className="finish-layout">

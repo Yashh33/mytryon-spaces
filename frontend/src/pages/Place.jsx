@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
+import { useAdjustMode } from "../adjustMode.js";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { PieceControls, PlacementCard } from "../components/PlacementCard.jsx";
 import { RoomPhotoReference } from "../components/RoomPhotoReference.jsx";
@@ -44,6 +45,7 @@ function emptyLayout() {
 
 export default function Place() {
   const { id } = useParams();
+  const adjust = useAdjustMode(id); // set when opened from "Adjust & try again"
   const navigate = useNavigate();
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
@@ -336,11 +338,11 @@ export default function Place() {
     } catch {
       // the writer is a bonus; never block the flow on it
     }
-    navigate(`/attempt/${id}/finish`);
+    navigate(`/attempt/${id}/finish${adjust.query ? `?${adjust.query}` : ""}`);
   }
 
-  if (!attempt && !error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><Loading /></div>;
-  if (error) return <div className="screen"><TopBar backTo={`/attempt/${id}/furniture`} /><ErrorBlock message={error} onRetry={load} /></div>;
+  if (!attempt && !error) return <div className="screen"><TopBar backTo={adjust.backTo || `/attempt/${id}/furniture`} /><Loading /></div>;
+  if (error) return <div className="screen"><TopBar backTo={adjust.backTo || `/attempt/${id}/furniture`} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   const placementCardProps = {
     room,
@@ -369,7 +371,7 @@ export default function Place() {
   return (
     <div className="screen">
       <TopBar
-        backTo={`/attempt/${id}/furniture`}
+        backTo={adjust.backTo || `/attempt/${id}/furniture`}
         crumbs={[
           { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
           { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
@@ -377,7 +379,7 @@ export default function Place() {
         ]}
       />
       <div className="eyebrow">Step 3 of 4</div>
-      <StepBar current={3} attemptId={attempt.id} roomId={attempt.room.id} />
+      <StepBar current={3} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} />
       <h1 style={{ marginBottom: 4 }}>Where does each piece go?</h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
         {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}
@@ -453,7 +455,7 @@ export default function Place() {
             <button type="button" className="btn btn-primary" disabled={leaving} onClick={handleNext}>
               {leaving ? "Saving plan…" : "Next"}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/finish?ignore_placement=true`)}>
+            <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/finish?ignore_placement=true${adjust.query ? `&${adjust.query}` : ""}`)}>
               Skip placement
             </button>
           </div>

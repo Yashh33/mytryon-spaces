@@ -7,12 +7,14 @@ const STEPS = [
   { n: 4, label: "Finish" },
 ];
 
-export function StepBar({ current, attemptId, roomId }) {
+/** `query` (e.g. "adjust=12") is kept on links between the attempt's own steps. */
+export function StepBar({ current, attemptId, roomId, query = "" }) {
   function targetFor(n) {
     if (n === 1) return `/room/${roomId}`;
-    if (n === 2) return `/attempt/${attemptId}/furniture`;
-    if (n === 3) return `/attempt/${attemptId}/place`;
-    return `/attempt/${attemptId}/finish`;
+    const suffix = query ? `?${query}` : "";
+    if (n === 2) return `/attempt/${attemptId}/furniture${suffix}`;
+    if (n === 3) return `/attempt/${attemptId}/place${suffix}`;
+    return `/attempt/${attemptId}/finish${suffix}`;
   }
 
   return (

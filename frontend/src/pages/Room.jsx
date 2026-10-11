@@ -43,7 +43,14 @@ export default function Room() {
   if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
 
   const { room, attempts } = data;
-  const numberById = new Map([...attempts].sort((a, b) => a.id - b.id).map((a, i) => [a.id, i + 1]));
+  // Only attempts that produced a picture are numbered, so the salesman sees
+  // Attempt 1, 2, 3… without gaps; the rest are drafts still being set up.
+  const numberById = new Map(
+    attempts
+      .filter((a) => a.latest_render)
+      .sort((a, b) => a.id - b.id)
+      .map((a, i) => [a.id, i + 1])
+  );
 
   return (
     <div className="screen">
@@ -81,7 +88,7 @@ export default function Room() {
                 {a.is_picked ? <div className="pick-star">&#9733;</div> : null}
                 <img className="thumb" src={a.latest_render ? a.latest_render.image_url : room.photo_url} alt="" loading="lazy" />
                 <div className="meta">
-                  <div className="title">Attempt {numberById.get(a.id)}</div>
+                  <div className="title">{a.latest_render ? `Attempt ${numberById.get(a.id)}` : "Draft"}</div>
                   <div className="sub">
                     {a.room_treatment.toUpperCase()} &middot; {a.lighting.toUpperCase()}
                   </div>

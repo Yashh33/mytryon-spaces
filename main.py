@@ -3097,6 +3097,23 @@ def api_update_room_layout(
     return JSONResponse(content={"room": room_detail(room)})
 
 
+def delete_empty_attempts(db: Session, room: Room, keep_id: int | None = None) -> int:
+    """Removes the room's abandoned, truly empty attempts — no items, no
+    renders and no credit_ledger rows — so they don't pile up each time a new
+    one is started. An attempt with any of those is never touched."""
+    deleted = 0
+    for attempt in list(room.attempts):
+        if attempt.id == keep_id or attempt.items or attempt.renders:
+            continue
+        if db.query(CreditLedger.id).filter(CreditLedger.attempt_id == attempt.id).first() is not None:
+            continue
+        db.delete(attempt)
+        deleted += 1
+    if deleted:
+        db.flush()
+    return deleted
+
+
 class CreateAttemptBody(BaseModel):
     clone_from_attempt_id: int | None = None
 
@@ -3122,6 +3139,8 @@ def api_create_attempt(
         room_treatment = source.room_treatment
         lighting = source.lighting
         source_items = source.items
+
+    delete_empty_attempts(db, room, keep_id=clone_from_attempt_id)
 
     attempt = Attempt(room_id=room.id, room_treatment=room_treatment, lighting=lighting)
     db.add(attempt)

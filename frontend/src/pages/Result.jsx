@@ -23,7 +23,8 @@ export default function Result() {
       setAttempt(data.attempt);
       setShowingAfter(true);
       const roomData = await api.get(`/api/rooms/${data.attempt.room.id}`);
-      const sorted = [...roomData.attempts].sort((a, b) => a.id - b.id);
+      // numbered like the room page: only attempts that produced a picture count
+      const sorted = roomData.attempts.filter((a) => a.latest_render).sort((a, b) => a.id - b.id);
       const idx = sorted.findIndex((a) => a.id === data.attempt.id);
       setNumber(idx + 1);
     } catch (err) {

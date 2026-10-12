@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { withQuery } from "../utils.js";
 
 const OWNER_ROLES = ["owner", "superadmin"];
 const ROLE_LABELS = { salesman: "Salesman", owner: "Owner", superadmin: "Superadmin" };
@@ -30,10 +31,14 @@ export function MenuDrawer({ open, onClose }) {
   const isSuperadmin = user.role === "superadmin";
   const isOwnerRole = OWNER_ROLES.includes(user.role);
   const homeTarget = isSuperadmin ? "/super" : "/";
+  // a superadmin works on one shop at a time: keep the shop they're viewing
+  const shopId = isSuperadmin ? new URLSearchParams(location.search).get("shop_id") : null;
 
   const rows = [
     { key: "home", icon: "home", label: "Home", to: homeTarget },
-    ...(!isSuperadmin ? [{ key: "new", icon: "new-visualisation", label: "New visualisation", to: "/new-visualisation" }] : []),
+    ...(isOwnerRole
+      ? [{ key: "new", icon: "new-visualisation", label: "New visualisation", to: withQuery("/new-visualisation", { shop_id: shopId }) }]
+      : []),
     { key: "account", icon: "account", label: "Account & credits", to: "/account" },
     ...(isOwnerRole ? [{ key: "admin", icon: "admin", label: "Admin", to: "/admin" }] : []),
     ...(isSuperadmin ? [{ key: "shops", icon: "shops", label: "Shops", to: "/super" }] : []),

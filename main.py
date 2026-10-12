@@ -59,6 +59,9 @@ ROOMS_DIR = DATA_ROOT / "rooms"
 ITEMS_DIR = DATA_ROOT / "items"
 RENDERS_DIR = DATA_ROOT / "renders"
 PLANS_DIR = DATA_ROOT / "plans"  # floor-plan PNGs exported by the client, for the placement writer only
+# product-photo studio images, per shop. Private: never served by /media
+# (see PrivateAwareStaticFiles), only by the owner-only studio file route.
+STUDIO_DIR = DATA_ROOT / "studio"
 for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -528,6 +531,25 @@ class CreditLedger(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class StudioImage(Base):
+    """Product-photo studio (/new-visualisation): one owner-uploaded sofa
+    photo turned into a clean website image, or a change applied to an
+    earlier result (parent_id). Separate from customers/rooms/attempts/
+    renders on purpose — salesmen never see these."""
+
+    __tablename__ = "studio_images"
+    id = Column(Integer, primary_key=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    parent_id = Column(Integer, ForeignKey("studio_images.id"), nullable=True)
+    instruction = Column(Text, nullable=True)
+    source_path = Column(String, nullable=False)  # relative to DATA_ROOT
+    result_path = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="pending")  # 'pending' | 'done' | 'error'
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -790,6 +812,12 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first() is None:
             db.add(Setting(key=PLACEMENT_WRITER_PROMPT_KEY, value=DEFAULT_PLACEMENT_WRITER_PROMPT))
             logger.info("seeded default placement writer prompt")
+        if db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first() is None:
+            db.add(Setting(key=STUDIO_PROMPT_KEY, value=DEFAULT_STUDIO_PROMPT))
+            logger.info("seeded default studio prompt")
+        if db.query(Setting).filter(Setting.key == STUDIO_EDIT_PROMPT_KEY).first() is None:
+            db.add(Setting(key=STUDIO_EDIT_PROMPT_KEY, value=DEFAULT_STUDIO_EDIT_PROMPT))
+            logger.info("seeded default studio edit prompt")
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
 
         # one-time cleanup: a previously-saved custom generation prompt may
@@ -825,8 +853,20 @@ async def lifespan(app: FastAPI):
     yield
 
 
+class PrivateAwareStaticFiles(StaticFiles):
+    """/media serves everything under DATA_ROOT except the private studio/
+    folder. The path is normalised first so "rooms/../studio/..." or a
+    backslash variant can't slip past the check."""
+
+    async def get_response(self, path: str, scope) -> Response:
+        normalised = os.path.normpath(path.replace("\\", "/")).replace("\\", "/").lstrip("/").lower()
+        if normalised == "studio" or normalised.startswith("studio/"):
+            raise HTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
 app = FastAPI(lifespan=lifespan)
-app.mount("/media", StaticFiles(directory=str(DATA_ROOT)), name="media")
+app.mount("/media", PrivateAwareStaticFiles(directory=str(DATA_ROOT)), name="media")
 
 
 # ---------------------------------------------------------------------------
@@ -3817,6 +3857,344 @@ def api_admin_delete_user(
 
 
 # ---------------------------------------------------------------------------
+# Product-photo studio (/new-visualisation) — owner/superadmin only. One sofa
+# photo in, one clean website product image out, then optional changes. Each
+# create/change holds CREDITS_PER_GENERATION up front, refunded on failure.
+# Kept apart from customers/rooms/attempts/renders; files live under
+# STUDIO_DIR and are only served by api_studio_file (never /media).
+# ---------------------------------------------------------------------------
+
+STUDIO_PROMPT_KEY = "studio_prompt"
+STUDIO_EDIT_PROMPT_KEY = "studio_edit_prompt"
+INSTRUCTION_TOKEN = "{{INSTRUCTION}}"
+STUDIO_IMAGE_SIZE = "1536x1024"
+STUDIO_INSTRUCTION_MIN = 3
+STUDIO_INSTRUCTION_MAX = 300
+
+DEFAULT_STUDIO_PROMPT = (
+    "Image 1 is a photograph of one sofa taken in a furniture showroom. Create a clean product photograph of exactly "
+    "this sofa for a furniture website. Keep the sofa identical: same shape, proportions, number of seats and cushions, "
+    "arm and leg design, fabric or leather, colour, stitching, and the pillows that belong to it. Remove everything else "
+    "from the showroom. Place the sofa on a plain light floor in front of a smooth warm-white plaster wall, front view "
+    "turned very slightly, the whole sofa in frame with even space around it. Soft warm studio lighting, a gentle soft "
+    "shadow under the sofa, no harsh reflections. Photographic realism. No text, logos, people, extra furniture or decor."
+)
+DEFAULT_STUDIO_EDIT_PROMPT = (
+    "Image 1 is a product photograph of a sofa. Apply only this change: {{INSTRUCTION}}. Keep the sofa itself exactly "
+    "the same – shape, size, cushions, material and colour – and keep the rest of the picture as it is unless the "
+    "change asks otherwise."
+)
+
+
+def studio_public(row: StudioImage) -> dict:
+    return {
+        "id": row.id,
+        "parent_id": row.parent_id,
+        "instruction": row.instruction,
+        "status": row.status,
+        "error": row.error,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def resolve_studio_shop(user: User, shop_id: int | None, db: Session) -> Shop | JSONResponse:
+    resolved_shop_id = resolve_admin_shop_id(user, shop_id)
+    if resolved_shop_id is None:
+        return error_response(400, "no_shop_context", "Select a shop first.")
+    shop = db.query(Shop).filter(Shop.id == resolved_shop_id).first()
+    if shop is None:
+        return error_response(404, "shop_not_found", "That shop could not be found.")
+    return shop
+
+
+def get_shop_studio_image(image_id: int, shop: Shop, db: Session) -> StudioImage | None:
+    return db.query(StudioImage).filter(StudioImage.id == image_id, StudioImage.shop_id == shop.id).first()
+
+
+def studio_credit_error(db: Session, shop: Shop) -> JSONResponse | None:
+    if shop_balance(db, shop) < CREDITS_PER_GENERATION:
+        return error_response(
+            402,
+            "insufficient_credits",
+            "This month's credit pool is finished. Please contact the showroom owner to top up.",
+        )
+    return None
+
+
+def _start_studio_job(
+    shop: Shop,
+    user: User,
+    source_path: str,
+    prompt: str,
+    note: str,
+    db: Session,
+    parent_id: int | None = None,
+    instruction: str | None = None,
+) -> JSONResponse:
+    db.add(
+        CreditLedger(
+            shop_id=shop.id, user_id=user.id, attempt_id=None, delta=-CREDITS_PER_GENERATION, reason="generation", note=note
+        )
+    )
+    row = StudioImage(
+        shop_id=shop.id, user_id=user.id, parent_id=parent_id, instruction=instruction, source_path=source_path, status="pending"
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"status": "processing", "image_id": row.id, "message": None}
+    asyncio.create_task(run_studio_job(job_id, row.id, prompt, user.id, shop.id, note))
+    return JSONResponse(content={"id": row.id, "job_id": job_id})
+
+
+async def run_studio_job(job_id: str, image_id: int, prompt: str, user_id: int, shop_id: int, note: str) -> None:
+    db = SessionLocal()
+
+    def fail(message: str) -> None:
+        JOBS[job_id] = {"status": "error", "image_id": image_id, "message": message}
+        row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
+        if row is not None:
+            row.status = "error"
+            row.error = message
+        db.add(
+            CreditLedger(shop_id=shop_id, user_id=user_id, attempt_id=None, delta=CREDITS_PER_GENERATION, reason="refund", note="studio")
+        )
+        db.commit()
+
+    try:
+        row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
+        source = DATA_ROOT / row.source_path if row is not None else None
+        if source is None or not source.is_file():
+            fail("That photo could not be found. Please add it again.")
+            return
+        image_files = [(source.name, source.read_bytes(), "image/jpeg")]
+        try:
+            result = await asyncio.to_thread(
+                call_image_api, prompt, image_files, STUDIO_IMAGE_SIZE, IMAGE_QUALITY, f"studio:{image_id}"
+            )
+        except GenerationError as exc:
+            fail(exc.message)
+            return
+
+        dest_dir = STUDIO_DIR / str(shop_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}.jpg"
+        image = Image.open(io.BytesIO(result["image_bytes"])).convert("RGB")
+        image.save(dest_dir / filename, format="JPEG", quality=92)
+
+        row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
+        if row is None:  # deleted while the job ran
+            (dest_dir / filename).unlink(missing_ok=True)
+            JOBS[job_id] = {"status": "error", "image_id": image_id, "message": "That image was deleted."}
+            return
+        row.result_path = str((dest_dir / filename).relative_to(DATA_ROOT)).replace("\\", "/")
+        row.status = "done"
+        row.error = None
+        # zero-delta telemetry row (like a normal render) so the real token
+        # cost is on record; no extra credits are charged.
+        usage = result["usage"]
+        db.add(
+            CreditLedger(
+                shop_id=shop_id,
+                user_id=user_id,
+                attempt_id=None,
+                delta=0,
+                reason="generation",
+                tokens_in=usage.get("input_tokens") if usage else None,
+                tokens_out=usage.get("output_tokens") if usage else None,
+                usd_cost=compute_usd_cost(usage),
+                note=note,
+            )
+        )
+        db.commit()
+        JOBS[job_id] = {"status": "done", "image_id": image_id, "message": None}
+    except Exception:
+        logger.exception("studio job failed job_id=%s image_id=%s", job_id, image_id)
+        db.rollback()
+        fail("Something went wrong making the image. Your credits were returned – please try again.")
+    finally:
+        db.close()
+
+
+@app.post("/api/studio/images")
+async def api_studio_create(
+    photo: UploadFile = File(...),
+    shop_id: int | None = Form(None),
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    shop = resolve_studio_shop(user, shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    short = studio_credit_error(db, shop)
+    if short is not None:
+        return short
+    try:
+        source_path = await save_validated_upload(photo, STUDIO_DIR / str(shop.id))
+    except UploadValidationError as exc:
+        return error_response(exc.status_code, exc.error, exc.message)
+    prompt = get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT)
+    return _start_studio_job(shop, user, source_path, prompt, "studio create", db)
+
+
+@app.post("/api/studio/images/{image_id}/retry")
+def api_studio_retry(
+    image_id: int,
+    shop_id: int | None = None,
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """Try again: same source photo and same prompt kind as the original."""
+    shop = resolve_studio_shop(user, shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    original = get_shop_studio_image(image_id, shop, db)
+    if original is None or not (DATA_ROOT / original.source_path).is_file():
+        return error_response(404, "image_not_found", "That image could not be found.")
+    short = studio_credit_error(db, shop)
+    if short is not None:
+        return short
+    if original.instruction:
+        template = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT)
+        prompt, note = template.replace(INSTRUCTION_TOKEN, original.instruction), "studio change"
+    else:
+        prompt, note = get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT), "studio create"
+    return _start_studio_job(
+        shop, user, original.source_path, prompt, note, db, parent_id=original.parent_id, instruction=original.instruction
+    )
+
+
+class StudioChangeBody(BaseModel):
+    instruction: str
+    shop_id: int | None = None
+
+
+@app.post("/api/studio/images/{image_id}/change")
+def api_studio_change(
+    image_id: int,
+    body: StudioChangeBody,
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    shop = resolve_studio_shop(user, body.shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    parent = get_shop_studio_image(image_id, shop, db)
+    if parent is None:
+        return error_response(404, "image_not_found", "That image could not be found.")
+    if parent.status != "done" or not parent.result_path:
+        return error_response(400, "image_not_ready", "That image isn't finished yet.")
+    instruction = " ".join(body.instruction.split())
+    if not (STUDIO_INSTRUCTION_MIN <= len(instruction) <= STUDIO_INSTRUCTION_MAX):
+        return error_response(
+            400,
+            "invalid_instruction",
+            f"Please describe the change in {STUDIO_INSTRUCTION_MIN}–{STUDIO_INSTRUCTION_MAX} characters.",
+        )
+    short = studio_credit_error(db, shop)
+    if short is not None:
+        return short
+    prompt = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT).replace(INSTRUCTION_TOKEN, instruction)
+    return _start_studio_job(
+        shop, user, parent.result_path, prompt, "studio change", db, parent_id=parent.id, instruction=instruction
+    )
+
+
+@app.get("/api/studio/jobs/{job_id}")
+def api_studio_job(
+    job_id: str,
+    shop_id: int | None = None,
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    job = JOBS.get(job_id)
+    if job is None or "image_id" not in job:
+        return error_response(404, "job_not_found", "That job could not be found.")
+    shop = resolve_studio_shop(user, shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    if get_shop_studio_image(job["image_id"], shop, db) is None:
+        return error_response(404, "job_not_found", "That job could not be found.")
+    return JSONResponse(content={"status": job["status"], "image_id": job["image_id"], "message": job.get("message")})
+
+
+@app.get("/api/studio/images")
+def api_studio_list(
+    shop_id: int | None = None, user: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    shop = resolve_studio_shop(user, shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    rows = (
+        db.query(StudioImage)
+        .filter(StudioImage.shop_id == shop.id)
+        .order_by(StudioImage.created_at.desc(), StudioImage.id.desc())
+        .all()
+    )
+    return JSONResponse(
+        content={"images": [studio_public(r) for r in rows], "balance": shop_balance(db, shop), "cost": CREDITS_PER_GENERATION}
+    )
+
+
+@app.get("/api/studio/images/{image_id}/file")
+def api_studio_file(
+    image_id: int,
+    kind: str = "result",
+    shop_id: int | None = None,
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> Response:
+    shop = resolve_studio_shop(user, shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    row = get_shop_studio_image(image_id, shop, db)
+    if row is None or kind not in ("source", "result"):
+        return error_response(404, "image_not_found", "That image could not be found.")
+    relative = row.source_path if kind == "source" else row.result_path
+    path = DATA_ROOT / relative if relative else None
+    if path is None or not path.is_file():
+        return error_response(404, "image_not_found", "That image could not be found.")
+    return FileResponse(str(path), media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@app.delete("/api/studio/images/{image_id}")
+def api_studio_delete(
+    image_id: int,
+    shop_id: int | None = None,
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    shop = resolve_studio_shop(user, shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    row = get_shop_studio_image(image_id, shop, db)
+    if row is None:
+        return error_response(404, "image_not_found", "That image could not be found.")
+    # changes made from this image use its result file as their source, so
+    # detach them and only remove files no other row still points at.
+    db.query(StudioImage).filter(StudioImage.parent_id == row.id).update(
+        {StudioImage.parent_id: None}, synchronize_session=False
+    )
+    paths = [p for p in (row.source_path, row.result_path) if p]
+    db.delete(row)
+    db.commit()
+    for relative in paths:
+        in_use = (
+            db.query(StudioImage)
+            .filter((StudioImage.source_path == relative) | (StudioImage.result_path == relative))
+            .first()
+        )
+        if in_use is not None:
+            continue
+        try:
+            (DATA_ROOT / relative).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not delete studio file %s", relative)
+    return JSONResponse(content={"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # Admin — generation prompt
 # ---------------------------------------------------------------------------
 
@@ -3827,6 +4205,8 @@ PROMPT_PAGE_KEYS = [
     VISION_MODEL_SETTING_KEY,
     PLACEMENT_WRITER_ENABLED_KEY,
     PLACEMENT_WRITER_PROMPT_KEY,
+    STUDIO_PROMPT_KEY,
+    STUDIO_EDIT_PROMPT_KEY,
 ]
 
 
@@ -3849,6 +4229,10 @@ def prompt_setting_response(db: Session) -> dict:
         "placement_writer_enabled": value(PLACEMENT_WRITER_ENABLED_KEY, "true").strip().lower() == "true",
         "placement_writer_prompt": value(PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT),
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
+        "studio_prompt": value(STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT),
+        "default_studio_prompt": DEFAULT_STUDIO_PROMPT,
+        "studio_edit_prompt": value(STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT),
+        "default_studio_edit_prompt": DEFAULT_STUDIO_EDIT_PROMPT,
     }
 
 
@@ -3867,6 +4251,8 @@ class PromptBody(BaseModel):
     vision_model: str | None = None
     placement_writer_enabled: bool | None = None
     placement_writer_prompt: str | None = None
+    studio_prompt: str | None = None
+    studio_edit_prompt: str | None = None
     shop_id: int | None = None
 
 
@@ -3886,6 +4272,16 @@ def api_admin_save_prompt(
         return error_response(
             400, "writer_prompt_missing_facts", f"The placement writer prompt must contain {FACTS_TOKEN} where the facts go."
         )
+    if body.studio_prompt is not None and not body.studio_prompt.strip():
+        return error_response(400, "empty_studio_prompt", "The product photo prompt can't be empty.")
+    if body.studio_edit_prompt is not None and not body.studio_edit_prompt.strip():
+        return error_response(400, "empty_studio_edit_prompt", "The product photo change prompt can't be empty.")
+    if body.studio_edit_prompt is not None and INSTRUCTION_TOKEN not in body.studio_edit_prompt:
+        return error_response(
+            400,
+            "studio_edit_prompt_missing_instruction",
+            f"The product photo change prompt must contain {INSTRUCTION_TOKEN} where the change goes.",
+        )
     set_setting(db, PROMPT_SETTING_KEY, body.prompt)
     if body.vision_prompt is not None:
         set_setting(db, VISION_PROMPT_SETTING_KEY, body.vision_prompt.strip())
@@ -3895,6 +4291,10 @@ def api_admin_save_prompt(
         set_setting(db, PLACEMENT_WRITER_ENABLED_KEY, "true" if body.placement_writer_enabled else "false")
     if body.placement_writer_prompt is not None:
         set_setting(db, PLACEMENT_WRITER_PROMPT_KEY, body.placement_writer_prompt)
+    if body.studio_prompt is not None:
+        set_setting(db, STUDIO_PROMPT_KEY, body.studio_prompt)
+    if body.studio_edit_prompt is not None:
+        set_setting(db, STUDIO_EDIT_PROMPT_KEY, body.studio_edit_prompt)
     return JSONResponse(content=prompt_setting_response(db))
 
 

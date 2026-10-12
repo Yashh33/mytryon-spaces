@@ -16,6 +16,8 @@ export default function AdminPrompt() {
   const [prompt, setPrompt] = useState("");
   const [writerEnabled, setWriterEnabled] = useState(true);
   const [writerPrompt, setWriterPrompt] = useState("");
+  const [studioPrompt, setStudioPrompt] = useState("");
+  const [studioEditPrompt, setStudioEditPrompt] = useState("");
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const toast = useToast();
@@ -30,6 +32,8 @@ export default function AdminPrompt() {
     setPrompt(res.prompt);
     setWriterEnabled(res.placement_writer_enabled);
     setWriterPrompt(res.placement_writer_prompt);
+    setStudioPrompt(res.studio_prompt);
+    setStudioEditPrompt(res.studio_edit_prompt);
   }
 
   async function load() {
@@ -54,7 +58,14 @@ export default function AdminPrompt() {
   async function handleSave() {
     setSaving(true);
     try {
-      const json = { prompt, placement_writer_enabled: writerEnabled, placement_writer_prompt: writerPrompt, shop_id: shopIdNum };
+      const json = {
+        prompt,
+        placement_writer_enabled: writerEnabled,
+        placement_writer_prompt: writerPrompt,
+        studio_prompt: studioPrompt,
+        studio_edit_prompt: studioEditPrompt,
+        shop_id: shopIdNum,
+      };
       apply(await api.post("/api/admin/prompt", { json }));
       toast("Saved.");
     } catch (err) {
@@ -108,6 +119,34 @@ export default function AdminPrompt() {
         Must contain <span className="mono">{"{{FACTS}}"}</span>.{" "}
         <button type="button" className="link-btn" onClick={() => setWriterPrompt(data.default_placement_writer_prompt)}>
           Put back the built-in writer prompt
+        </button>
+      </div>
+
+      <div className="section-label" style={{ marginTop: 26 }}>Product photo – create</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        Used on New visualisation when an owner turns a showroom sofa photo into a clean website image.
+      </div>
+      <textarea className="prompt-textarea" spellCheck="false" value={studioPrompt} onChange={(e) => setStudioPrompt(e.target.value)} />
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+        <button type="button" className="link-btn" onClick={() => setStudioPrompt(data.default_studio_prompt)}>
+          Put back the built-in create prompt
+        </button>
+      </div>
+
+      <div className="section-label" style={{ marginTop: 26 }}>Product photo – change</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        Used when the owner asks for a change to a finished product image.
+      </div>
+      <textarea
+        className="prompt-textarea"
+        spellCheck="false"
+        value={studioEditPrompt}
+        onChange={(e) => setStudioEditPrompt(e.target.value)}
+      />
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+        Must contain <span className="mono">{"{{INSTRUCTION}}"}</span>.{" "}
+        <button type="button" className="link-btn" onClick={() => setStudioEditPrompt(data.default_studio_edit_prompt)}>
+          Put back the built-in change prompt
         </button>
       </div>
 

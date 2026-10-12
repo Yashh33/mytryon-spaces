@@ -57,7 +57,7 @@ export default function App() {
           <Route
             path="/new-visualisation"
             element={
-              <RequireAuth>
+              <RequireAuth roles={OWNER_ROLES}>
                 <AuthedLayout>
                   <NewVisualisation />
                 </AuthedLayout>

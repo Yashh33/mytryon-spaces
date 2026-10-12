@@ -1706,7 +1706,44 @@ def sofa_seat_description(seats: int) -> str:
     return f"{word}-seater sofa with exactly {word.upper()} seat cushions and {word.upper()} back cushions"
 
 
-def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
+# The plan has no real room dimensions: it assumes the room's longer side is
+# this many feet and scales blocks to it. Mirrors ASSUMED_ROOM_LONGEST_FT,
+# ROOM_ASPECT and roomFeet() in frontend/src/placement.js, so lengths stated
+# here are the same ones the salesman reads on a block's handles.
+ASSUMED_ROOM_LONGEST_FT = 18
+ROOM_ASPECT = {"wider than deep": (4, 3), "deeper than wide": (3, 4), "about square": (1, 1)}
+
+
+def room_feet(layout_json: dict | None) -> tuple[float, float]:
+    """(width, depth) of the room in the plan's assumed feet."""
+    aw, ah = ROOM_ASPECT.get((layout_json or {}).get("depth_vs_width"), (1, 1))
+    longest = max(aw, ah)
+    return ASSUMED_ROOM_LONGEST_FT * aw / longest, ASSUMED_ROOM_LONGEST_FT * ah / longest
+
+
+def _half_foot(value: float) -> float:
+    return round(value * 2) / 2
+
+
+def arm_shape_header(shape: str, geometry: dict, width_ft: float, layout_json: dict | None) -> str:
+    """Header wording for a multi-arm sofa that states its SHAPE, not just one
+    length: both arms for an L or corner sofa (the long arm is the item's
+    width, the other is read off the plan exactly as its handle shows it),
+    overall length and seat depth for a curved one."""
+    w_ft, h_ft = room_feet(layout_json)
+    long_rect, short_rect = geometry["long"], geometry["short"]
+    short_ft = _half_foot(max(short_rect["w"] * w_ft, short_rect["h"] * h_ft))
+    long_wall, _candidate = resolve_rect_wall(long_rect)
+    along = f" along the {long_wall} wall" if long_wall else ""
+    if shape == "L":
+        return f"L-shaped sofa: long arm {width_ft:g} ft{along}, lounge arm {short_ft:g} ft"
+    if shape == "corner":
+        return f"corner sofa: one arm {width_ft:g} ft{along}, the other arm {short_ft:g} ft, backrests along both arms"
+    depth_ft = _half_foot(min(long_rect["w"] * w_ft, long_rect["h"] * h_ft))
+    return f"curved sofa: {width_ft:g} ft long overall, {depth_ft:g} ft deep from back to front"
+
+
+def flatten_placed_subpieces(items: list[Item], layout_json: dict | None = None) -> list[dict]:
     """One record per placed sub-piece, in item order then sub_index order.
     Sub-pieces with no placement are left out entirely — {{PLACEMENT}} only
     describes what was actually placed, even though {{PIECES}} (see
@@ -1728,6 +1765,10 @@ def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
                 description = sofa_seat_description(seats)
             else:
                 description = f"{item.category} ({item.type})"
+            if sub_piece["shape"] in ARM_SHAPES:
+                header = arm_shape_header(sub_piece["shape"], entry["geometry"], sub_piece["width_ft"], layout_json)
+            else:
+                header = f"{description}, {sub_piece['width_ft']:g} ft"
             records.append(
                 {
                     "item": item,
@@ -1735,7 +1776,7 @@ def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
                     "shape": sub_piece["shape"],
                     "geometry": entry["geometry"],
                     "width_ft": sub_piece["width_ft"],
-                    "description": description,
+                    "header": header,
                     "is_split": is_split,
                 }
             )
@@ -1743,7 +1784,7 @@ def flatten_placed_subpieces(items: list[Item]) -> list[dict]:
 
 
 def build_placement_text(items: list[Item], layout_json: dict | None, ignore_placement: bool) -> str:
-    records = flatten_placed_subpieces(items)
+    records = flatten_placed_subpieces(items, layout_json)
     if ignore_placement or not records:
         return NO_PLACEMENT_LINE + "\n"
 
@@ -1788,7 +1829,7 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
             rec["item"].id, {"image_number": rec["image_number"], "is_split": rec["is_split"], "piece_numbers": []}
         )
         group["piece_numbers"].append(piece_number)
-        lines.append(f"Piece {piece_number} — {rec['description']}, {rec['width_ft']:g} ft, from Image {rec['image_number']}.")
+        lines.append(f"Piece {piece_number} — {rec['header']}, from Image {rec['image_number']}.")
         lines.append(f"{counter}. {resolved[idx]['sentence']}")
         counter += 1
         extra_parts = []

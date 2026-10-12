@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { roomLookLabel } from "../utils.js";
 
 export default function Room() {
   const { id } = useParams();
@@ -90,7 +91,7 @@ export default function Room() {
                 <div className="meta">
                   <div className="title">{a.latest_render ? `Attempt ${numberById.get(a.id)}` : "Draft"}</div>
                   <div className="sub">
-                    {a.room_treatment.toUpperCase()} &middot; {a.lighting.toUpperCase()}
+                    {roomLookLabel(a.room_treatment)} &middot; {a.lighting.toUpperCase()}
                   </div>
                 </div>
               </Link>

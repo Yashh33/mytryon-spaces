@@ -58,11 +58,12 @@ DATA_ROOT = Path(os.environ.get("DATA_DIR") or ("/data" if Path("/data").is_dir(
 ROOMS_DIR = DATA_ROOT / "rooms"
 ITEMS_DIR = DATA_ROOT / "items"
 RENDERS_DIR = DATA_ROOT / "renders"
+FABRICS_DIR = DATA_ROOT / "fabrics"  # fabric swatch photos from the Finishing step
 PLANS_DIR = DATA_ROOT / "plans"  # floor-plan PNGs exported by the client, for the placement writer only
 # product-photo studio images, per shop. Private: never served by /media
 # (see PrivateAwareStaticFiles), only by the owner-only studio file route.
 STUDIO_DIR = DATA_ROOT / "studio"
-for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR):
+for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR, FABRICS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 MODEL_NAME = "gpt-image-2"
@@ -134,10 +135,7 @@ covered feature with a flat blank wall.
 
 {{ROOM_TREATMENT}}
 
-Add no decorative objects of any kind. No plants, no artwork, no vases,
-no books, no trays, no lamps, no ornaments. A plain rug and a simple
-coffee table are permitted, nothing else. The room must otherwise contain
-only the furniture pieces listed below.
+{{DECOR}}
 
 {{LIGHTING}}
 
@@ -149,6 +147,15 @@ it for attention.
 Room: {{ROOM_TYPE}}
 Furniture:
 {{PIECES}}"""
+
+# The original fixed no-decor paragraph. The default prompt now carries
+# {{DECOR}} in its place; a saved prompt still holding this text verbatim is
+# migrated to the token at startup.
+NO_DECOR_TEXT = """\
+Add no decorative objects of any kind. No plants, no artwork, no vases,
+no books, no trays, no lamps, no ornaments. A plain rug and a simple
+coffee table are permitted, nothing else. The room must otherwise contain
+only the furniture pieces listed below."""
 
 PROMPT_SETTING_KEY = "generation_prompt"
 PROMPT_PLACEHOLDERS = [
@@ -182,7 +189,15 @@ PROMPT_PLACEHOLDERS = [
     },
     {
         "token": "{{ROOM_TREATMENT}}",
-        "description": 'The salesman\'s "How should the room look?" choice from the finishing step — expands to the full luxury or minimal styling instruction, e.g. "...present the space with refined luxury interior styling and premium finishing."',
+        "description": 'The salesman\'s "How should the room look?" choice from the finishing step — keep, warm, luxury or minimal — expands to the full styling instruction for that look.',
+    },
+    {
+        "token": "{{DECOR}}",
+        "description": "Decor rule for the chosen room look: no decor for keep/minimal, the look's own decor for warm/luxury",
+    },
+    {
+        "token": "{{PIECE_FINISH}}",
+        "description": "Per-piece colour/material/fabric from the Finishing step; appended at the end when the token is absent",
     },
     {
         "token": "{{LIGHTING}}",
@@ -326,23 +341,68 @@ def derive_item_shape(category: str, type_: str) -> str:
     return "rect"
 
 DEFAULT_ROOM_TREATMENT = "luxury"
-ROOM_TREATMENT_CHOICES = ["luxury", "minimal"]
+ROOM_TREATMENT_CHOICES = ["keep", "warm", "luxury", "minimal"]
+_ROOM_TREATMENT_BASE = (
+    "Clear away any people, tools, ladders, cement bags, rubble or building "
+    "material, and finish all bare surfaces. Keep the walls, windows, doors, "
+    "flooring, ceiling and room proportions exactly as photographed. "
+)
 ROOM_TREATMENT_TEXT = {
-    "luxury": (
-        "Clear away any people, tools, ladders, cement bags, rubble or building "
-        "material, and finish all bare surfaces. Keep the walls, windows, doors, "
-        "flooring, ceiling and room proportions exactly as photographed. Within "
-        "those unchanged boundaries, present the space with refined luxury "
-        "interior styling and premium finishing."
+    "keep": _ROOM_TREATMENT_BASE + (
+        "Do not restyle anything: keep the wall colours, floor, ceiling, "
+        "curtains and any existing decor exactly as photographed. The only "
+        "additions are the furniture listed below."
     ),
-    "minimal": (
-        "Clear away any people, tools, ladders, cement bags, rubble or building "
-        "material, and finish all bare surfaces. Keep the walls, windows, doors, "
-        "flooring, ceiling and room proportions exactly as photographed. Within "
-        "those unchanged boundaries, present the space with calm, uncluttered "
-        "minimal styling."
+    "warm": _ROOM_TREATMENT_BASE + (
+        "Within those unchanged boundaries, style the room as a warm, "
+        "aesthetic, lived-in home: warm white or soft beige wall paint, warm "
+        "wood tones, warm ceiling lighting (cove or a pendant) and one floor "
+        "or table lamp glowing softly, a large textured rug under the front "
+        "of the seating, one or two framed artworks on the main wall, soft "
+        "linen curtains at the windows and one tall indoor plant. Cosy, "
+        "inviting, magazine-quality."
+    ),
+    "luxury": _ROOM_TREATMENT_BASE + (
+        "Within those unchanged boundaries, style the room as a high-end "
+        "luxury interior: a feature wall with panelling or stone/marble "
+        "texture behind the main seating, deep rich tones, brass or gold "
+        "accents, a statement chandelier or cove lighting with hidden warm "
+        "LED strips, a plush large rug, one large statement artwork, a marble "
+        "or stone coffee table and elegant floor-length drapes. Dramatic, "
+        "premium, hotel-like."
+    ),
+    "minimal": _ROOM_TREATMENT_BASE + (
+        "Within those unchanged boundaries, style the room as calm and "
+        "minimal: off-white walls, light oak or pale stone floor, bright soft "
+        "light, bare windows or sheer white blinds, at most one plain rug and "
+        "one simple low coffee table, no artwork, no plants and no ornaments. "
+        "Lots of empty space and clean lines."
     ),
 }
+LOOK_DECOR_TEXT = (
+    "Decor is part of the chosen look above: add only the items it names, "
+    "keep them secondary to the furniture, and never place anything in front "
+    "of or overlapping the furniture."
+)
+
+
+def decor_text(room_treatment: str) -> str:
+    if room_treatment in ("warm", "luxury"):
+        return LOOK_DECOR_TEXT
+    return NO_DECOR_TEXT
+
+
+MATERIAL_CHOICES = {
+    "fabric": "woven fabric",
+    "velvet": "velvet",
+    "leather": "leather",
+    "faux_leather": "faux leather",
+    "boucle": "bouclé",
+    "linen": "linen",
+}
+COLOUR_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+COLOUR_NAME_RE = re.compile(r"^[A-Za-z0-9 \-'/#]{1,40}$")
+MAX_NOTE_CHARS = 300
 
 DEFAULT_LIGHTING = "warm"
 LIGHTING_CHOICES = ["warm", "daylight", "studio"]
@@ -449,6 +509,8 @@ class Attempt(Base):
     # writer's cached state/result for it — see start_placement_writer()
     plan_path = Column(String, nullable=True)
     placement_writer = Column(JSONB, nullable=True)
+    # optional free-text request from the Finishing step
+    note = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     items = relationship("Item", backref="attempt", cascade="all, delete-orphan", order_by="Item.id")
@@ -470,6 +532,12 @@ class Item(Base):
     # 'curved' geometry is {long, short, corner} where long/short are each
     # rects. See validate_placement() below.
     placement = Column(JSONB, nullable=True)
+    # Finishing step: optional colour / material / fabric swatch photo.
+    # NULL everywhere = "as photo".
+    colour_name = Column(String, nullable=True)
+    colour_hex = Column(String, nullable=True)
+    material = Column(String, nullable=True)
+    fabric_path = Column(String, nullable=True)
 
 
 class Render(Base):
@@ -732,6 +800,12 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS plan_path TEXT"))
         conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS placement_writer JSONB"))
         conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS placement_writer JSON"))
+        # Finishing step: per-piece colour/material/fabric and a free-text note.
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS colour_name TEXT"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS colour_hex TEXT"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS material TEXT"))
+        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS fabric_path TEXT"))
+        conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS note TEXT"))
         # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
         conn.execute(text("ALTER TABLE studio_images ADD COLUMN IF NOT EXISTS look TEXT"))
         # product-photo studio: which camera view (front/angled) each image used.
@@ -862,6 +936,15 @@ async def lifespan(app: FastAPI):
             cleaned = cleaned.replace("{{STROKE_MAP}}", "")
             saved_prompt.value = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
             logger.info("stripped stale placement/stroke-map syntax from saved generation prompt")
+
+        # the fixed no-decor paragraph became the {{DECOR}} slot (it now
+        # depends on the chosen room look); other hand edits are kept.
+        saved_prompt = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+        if saved_prompt is not None:
+            for variant in (NO_DECOR_TEXT, NO_DECOR_TEXT.replace("\n", "\r\n")):
+                if variant in saved_prompt.value:
+                    saved_prompt.value = saved_prompt.value.replace(variant, "{{DECOR}}")
+                    logger.info("replaced the fixed no-decor paragraph in the saved generation prompt with {{DECOR}}")
 
         migrate_to_shops(db)
         migrate_item_shapes(db)
@@ -1336,7 +1419,79 @@ def build_image_manifest(items: list[Item]) -> str:
             "configuration and size are stated below and may differ from what this photograph shows."
         )
         n += 1
+    numbers = fabric_image_numbers(items)
+    for k, item in enumerate(items, start=1):
+        if item.id in numbers:
+            lines.append(
+                f"Image {numbers[item.id]} is a close-up photograph of a fabric swatch for piece {k}. "
+                "It is a material reference only – never place it in the room as an object."
+            )
     return "\n".join(lines)
+
+
+def fabric_file_exists(item: Item) -> bool:
+    return bool(item.fabric_path) and (DATA_ROOT / item.fabric_path).is_file()
+
+
+def fabric_image_numbers(items: list[Item]) -> dict[int, int]:
+    """item.id -> Image number of that item's fabric swatch photo. Product
+    images are counted exactly as build_image_manifest counts them (one per
+    item, "same photograph" duplicates included); fabric photos follow, in
+    item order, skipping items whose fabric file is missing. Must match the
+    order run_generation_job appends to image_files."""
+    n = 2
+    first_image_for_photo: dict[str, int] = {}
+    for item in items:
+        if item.photo_path not in first_image_for_photo:
+            first_image_for_photo[item.photo_path] = n
+        n += 1
+    numbers: dict[int, int] = {}
+    for item in items:
+        if fabric_file_exists(item):
+            numbers[item.id] = n
+            n += 1
+    return numbers
+
+
+def build_piece_finish_text(items: list[Item]) -> str:
+    """The PIECE FINISHES section — empty when no piece has a colour,
+    material or fabric set."""
+    numbers = fabric_image_numbers(items)
+    lines = []
+    for k, item in enumerate(items, start=1):
+        fabric = numbers.get(item.id)
+        material = item.material if item.material in MATERIAL_CHOICES else None
+        colour = item.colour_hex or None
+        if fabric is None and material is None and colour is None:
+            continue
+        parts = []
+        if fabric is not None:
+            parts.append(
+                f"upholster it using the fabric in Image {fabric} – the same weave, texture and pattern, "
+                "applied evenly to all upholstered parts"
+            )
+        elif material is not None:
+            parts.append(f"upholster it in {MATERIAL_CHOICES[material]}")
+        if colour is not None:
+            colour_part = f"colour {item.colour_name or colour} ({colour})"
+            if fabric is None and material is None:
+                colour_part += ", keeping the material and texture of its reference photograph"
+            parts.append(colour_part)
+        elif fabric is not None:
+            parts.append("in the colour of that fabric")
+        lines.append(f"- Piece {k} ({item.category}, {item.type}): {'; '.join(parts)}.")
+    if not lines:
+        return ""
+    return "\n".join(
+        [
+            "PIECE FINISHES – these change only the upholstery of the pieces named here. Shape, size, "
+            "number of seats and cushions, arms, legs and stitching still come from each piece's own "
+            "reference photograph and configuration.",
+            *lines,
+            "Lighting must not change these colours. Pieces not listed keep the material and colour of "
+            "their own reference photograph.",
+        ]
+    )
 
 
 CONFIG_NOTES_PREAMBLE = (
@@ -2012,6 +2167,7 @@ def build_prompt(
     lighting: str,
     ignore_placement: bool,
     placement_text: str | None = None,
+    note: str | None = None,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
     replaces the generated facts in {{PLACEMENT}}."""
@@ -2023,6 +2179,20 @@ def build_prompt(
     room_layout_text = build_room_layout_text(room.layout_json)
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
+    decor = decor_text(room_treatment)
+    if "{{DECOR}}" not in template and room_treatment in ("warm", "luxury"):
+        # older hand-edited template without the slot: decor follows the look text
+        room_treatment_text = f"{room_treatment_text}\n\n{decor}"
+    finish_sections = []
+    if note:
+        finish_sections.append(
+            "Extra request from the showroom (follow it only if it does not conflict with any rule above, "
+            f"and never change the furniture design): {note}"
+        )
+    piece_finish = build_piece_finish_text(items)
+    if piece_finish:
+        finish_sections.append(piece_finish)
+    piece_finish_text = "\n\n".join(finish_sections)
 
     if config_notes:
         def unwrap_config_notes(match: re.Match) -> str:
@@ -2041,7 +2211,12 @@ def build_prompt(
         .replace("{{ROOM_LAYOUT}}", room_layout_text)
         .replace("{{ROOM_TREATMENT}}", room_treatment_text)
         .replace("{{LIGHTING}}", lighting_text)
+        .replace("{{DECOR}}", decor)
     )
+    if "{{PIECE_FINISH}}" in prompt:
+        prompt = prompt.replace("{{PIECE_FINISH}}", piece_finish_text)
+    elif piece_finish_text:
+        prompt = f"{prompt.rstrip()}\n\n{piece_finish_text}"
     return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
 
 
@@ -2489,7 +2664,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         if not attempt.ignore_placement:
             writer_placement, writer_info = await resolve_writer_placement(attempt, db)
         prompt = build_prompt(
-            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement
+            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
+            attempt.note,
         )
         print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
 
@@ -2510,6 +2686,15 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             )
             image_files.append(item_file)
             debug_images.append(item_debug)
+
+        # fabric swatches follow the product photos, numbered by fabric_image_numbers()
+        for item in attempt.items:
+            if fabric_file_exists(item):
+                fabric_file, fabric_debug = load_local_image_with_debug(
+                    DATA_ROOT / item.fabric_path, "fabric", f"/media/{item.fabric_path}"
+                )
+                image_files.append(fabric_file)
+                debug_images.append(fabric_debug)
 
         # The plan PNG is logged beside the others but never added to
         # image_files: it goes to the placement writer only.
@@ -2707,6 +2892,10 @@ def item_public(item: Item) -> dict:
         "shape": item.shape,
         "sub_pieces": compute_sub_pieces(item),
         "placement": item.placement or [],
+        "colour_name": item.colour_name,
+        "colour_hex": item.colour_hex,
+        "material": item.material,
+        "fabric_url": f"/media/{item.fabric_path}" if item.fabric_path else None,
     }
 
 
@@ -2786,6 +2975,7 @@ def attempt_detail(attempt: Attempt) -> dict:
         "room": room_detail(attempt.room),
         "room_treatment": attempt.room_treatment,
         "lighting": attempt.lighting,
+        "note": attempt.note,
         "ignore_placement": attempt.ignore_placement,
         "is_picked": attempt.is_picked,
         "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
@@ -2967,13 +3157,19 @@ def _clear_item_placement(attempt: Attempt, item_id: int, sub_index: int, db: Se
     return attempt
 
 
-def _set_finish(attempt: Attempt, room_treatment: str, lighting: str, db: Session) -> Attempt | JSONResponse:
+def _set_finish(
+    attempt: Attempt, room_treatment: str, lighting: str, note: str | None, db: Session
+) -> Attempt | JSONResponse:
     if room_treatment not in ROOM_TREATMENT_CHOICES:
         return error_response(400, "invalid_room_treatment", "Please choose how the room should look.")
     if lighting not in LIGHTING_CHOICES:
         return error_response(400, "invalid_lighting", "Please choose a lighting option.")
+    note = " ".join((note or "").split()) or None
+    if note is not None and len(note) > MAX_NOTE_CHARS:
+        return error_response(400, "note_too_long", f"Please keep the note to {MAX_NOTE_CHARS} characters or fewer.")
     attempt.room_treatment = room_treatment
     attempt.lighting = lighting
+    attempt.note = note
     db.commit()
     db.refresh(attempt)
     return attempt
@@ -3004,6 +3200,7 @@ def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: 
 class FinishBody(BaseModel):
     room_treatment: str
     lighting: str
+    note: str | None = None
 
 
 @app.get("/api/jobs/{job_id}")
@@ -3296,6 +3493,7 @@ def api_create_attempt(
 
     room_treatment = DEFAULT_ROOM_TREATMENT
     lighting = DEFAULT_LIGHTING
+    note = None
     source_items: list[Item] = []
 
     clone_from_attempt_id = body.clone_from_attempt_id if body else None
@@ -3305,11 +3503,12 @@ def api_create_attempt(
             return error_response(404, "attempt_not_found", "That attempt could not be found.")
         room_treatment = source.room_treatment
         lighting = source.lighting
+        note = source.note
         source_items = source.items
 
     delete_empty_attempts(db, room, keep_id=clone_from_attempt_id)
 
-    attempt = Attempt(room_id=room.id, room_treatment=room_treatment, lighting=lighting)
+    attempt = Attempt(room_id=room.id, room_treatment=room_treatment, lighting=lighting, note=note)
     db.add(attempt)
     db.flush()
 
@@ -3323,6 +3522,10 @@ def api_create_attempt(
                 photo_path=item.photo_path,
                 shape=item.shape,
                 placement=[dict(entry) for entry in item.placement] if item.placement else None,
+                colour_name=item.colour_name,
+                colour_hex=item.colour_hex,
+                material=item.material,
+                fabric_path=item.fabric_path,
             )
         )
 
@@ -3459,10 +3662,58 @@ def api_patch_attempt(
     attempt_id: int, body: FinishBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    result = _set_finish(attempt, body.room_treatment, body.lighting, db)
+    result = _set_finish(attempt, body.room_treatment, body.lighting, body.note, db)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse(content={"attempt": attempt_detail(result)})
+
+
+@app.post("/api/attempts/{attempt_id}/items/{item_id}/finish")
+async def api_set_item_finish(
+    attempt_id: int,
+    item_id: int,
+    colour_name: str | None = Form(None),
+    colour_hex: str | None = Form(None),
+    material: str | None = Form(None),
+    clear_fabric: bool = Form(False),
+    photo: UploadFile | None = File(None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """Finishing step: a piece's optional colour, material and fabric swatch
+    photo. Only the upholstery changes — the design never does."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+
+    name = " ".join((colour_name or "").split())
+    hex_ = (colour_hex or "").strip()
+    if not name and not hex_:
+        new_colour: tuple[str | None, str | None] = (None, None)
+    else:
+        name = name or hex_
+        if not COLOUR_HEX_RE.match(hex_) or not COLOUR_NAME_RE.match(name):
+            return error_response(400, "invalid_colour", "Please choose a valid colour.")
+        new_colour = (name, hex_.upper())
+
+    material = (material or "").strip() or None
+    if material is not None and material not in MATERIAL_CHOICES:
+        return error_response(400, "invalid_material", "Please choose a valid material.")
+
+    fabric_path = None if clear_fabric else item.fabric_path
+    if photo is not None and photo.filename:
+        try:
+            fabric_path = await save_validated_upload(photo, FABRICS_DIR)
+        except UploadValidationError as exc:
+            return error_response(exc.status_code, exc.error, exc.message)
+
+    item.colour_name, item.colour_hex = new_colour
+    item.material = material
+    item.fabric_path = fabric_path
+    db.commit()
+    db.refresh(item)
+    return JSONResponse(content={"item": item_public(item)})
 
 
 @app.post("/api/attempts/{attempt_id}/generate")

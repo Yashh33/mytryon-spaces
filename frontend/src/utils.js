@@ -175,3 +175,9 @@ export function withQuery(path, params) {
   const qs = usp.toString();
   return qs ? `${path}?${qs}` : path;
 }
+
+const ROOM_LOOK_LABELS = { keep: "KEEP ROOM", warm: "AESTHETIC WARM", luxury: "LUXURY", minimal: "MINIMAL" };
+
+export function roomLookLabel(value) {
+  return ROOM_LOOK_LABELS[value] || (value || "").toUpperCase();
+}

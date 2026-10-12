@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { roomLookLabel } from "../utils.js";
 
 export default function Result() {
   const { id } = useParams();
@@ -150,7 +151,7 @@ export default function Result() {
       <div className="summary-box">
         <div>
           <span className="mono muted">Look</span>
-          <span className="mono">{attempt.room_treatment}</span>
+          <span className="mono">{roomLookLabel(attempt.room_treatment)}</span>
         </div>
         <div>
           <span className="mono muted">Lighting</span>

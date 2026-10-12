@@ -1594,10 +1594,15 @@ def resolve_l_placement(
     layout_json: dict | None = None,
     intro: str = "It is one L-shaped sofa.",
     bend_name: str = "The bend of the L",
+    open_lounge: bool = True,
 ) -> dict:
     """Describes an L (or corner sofa) from where its two arm boxes actually
     are. geometry.corner only says which end of the L the bend is on, so it
-    is never used as a position in the room."""
+    is never used as a position in the room.
+
+    An L-shape is a sofa plus an open lounger (chaise): its short arm has NO
+    backrest, so (open_lounge) it is never given a back or a seat direction
+    of its own. A corner sofa has backrests on both arms and passes False."""
     long_rect, short_rect = placement["long"], placement["short"]
     long_wall, along = resolve_rect_wall(long_rect)  # `along`: the wall the long arm runs parallel to
     side_wall = along in ("left", "right")
@@ -1627,15 +1632,29 @@ def resolve_l_placement(
     else:
         reach = short_rect["y"] + short_rect["h"] if along == "far" else 1 - short_rect["y"]
         measure = "depth"
-    if long_wall:
-        parts.append(f"The short arm runs {direction} from the {along} wall to about {_fraction_word(reach)} of the room's {measure}.")
-    else:
+    if open_lounge:
+        if side_wall:
+            which_end = "near" if bend_at_high_end else "far"
+        else:
+            which_end = "right" if bend_at_high_end else "left"
         parts.append(
-            f"The short arm runs {direction} from the long arm, reaching about {_fraction_word(reach)} of the "
-            f"room's {measure} measured from the {along} wall."
+            f"The lounge is an open lounger (chaise) with no backrest, extending {direction} from the {which_end} end "
+            "of the long run; its seat continues from the long run's seat; armrest at its outer end."
         )
-    parts.append(f"Its seats face {FACING_FOR_ROTATION[short_rect['rotation']]}.")
-    parts.append(f"The seats on the long arm face {FACING_FOR_ROTATION[long_rect['rotation']]}.")
+        parts.append(f"The lounger reaches about {_fraction_word(reach)} of the room's {measure}, measured from the {along} wall.")
+        parts.append(f"The seats on the long run face {FACING_FOR_ROTATION[long_rect['rotation']]}.")
+    else:
+        if long_wall:
+            parts.append(
+                f"The short arm runs {direction} from the {along} wall to about {_fraction_word(reach)} of the room's {measure}."
+            )
+        else:
+            parts.append(
+                f"The short arm runs {direction} from the long arm, reaching about {_fraction_word(reach)} of the "
+                f"room's {measure} measured from the {along} wall."
+            )
+        parts.append(f"Its seats face {FACING_FOR_ROTATION[short_rect['rotation']]}.")
+        parts.append(f"The seats on the long arm face {FACING_FOR_ROTATION[long_rect['rotation']]}.")
 
     span = (min(start, short_start), max(end, short_end))
     return _resolution(long_wall, span, " ".join(parts), [long_rect, short_rect], layout_json)
@@ -1803,7 +1822,7 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
         elif rec["shape"] == "corner":
             resolved.append(
                 resolve_l_placement(
-                    rec["geometry"], layout_json, "It is one corner sofa with backrests along both arms.", "The corner of the sofa"
+                    rec["geometry"], layout_json, "It is one corner sofa with backrests along both arms.", "The corner of the sofa", False
                 )
             )
         elif rec["shape"] == "curved":

@@ -2141,6 +2141,7 @@ PRODUCT_IMAGES_TOKEN = "{{PRODUCT_IMAGES}}"  # replaced by code with "Your Image
 # current default; an edited one is left alone.
 SUPERSEDED_WRITER_PROMPT_HASHES = {
     "4fe0d6126a9fa65d9b9bf5c647b4beab2b85e265684be90395fb78e2b851859a",  # before product photos + BUILD lines
+    "b0f82bcda7206933d1f2602932a5db53c8a1cfaca5cb47ba5d15fea1101a67d5",  # before the L-shape open-chaise rule
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2175,6 +2176,7 @@ RULES
 12. Never describe the camera or ask to change the view.
 13. If the plan and the photo disagree (a block over a door, a labelled feature you cannot find in Image 1), follow the plan and note it under CONFLICTS.
 14. For each piece, compare its reference photo with the requested shape and lengths in the header. Directly under the header, write one line starting "BUILD:" that states the requested shape in plain words (how many arms, which is longer, which end is the lounge) and, if the photo shows something different, what to change (e.g. "Image 2 shows a two-seater; rebuild it into the L described here, do not keep it as a separate block"). Always keep the facts' line saying it is one sofa.
+15. For an L-shape, the lounge is an open chaise with no backrest; never write that the lounge has a back or that its back faces any direction.
 
 OUTPUT
 Only the placement section, then a line "CONFLICTS", then a list (or "none"). Nothing before the first "Piece" line.

@@ -1639,7 +1639,7 @@ def resolve_l_placement(
             which_end = "right" if bend_at_high_end else "left"
         parts.append(
             f"The lounge is an open lounger (chaise) with no backrest, extending {direction} from the {which_end} end "
-            "of the long run; its seat continues from the long run's seat; armrest at its outer end."
+            "of the long run; its seat continues from the long run's seat; its tip is open — no armrest and nothing across it."
         )
         parts.append(f"The lounger reaches about {_fraction_word(reach)} of the room's {measure}, measured from the {along} wall.")
         parts.append(f"The seats on the long run face {FACING_FOR_ROTATION[long_rect['rotation']]}.")
@@ -2142,6 +2142,7 @@ PRODUCT_IMAGES_TOKEN = "{{PRODUCT_IMAGES}}"  # replaced by code with "Your Image
 SUPERSEDED_WRITER_PROMPT_HASHES = {
     "4fe0d6126a9fa65d9b9bf5c647b4beab2b85e265684be90395fb78e2b851859a",  # before product photos + BUILD lines
     "b0f82bcda7206933d1f2602932a5db53c8a1cfaca5cb47ba5d15fea1101a67d5",  # before the L-shape open-chaise rule
+    "9393b7dace2582b249897f5acef3862b8ae40da90a55c9d801baf5fd5ddbe805",  # before "lounge at whichever end it prefers"
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2159,7 +2160,7 @@ INPUTS
 - PLACEMENT FACTS below: generated from the same plan. They are correct. Treat them and the plan as the authority on where each piece goes. Never move, add, remove or resize a piece.
 
 YOUR JOB
-The generator cannot see the plan and does not understand feet or fractions well. Left to itself it tends to push furniture into corners, beside doors and away from windows, to slide pieces sideways so they line up, and to build L-shaped sofas with the chaise or lounge at the end nearest the camera. Rewrite the facts so that it follows the plan instead of those habits.
+The generator cannot see the plan and does not understand feet or fractions well. Left to itself it tends to push furniture into corners, beside doors and away from windows, to slide pieces sideways so they line up, and to put an L-shaped sofa's lounge at whichever end it prefers instead of the end the plan shows. Rewrite the facts so that it follows the plan instead of those habits.
 
 RULES
 1. Keep every "Piece N — ..." header line exactly as given, including "from Image k". In those headers "Image k" refers to the generator's product photographs, NOT to your Image 2 floor plan. Under each header, write numbered lines; numbering continues across pieces.

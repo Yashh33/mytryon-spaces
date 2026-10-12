@@ -803,23 +803,18 @@ export function straightFigure(L, D, n) {
 
 /** L-shape = a sofa plus an open lounger (chaise). The long arm Lf x d has
  * the only backrest, along its outer (wall) side. The lounge is the short
- * arm at the u = 0 end running out to S: it has NO backrest and no bar along
- * its outer edge — its seat runs right to that edge — just one small armrest
- * at its outer end, beside the backrest. (A sofa with backrests on both
- * arms is the Corner type: see cornerFigure.) */
+ * arm at the u = 0 end running out to S: just the open seat shape — no
+ * backrest, no armrest, nothing along its outer edge or across its tip.
+ * (A sofa with backrests on both arms is the Corner type: see cornerFigure.) */
 export function lFigure(Lf, S, d) {
-  const { t, bt, g } = figureMetrics(Lf, d);
+  const { bt, g } = figureMetrics(Lf, d);
   const Sx = Math.max(S, d + 1);
-  const span = Lf - t - g;
-  const n = Math.max(2, Math.round(span / Math.max(d * 0.95, 1)));
+  const n = Math.max(2, Math.round(Lf / Math.max(d * 0.95, 1)));
   return {
-    handRests: [{ u0: 0, v0: 0, u1: t, v1: d }],
-    backPills: pillRow(t + g, Lf, bt, n),
-    seatPoints: [
-      [t + g, bt + g], [Lf - 1, bt + g], [Lf - 1, d - 1], [d - 1, d - 1],
-      [d - 1, Sx - 1], [1, Sx - 1], [1, d + g], [t + g, d + g],
-    ],
-    seatRadii: [6, 6, 6, 2, 6, 6, 2, 2],
+    handRests: [],
+    backPills: pillRow(0, Lf, bt, n),
+    seatPoints: [[1, bt + g], [Lf - 1, bt + g], [Lf - 1, d - 1], [d - 1, d - 1], [d - 1, Sx - 1], [1, Sx - 1]],
+    seatRadii: [6, 6, 6, 2, 6, 6],
     labelLong: { u0: d, v0: bt + g, u1: Lf - 1, v1: d - 1 },
     labelLounge: { u0: 1, v0: d, u1: d - 1, v1: Sx - 1 },
   };

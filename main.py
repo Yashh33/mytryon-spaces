@@ -813,6 +813,14 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first() is None:
             db.add(Setting(key=VISION_MODEL_SETTING_KEY, value=DEFAULT_VISION_MODEL))
             logger.info("seeded default vision model")
+        # an unedited saved writer prompt follows the built-in default as it changes
+        saved_writer_prompt = db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first()
+        if (
+            saved_writer_prompt is not None
+            and hashlib.sha256(saved_writer_prompt.value.encode("utf-8")).hexdigest() in SUPERSEDED_WRITER_PROMPT_HASHES
+        ):
+            saved_writer_prompt.value = DEFAULT_PLACEMENT_WRITER_PROMPT
+            logger.info("updated the saved placement writer prompt to the current default")
         if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_ENABLED_KEY).first() is None:
             db.add(Setting(key=PLACEMENT_WRITER_ENABLED_KEY, value="true"))
         if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first() is None:
@@ -2108,6 +2116,13 @@ PLACEMENT_WRITER_PROMPT_KEY = "placement_writer_prompt"
 PLACEMENT_WRITER_WAIT_SECONDS = 45  # how long Generate waits for a writer that is still running
 PLACEMENT_WRITER_CALL_TIMEOUT = 90  # hard limit on the model call itself
 FACTS_TOKEN = "{{FACTS}}"
+PRODUCT_IMAGES_TOKEN = "{{PRODUCT_IMAGES}}"  # replaced by code with "Your Image 3 is the generator's Image 2." lines
+# sha256 of every earlier DEFAULT_PLACEMENT_WRITER_PROMPT. A saved prompt that
+# still equals one of these was never edited, so startup moves it to the
+# current default; an edited one is left alone.
+SUPERSEDED_WRITER_PROMPT_HASHES = {
+    "4fe0d6126a9fa65d9b9bf5c647b4beab2b85e265684be90395fb78e2b851859a",  # before product photos + BUILD lines
+}
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
 # beside a generation; wrong if settings.vision_model is changed.
@@ -2120,6 +2135,7 @@ You write furniture placement instructions for an image generator.
 INPUTS
 - Image 1: a photograph of a room. The generator will add furniture into exactly this photograph.
 - Image 2: a top-down floor plan of the same room, drawn by a salesman. Top edge = far wall, bottom edge = near wall, the circle below the bottom edge = where Image 1 was photographed from. Wall features are coloured segments on the walls with capital labels such as DOOR, WINDOW, OPENING or PILLAR; numbered labels (DOOR 1, DOOR 2) mean there are several; a label ending in "?" is uncertain. Find each labelled feature in Image 1. Each piece of furniture is a coloured block with its number in a circle. Thick solid bars on a block are its backrest and arms; seats face away from the backrest. Labels like "LOUNGE" name a part of a piece.
+- Your Image 3 onward: the product reference photographs the generator will also be given, one per distinct photograph. {{PRODUCT_IMAGES}}
 - PLACEMENT FACTS below: generated from the same plan. They are correct. Treat them and the plan as the authority on where each piece goes. Never move, add, remove or resize a piece.
 
 YOUR JOB
@@ -2139,6 +2155,7 @@ RULES
 11. Finish with numbered lines saying which floor areas stay empty, especially between the furniture and the camera.
 12. Never describe the camera or ask to change the view.
 13. If the plan and the photo disagree (a block over a door, a labelled feature you cannot find in Image 1), follow the plan and note it under CONFLICTS.
+14. For each piece, compare its reference photo with the requested shape and lengths in the header. Directly under the header, write one line starting "BUILD:" that states the requested shape in plain words (how many arms, which is longer, which end is the lounge) and, if the photo shows something different, what to change (e.g. "Image 2 shows a two-seater; rebuild it into the L described here, do not keep it as a separate block"). Always keep the facts' line saying it is one sofa.
 
 OUTPUT
 Only the placement section, then a line "CONFLICTS", then a list (or "none"). Nothing before the first "Piece" line.
@@ -2160,12 +2177,38 @@ def get_placement_writer_prompt(db: Session) -> str:
     return get_setting(db, PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT)
 
 
-def writer_signature(facts: str, layout_json: dict | None, prompt: str, model: str) -> str:
+def writer_signature(facts: str, layout_json: dict | None, prompt: str, model: str, product_paths: list[str]) -> str:
     """Identifies exactly what a writer result was written for. Any change to
-    the placed blocks, the room's features, the prompt or the model changes
-    it, so a stale result can never be used."""
-    payload = json.dumps([facts, layout_json, prompt, model], sort_keys=True, ensure_ascii=False)
+    the placed blocks, the room's features, the product photos, the prompt or
+    the model changes it, so a stale result can never be used."""
+    payload = json.dumps([facts, layout_json, prompt, model, product_paths], sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def writer_product_images(items: list[Item]) -> tuple[list[str], str]:
+    """The distinct product photos sent to the writer after the room photo and
+    the plan (so they are its Images 3, 4, ...), and the lines tying each to
+    the generator's numbering, where Image 1 is the room and every item gets
+    its own number even when two items share a photo (see build_image_manifest)."""
+    generator_numbers: dict[str, list[int]] = {}
+    for index, item in enumerate(items):
+        generator_numbers.setdefault(item.photo_path, []).append(index + 2)
+    paths = list(generator_numbers)
+    lines = []
+    for position, photo_path in enumerate(paths):
+        numbers = generator_numbers[photo_path]
+        theirs = f"Image {numbers[0]}" if len(numbers) == 1 else f"Images {_format_piece_list(numbers)}"
+        lines.append(f"Your Image {position + 3} is the generator's {theirs}.")
+    return paths, " ".join(lines)
+
+
+def fill_writer_prompt(template: str, facts: str, product_lines: str) -> str:
+    """Puts the numbering lines and the facts into the writer prompt. A saved
+    prompt without {{PRODUCT_IMAGES}} still gets the numbering, just above
+    the facts."""
+    if PRODUCT_IMAGES_TOKEN in template:
+        return template.replace(PRODUCT_IMAGES_TOKEN, product_lines).replace(FACTS_TOKEN, facts)
+    return template.replace(FACTS_TOKEN, f"(Product photographs: {product_lines})\n{facts}" if product_lines else facts)
 
 
 def _piece_headers(lines: list[str]) -> list[str]:
@@ -2200,9 +2243,10 @@ def parse_writer_output(facts: str, output: str) -> dict:
     return {"ok": True, "reason": None, "placement": placement, "conflicts": conflicts}
 
 
-def call_placement_writer(room_photo: bytes, room_mime: str, plan_png: bytes, prompt: str, model: str) -> dict:
-    """One writer call: Image 1 = the room photo, Image 2 = the plan PNG.
-    Synchronous — callers offload it to a thread."""
+def call_placement_writer(images: list[tuple[bytes, str]], prompt: str, model: str) -> dict:
+    """One writer call. `images` are (bytes, mime) in the order the prompt
+    numbers them: the room photo, the plan PNG, then each distinct product
+    photo. Synchronous — callers offload it to a thread."""
 
     def image_part(data: bytes, mime: str) -> dict:
         return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}}
@@ -2213,7 +2257,7 @@ def call_placement_writer(room_photo: bytes, room_mime: str, plan_png: bytes, pr
         messages=[
             {
                 "role": "user",
-                "content": [{"type": "text", "text": prompt}, image_part(room_photo, room_mime), image_part(plan_png, "image/png")],
+                "content": [{"type": "text", "text": prompt}, *(image_part(data, mime) for data, mime in images)],
             }
         ],
         timeout=PLACEMENT_WRITER_CALL_TIMEOUT,
@@ -2256,20 +2300,17 @@ async def run_placement_writer(attempt_id: int, signature: str) -> None:
         state = (attempt.placement_writer or {}) if attempt else {}
         if state.get("signature") != signature:
             return
-        prompt = get_placement_writer_prompt(db).replace(FACTS_TOKEN, state["facts"])
+        product_paths, product_lines = writer_product_images(attempt.items)
+        prompt = fill_writer_prompt(get_placement_writer_prompt(db), state["facts"], product_lines)
         outcome: dict
         usage = None
         try:
-            room_path = DATA_ROOT / attempt.room.photo_path
-            room_mime, _ = mimetypes.guess_type(room_path.name)
-            result = await asyncio.to_thread(
-                call_placement_writer,
-                room_path.read_bytes(),
-                room_mime or "image/jpeg",
-                (DATA_ROOT / state["plan_path"]).read_bytes(),
-                prompt,
-                state["model"],
-            )
+            images = [
+                ((DATA_ROOT / attempt.room.photo_path).read_bytes(), mimetypes.guess_type(attempt.room.photo_path)[0] or "image/jpeg"),
+                ((DATA_ROOT / state["plan_path"]).read_bytes(), "image/png"),
+                *(((DATA_ROOT / p).read_bytes(), mimetypes.guess_type(p)[0] or "image/jpeg") for p in product_paths),
+            ]
+            result = await asyncio.to_thread(call_placement_writer, images, prompt, state["model"])
         except Exception as exc:
             logger.exception("placement writer call failed attempt_id=%s", attempt_id)
             outcome = {"status": "failed", "ok": False, "reason": f"writer call failed: {exc.__class__.__name__}"}
@@ -2315,7 +2356,8 @@ def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session)
         return "no_plan"
     facts = build_placement_text(attempt.items, attempt.room.layout_json, False)
     model = get_active_vision_model(db)
-    signature = writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model)
+    product_paths, _lines = writer_product_images(attempt.items)
+    signature = writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths)
     state = attempt.placement_writer or {}
     task = WRITER_TASKS.get(attempt.id)
     if state.get("signature") == signature and (
@@ -2361,7 +2403,8 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
     if not state.get("signature"):
         return fallback("no plan image was uploaded for this layout")
     model = get_active_vision_model(db)
-    if state["signature"] != writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model):
+    product_paths, _lines = writer_product_images(attempt.items)
+    if state["signature"] != writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths):
         return fallback("the plan, the room's features or the writer settings changed after the writer ran")
 
     info["plan_path"] = state.get("plan_path")

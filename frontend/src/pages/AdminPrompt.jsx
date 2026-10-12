@@ -7,6 +7,13 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { formatDate, withQuery } from "../utils.js";
 
+const STUDIO_LOOKS = [
+  { key: "studio_look_warm", label: "Warm" },
+  { key: "studio_look_luxury", label: "Luxury" },
+  { key: "studio_look_minimal", label: "Minimal" },
+  { key: "studio_look_studio", label: "Studio" },
+];
+
 export default function AdminPrompt() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
@@ -18,6 +25,8 @@ export default function AdminPrompt() {
   const [writerPrompt, setWriterPrompt] = useState("");
   const [studioPrompt, setStudioPrompt] = useState("");
   const [studioEditPrompt, setStudioEditPrompt] = useState("");
+  const [studioLookPrompt, setStudioLookPrompt] = useState("");
+  const [studioLooks, setStudioLooks] = useState({});
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const toast = useToast();
@@ -34,6 +43,8 @@ export default function AdminPrompt() {
     setWriterPrompt(res.placement_writer_prompt);
     setStudioPrompt(res.studio_prompt);
     setStudioEditPrompt(res.studio_edit_prompt);
+    setStudioLookPrompt(res.studio_look_prompt);
+    setStudioLooks(Object.fromEntries(STUDIO_LOOKS.map((l) => [l.key, res[l.key]])));
   }
 
   async function load() {
@@ -64,6 +75,8 @@ export default function AdminPrompt() {
         placement_writer_prompt: writerPrompt,
         studio_prompt: studioPrompt,
         studio_edit_prompt: studioEditPrompt,
+        studio_look_prompt: studioLookPrompt,
+        ...studioLooks,
         shop_id: shopIdNum,
       };
       apply(await api.post("/api/admin/prompt", { json }));
@@ -128,6 +141,7 @@ export default function AdminPrompt() {
       </div>
       <textarea className="prompt-textarea" spellCheck="false" value={studioPrompt} onChange={(e) => setStudioPrompt(e.target.value)} />
       <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+        Must contain <span className="mono">{"{{LOOK}}"}</span> where the chosen look goes.{" "}
         <button type="button" className="link-btn" onClick={() => setStudioPrompt(data.default_studio_prompt)}>
           Put back the built-in create prompt
         </button>
@@ -147,6 +161,44 @@ export default function AdminPrompt() {
         Must contain <span className="mono">{"{{INSTRUCTION}}"}</span>.{" "}
         <button type="button" className="link-btn" onClick={() => setStudioEditPrompt(data.default_studio_edit_prompt)}>
           Put back the built-in change prompt
+        </button>
+      </div>
+
+      {STUDIO_LOOKS.map((l) => (
+        <div key={l.key}>
+          <div className="section-label" style={{ marginTop: 26 }}>Product photo – look: {l.label}</div>
+          <textarea
+            className="prompt-textarea"
+            spellCheck="false"
+            value={studioLooks[l.key] ?? ""}
+            onChange={(e) => setStudioLooks((prev) => ({ ...prev, [l.key]: e.target.value }))}
+          />
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => setStudioLooks((prev) => ({ ...prev, [l.key]: data[`default_${l.key}`] }))}
+            >
+              Put back the built-in {l.label.toLowerCase()} look
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <div className="section-label" style={{ marginTop: 26 }}>Product photo – switch look</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        Used when the owner taps another look on a finished product image. The layout stays the same.
+      </div>
+      <textarea
+        className="prompt-textarea"
+        spellCheck="false"
+        value={studioLookPrompt}
+        onChange={(e) => setStudioLookPrompt(e.target.value)}
+      />
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+        Must contain <span className="mono">{"{{LOOK}}"}</span>.{" "}
+        <button type="button" className="link-btn" onClick={() => setStudioLookPrompt(data.default_studio_look_prompt)}>
+          Put back the built-in switch look prompt
         </button>
       </div>
 

@@ -721,10 +721,7 @@ h2 { font-size: 19px; }
 .st-sub { font-size: 13px; line-height: 1.5; margin: 6px 0 20px; }
 .st-layout { display: flex; flex-direction: column; gap: 24px; }
 .st-left, .st-right { min-width: 0; }
-.st-look { cursor: default; background: var(--tint); border-color: var(--tint); color: var(--orange-d); }
 .st-create { margin-top: 4px; }
-.st-credits { font-size: 12.5px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
-.st-credits.low { color: #C0392B; font-weight: 700; }
 .st-frame {
   position: relative; width: 100%; aspect-ratio: 3 / 2; border-radius: 12px; overflow: hidden;
   background: #fff; border: 1px solid var(--line);

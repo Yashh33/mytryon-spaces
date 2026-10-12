@@ -543,6 +543,7 @@ class StudioImage(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     parent_id = Column(Integer, ForeignKey("studio_images.id"), nullable=True)
     instruction = Column(Text, nullable=True)
+    look = Column(String, nullable=True)  # one of STUDIO_LOOKS
     source_path = Column(String, nullable=False)  # relative to DATA_ROOT
     result_path = Column(String, nullable=True)
     status = Column(String, nullable=False, default="pending")  # 'pending' | 'done' | 'error'
@@ -730,6 +731,8 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS plan_path TEXT"))
         conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS placement_writer JSONB"))
         conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS placement_writer JSON"))
+        # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
+        conn.execute(text("ALTER TABLE studio_images ADD COLUMN IF NOT EXISTS look TEXT"))
         # migrate DBs created before multi-tenant shops existed: add the
         # column additively (users predates shops; create_all only creates
         # brand-new tables, it won't alter this existing one).
@@ -818,6 +821,17 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == STUDIO_EDIT_PROMPT_KEY).first() is None:
             db.add(Setting(key=STUDIO_EDIT_PROMPT_KEY, value=DEFAULT_STUDIO_EDIT_PROMPT))
             logger.info("seeded default studio edit prompt")
+        if db.query(Setting).filter(Setting.key == STUDIO_LOOK_PROMPT_KEY).first() is None:
+            db.add(Setting(key=STUDIO_LOOK_PROMPT_KEY, value=DEFAULT_STUDIO_LOOK_PROMPT))
+            logger.info("seeded default studio look prompt")
+        for look in STUDIO_LOOKS:
+            if db.query(Setting).filter(Setting.key == studio_look_key(look)).first() is None:
+                db.add(Setting(key=studio_look_key(look), value=DEFAULT_STUDIO_LOOK_TEXTS[look]))
+                logger.info("seeded default studio look %s", look)
+        saved_studio = db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first()
+        if saved_studio is not None and saved_studio.value == PREVIOUS_DEFAULT_STUDIO_PROMPT:
+            saved_studio.value = DEFAULT_STUDIO_PROMPT
+            logger.info("upgraded saved studio prompt to the room-display default")
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
 
         # one-time cleanup: a previously-saved custom generation prompt may
@@ -3870,8 +3884,59 @@ INSTRUCTION_TOKEN = "{{INSTRUCTION}}"
 STUDIO_IMAGE_SIZE = "1536x1024"
 STUDIO_INSTRUCTION_MIN = 3
 STUDIO_INSTRUCTION_MAX = 300
+STUDIO_LOOK_PROMPT_KEY = "studio_look_prompt"
+LOOK_TOKEN = "{{LOOK}}"
+STUDIO_LOOKS = ["warm", "luxury", "minimal", "studio"]
+DEFAULT_STUDIO_LOOK = "warm"
+
+
+def studio_look_key(look: str) -> str:
+    return f"studio_look_{look}"
+
+
+DEFAULT_STUDIO_LOOK_TEXTS = {
+    "warm": (
+        "Look: warm and inviting – soft beige and warm-white walls, warm golden light from the lamp plus gentle "
+        "daylight, natural wood and linen textures, soft shadows."
+    ),
+    "luxury": (
+        "Look: luxury – a richly textured wall (stone, fluted panels or wood), soft accent lighting with a hidden warm "
+        "LED glow, marble or brass details, deep elegant tones."
+    ),
+    "minimal": (
+        "Look: minimal – clean light walls, very few objects, calm neutral palette, soft even daylight, plenty of open "
+        "space."
+    ),
+    "studio": (
+        "Look: clean studio – plain smooth warm-white plaster wall and plain light floor, soft warm studio lighting, a "
+        "simple rug, no other decor, a gentle soft shadow under the sofa."
+    ),
+}
 
 DEFAULT_STUDIO_PROMPT = (
+    "Image 1 is a photograph of one sofa in a furniture showroom. Create a premium product display photograph of "
+    "exactly this sofa for a furniture website, with the sofa as the clear hero of the image.\n"
+    "THE SOFA – do not change it at all: keep the exact shape, proportions, number of seats and cushions, headrests, "
+    "arms, legs, stitching, fabric or leather, and colour. Do not add, remove or restyle any part of it. Keep only the "
+    "cushions that belong to the sofa in Image 1.\n"
+    "THE ROOM: remove the showroom completely and place the sofa in a beautiful, aesthetic living room built around "
+    "it. The sofa stands against the back wall, seen from the front and turned very slightly, the whole sofa in frame, "
+    "centred, filling about half the width of the image, with nothing in front of it that hides it.\n"
+    "Around the sofa: a rug under and in front of the sofa whose colour and texture complement the sofa; one framed "
+    "artwork on the wall behind the sofa; a floor lamp or a side table with a lamp beside the sofa giving a soft warm "
+    "glow; a low coffee table in front only if it does not hide the sofa; at most one plant. Decor stays secondary and "
+    "never competes with the sofa.\n"
+    "{{LOOK}}\n"
+    "Photographic realism, interior-magazine quality, sharp focus on the sofa. No text, logos, watermarks or people."
+)
+DEFAULT_STUDIO_LOOK_PROMPT = (
+    "Image 1 is a product photograph of a sofa in a room. Restyle only the room to this look: {{LOOK}} Keep the camera "
+    "angle, framing, the sofa's position and size, and the layout of the furniture exactly the same. Do not change the "
+    "sofa at all."
+)
+# the plaster-wall default shipped before looks existed; a saved studio_prompt
+# that still equals it is upgraded at startup, a hand-edited one is left alone.
+PREVIOUS_DEFAULT_STUDIO_PROMPT = (
     "Image 1 is a photograph of one sofa taken in a furniture showroom. Create a clean product photograph of exactly "
     "this sofa for a furniture website. Keep the sofa identical: same shape, proportions, number of seats and cushions, "
     "arm and leg design, fabric or leather, colour, stitching, and the pillows that belong to it. Remove everything else "
@@ -3891,10 +3956,27 @@ def studio_public(row: StudioImage) -> dict:
         "id": row.id,
         "parent_id": row.parent_id,
         "instruction": row.instruction,
+        "look": row.look,
         "status": row.status,
         "error": row.error,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+def studio_look_text(db: Session, look: str) -> str:
+    return get_setting(db, studio_look_key(look), DEFAULT_STUDIO_LOOK_TEXTS[look])
+
+
+def studio_create_prompt(db: Session, look: str) -> str:
+    return get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT).replace(LOOK_TOKEN, studio_look_text(db, look))
+
+
+def studio_switch_look_prompt(db: Session, look: str) -> str:
+    return get_setting(db, STUDIO_LOOK_PROMPT_KEY, DEFAULT_STUDIO_LOOK_PROMPT).replace(LOOK_TOKEN, studio_look_text(db, look))
+
+
+def invalid_look_error() -> JSONResponse:
+    return error_response(400, "invalid_look", "Please pick one of the looks: " + ", ".join(STUDIO_LOOKS) + ".")
 
 
 def resolve_studio_shop(user: User, shop_id: int | None, db: Session) -> Shop | JSONResponse:
@@ -3930,6 +4012,7 @@ def _start_studio_job(
     db: Session,
     parent_id: int | None = None,
     instruction: str | None = None,
+    look: str | None = None,
 ) -> JSONResponse:
     db.add(
         CreditLedger(
@@ -3937,7 +4020,13 @@ def _start_studio_job(
         )
     )
     row = StudioImage(
-        shop_id=shop.id, user_id=user.id, parent_id=parent_id, instruction=instruction, source_path=source_path, status="pending"
+        shop_id=shop.id,
+        user_id=user.id,
+        parent_id=parent_id,
+        instruction=instruction,
+        look=look,
+        source_path=source_path,
+        status="pending",
     )
     db.add(row)
     db.commit()
@@ -4021,12 +4110,15 @@ async def run_studio_job(job_id: str, image_id: int, prompt: str, user_id: int, 
 async def api_studio_create(
     photo: UploadFile = File(...),
     shop_id: int | None = Form(None),
+    look: str = Form(DEFAULT_STUDIO_LOOK),
     user: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     shop = resolve_studio_shop(user, shop_id, db)
     if isinstance(shop, JSONResponse):
         return shop
+    if look not in STUDIO_LOOKS:
+        return invalid_look_error()
     short = studio_credit_error(db, shop)
     if short is not None:
         return short
@@ -4034,8 +4126,8 @@ async def api_studio_create(
         source_path = await save_validated_upload(photo, STUDIO_DIR / str(shop.id))
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
-    prompt = get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT)
-    return _start_studio_job(shop, user, source_path, prompt, "studio create", db)
+    prompt = studio_create_prompt(db, look)
+    return _start_studio_job(shop, user, source_path, prompt, "studio create", db, look=look)
 
 
 @app.post("/api/studio/images/{image_id}/retry")
@@ -4055,13 +4147,25 @@ def api_studio_retry(
     short = studio_credit_error(db, shop)
     if short is not None:
         return short
+    # rows made before looks existed have no look; they retry with the default.
+    look = original.look if original.look in STUDIO_LOOKS else DEFAULT_STUDIO_LOOK
     if original.instruction:
         template = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT)
         prompt, note = template.replace(INSTRUCTION_TOKEN, original.instruction), "studio change"
+    elif original.parent_id is not None and original.look:
+        prompt, note = studio_switch_look_prompt(db, look), "studio look"
     else:
-        prompt, note = get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT), "studio create"
+        prompt, note = studio_create_prompt(db, look), "studio create"
     return _start_studio_job(
-        shop, user, original.source_path, prompt, note, db, parent_id=original.parent_id, instruction=original.instruction
+        shop,
+        user,
+        original.source_path,
+        prompt,
+        note,
+        db,
+        parent_id=original.parent_id,
+        instruction=original.instruction,
+        look=original.look if original.instruction else look,
     )
 
 
@@ -4097,8 +4201,46 @@ def api_studio_change(
         return short
     prompt = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT).replace(INSTRUCTION_TOKEN, instruction)
     return _start_studio_job(
-        shop, user, parent.result_path, prompt, "studio change", db, parent_id=parent.id, instruction=instruction
+        shop,
+        user,
+        parent.result_path,
+        prompt,
+        "studio change",
+        db,
+        parent_id=parent.id,
+        instruction=instruction,
+        look=parent.look,
     )
+
+
+class StudioLookBody(BaseModel):
+    look: str
+    shop_id: int | None = None
+
+
+@app.post("/api/studio/images/{image_id}/look")
+def api_studio_switch_look(
+    image_id: int,
+    body: StudioLookBody,
+    user: User = Depends(require_owner_or_superadmin),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """Restyle a finished image's room to another look, keeping the layout."""
+    shop = resolve_studio_shop(user, body.shop_id, db)
+    if isinstance(shop, JSONResponse):
+        return shop
+    parent = get_shop_studio_image(image_id, shop, db)
+    if parent is None:
+        return error_response(404, "image_not_found", "That image could not be found.")
+    if parent.status != "done" or not parent.result_path:
+        return error_response(400, "image_not_ready", "That image isn't finished yet.")
+    if body.look not in STUDIO_LOOKS:
+        return invalid_look_error()
+    short = studio_credit_error(db, shop)
+    if short is not None:
+        return short
+    prompt = studio_switch_look_prompt(db, body.look)
+    return _start_studio_job(shop, user, parent.result_path, prompt, "studio look", db, parent_id=parent.id, look=body.look)
 
 
 @app.get("/api/studio/jobs/{job_id}")
@@ -4207,6 +4349,8 @@ PROMPT_PAGE_KEYS = [
     PLACEMENT_WRITER_PROMPT_KEY,
     STUDIO_PROMPT_KEY,
     STUDIO_EDIT_PROMPT_KEY,
+    STUDIO_LOOK_PROMPT_KEY,
+    *[studio_look_key(look) for look in STUDIO_LOOKS],
 ]
 
 
@@ -4233,6 +4377,10 @@ def prompt_setting_response(db: Session) -> dict:
         "default_studio_prompt": DEFAULT_STUDIO_PROMPT,
         "studio_edit_prompt": value(STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT),
         "default_studio_edit_prompt": DEFAULT_STUDIO_EDIT_PROMPT,
+        "studio_look_prompt": value(STUDIO_LOOK_PROMPT_KEY, DEFAULT_STUDIO_LOOK_PROMPT),
+        "default_studio_look_prompt": DEFAULT_STUDIO_LOOK_PROMPT,
+        **{studio_look_key(look): value(studio_look_key(look), DEFAULT_STUDIO_LOOK_TEXTS[look]) for look in STUDIO_LOOKS},
+        **{f"default_{studio_look_key(look)}": DEFAULT_STUDIO_LOOK_TEXTS[look] for look in STUDIO_LOOKS},
     }
 
 
@@ -4253,6 +4401,11 @@ class PromptBody(BaseModel):
     placement_writer_prompt: str | None = None
     studio_prompt: str | None = None
     studio_edit_prompt: str | None = None
+    studio_look_prompt: str | None = None
+    studio_look_warm: str | None = None
+    studio_look_luxury: str | None = None
+    studio_look_minimal: str | None = None
+    studio_look_studio: str | None = None
     shop_id: int | None = None
 
 
@@ -4274,6 +4427,20 @@ def api_admin_save_prompt(
         )
     if body.studio_prompt is not None and not body.studio_prompt.strip():
         return error_response(400, "empty_studio_prompt", "The product photo prompt can't be empty.")
+    if body.studio_prompt is not None and LOOK_TOKEN not in body.studio_prompt:
+        return error_response(
+            400, "studio_prompt_missing_look", f"The product photo prompt must contain {LOOK_TOKEN} where the look goes."
+        )
+    if body.studio_look_prompt is not None and not body.studio_look_prompt.strip():
+        return error_response(400, "empty_studio_look_prompt", "The switch look prompt can't be empty.")
+    if body.studio_look_prompt is not None and LOOK_TOKEN not in body.studio_look_prompt:
+        return error_response(
+            400, "studio_look_prompt_missing_look", f"The switch look prompt must contain {LOOK_TOKEN} where the look goes."
+        )
+    for look in STUDIO_LOOKS:
+        look_text = getattr(body, studio_look_key(look))
+        if look_text is not None and not look_text.strip():
+            return error_response(400, "empty_studio_look", f"The {look} look can't be empty.")
     if body.studio_edit_prompt is not None and not body.studio_edit_prompt.strip():
         return error_response(400, "empty_studio_edit_prompt", "The product photo change prompt can't be empty.")
     if body.studio_edit_prompt is not None and INSTRUCTION_TOKEN not in body.studio_edit_prompt:
@@ -4295,6 +4462,12 @@ def api_admin_save_prompt(
         set_setting(db, STUDIO_PROMPT_KEY, body.studio_prompt)
     if body.studio_edit_prompt is not None:
         set_setting(db, STUDIO_EDIT_PROMPT_KEY, body.studio_edit_prompt)
+    if body.studio_look_prompt is not None:
+        set_setting(db, STUDIO_LOOK_PROMPT_KEY, body.studio_look_prompt)
+    for look in STUDIO_LOOKS:
+        look_text = getattr(body, studio_look_key(look))
+        if look_text is not None:
+            set_setting(db, studio_look_key(look), look_text.strip())
     return JSONResponse(content=prompt_setting_response(db))
 
 

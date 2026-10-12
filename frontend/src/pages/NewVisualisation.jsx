@@ -4,11 +4,17 @@ import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { ErrorBlock, Loading } from "../components/StateBlock.jsx";
 import { debugLog, withQuery } from "../utils.js";
 
-const LOOK = ["Sofa", "Smooth plaster wall", "Warm light", "Studio photo"];
+const LOOKS = [
+  { value: "warm", label: "Warm" },
+  { value: "luxury", label: "Luxury" },
+  { value: "minimal", label: "Minimal" },
+  { value: "studio", label: "Studio" },
+];
 const POLL_MS = 2500;
 const INSTRUCTION_MIN = 3;
 const INSTRUCTION_MAX = 300;
@@ -22,10 +28,9 @@ export default function NewVisualisation() {
   const needsShopRedirect = isSuperadmin && !shopId;
 
   const [images, setImages] = useState(null);
-  const [balance, setBalance] = useState(null);
-  const [cost, setCost] = useState(30);
   const [loadError, setLoadError] = useState(null);
   const [photo, setPhoto] = useState(null);
+  const [look, setLook] = useState("warm");
   const [currentId, setCurrentId] = useState(null);
   // the running job: { jobId, previewUrl } — previewUrl is what the scanner runs over
   const [job, setJob] = useState(null);
@@ -48,8 +53,6 @@ export default function NewVisualisation() {
     try {
       const data = await api.get(withShop("/api/studio/images"));
       setImages(data.images);
-      setBalance(data.balance);
-      setCost(data.cost);
       setLoadError(null);
       return data.images;
     } catch (err) {
@@ -103,20 +106,17 @@ export default function NewVisualisation() {
   const backTo = isSuperadmin ? `/super/shop/${shopId}` : "/";
   const doneImages = (images || []).filter((im) => im.status === "done");
   const current = doneImages.find((im) => im.id === currentId) || null;
-  const enoughCredits = balance === null || balance >= cost;
   const busy = starting || !!job;
 
   async function start(request, previewUrl) {
-    if (!enoughCredits) return toast("Not enough credits left for this.");
     setStarting(true);
     try {
       const res = await request();
       debugLog(`studio job ${res.job_id} image ${res.id}`);
-      setBalance((b) => (b === null ? b : b - cost));
       setJob({ jobId: res.job_id, previewUrl });
     } catch (err) {
+      // includes the server's not-enough-credits message (402)
       toast(err.message);
-      if (err.status === 402) load();
     } finally {
       setStarting(false);
     }
@@ -126,6 +126,7 @@ export default function NewVisualisation() {
     if (!photo) return toast("Please add a sofa photo first.");
     const form = new FormData();
     form.append("photo", photo);
+    form.append("look", look);
     if (shopId) form.append("shop_id", shopId);
     start(() => api.post("/api/studio/images", { form }), photoUrl);
   }
@@ -135,6 +136,14 @@ export default function NewVisualisation() {
     if (text.length < INSTRUCTION_MIN) return toast("Please describe the change.");
     start(
       () => api.post(`/api/studio/images/${current.id}/change`, { json: { instruction: text, shop_id: shopId ? Number(shopId) : null } }),
+      fileUrl(current.id, "result")
+    );
+  }
+
+  function handleSwitchLook(value) {
+    if (busy || value === current.look) return;
+    start(
+      () => api.post(`/api/studio/images/${current.id}/look`, { json: { look: value, shop_id: shopId ? Number(shopId) : null } }),
       fileUrl(current.id, "result")
     );
   }
@@ -161,7 +170,7 @@ export default function NewVisualisation() {
   }
 
   async function handleDelete() {
-    if (!window.confirm("Delete this image? This can't be undone and the credits are not returned.")) return;
+    if (!window.confirm("Delete this image? This can't be undone.")) return;
     setDeleting(true);
     try {
       await api.del(withShop(`/api/studio/images/${current.id}`));
@@ -207,6 +216,17 @@ export default function NewVisualisation() {
         {current.instruction ? <div className="hint-line">Change: {current.instruction}</div> : null}
 
         <div className="field" style={{ marginTop: 16 }}>
+          <label>Try another look – keeps the same layout</label>
+          <div className="chips">
+            {LOOKS.map((l) => (
+              <Chip key={l.value} selected={l.value === current.look} onClick={() => handleSwitchLook(l.value)}>
+                {l.label}
+              </Chip>
+            ))}
+          </div>
+        </div>
+
+        <div className="field" style={{ marginTop: 16 }}>
           <label htmlFor="st-change">Ask for a change – keeps the sofa exactly the same</label>
           <div className="st-change">
             <input
@@ -220,10 +240,10 @@ export default function NewVisualisation() {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={busy || !enoughCredits || instruction.trim().length < INSTRUCTION_MIN}
+              disabled={busy || instruction.trim().length < INSTRUCTION_MIN}
               onClick={handleChange}
             >
-              Apply · {cost} credits
+              Apply
             </button>
           </div>
         </div>
@@ -232,8 +252,8 @@ export default function NewVisualisation() {
           <button type="button" className="btn btn-ghost" onClick={handleDownload}>
             Download
           </button>
-          <button type="button" className="btn btn-ghost" disabled={busy || !enoughCredits} onClick={handleRetry}>
-            Try again · {cost} credits
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={handleRetry}>
+            Try again
           </button>
           <button type="button" className="btn btn-danger" disabled={busy || deleting} onClick={handleDelete}>
             {deleting ? "Deleting…" : "Delete"}
@@ -265,25 +285,18 @@ export default function NewVisualisation() {
                 <UploadBox file={photo} onChange={setPhoto} />
               </div>
               <div className="field">
-                <label>2 · The look (same every time)</label>
+                <label>2 · The look</label>
                 <div className="chips">
-                  {LOOK.map((l) => (
-                    <span key={l} className="chip st-look">
-                      {l}
-                    </span>
+                  {LOOKS.map((l) => (
+                    <Chip key={l.value} selected={l.value === look} onClick={() => setLook(l.value)}>
+                      {l.label}
+                    </Chip>
                   ))}
                 </div>
               </div>
-              <button type="button" className="btn btn-primary st-create" disabled={busy || !photo || !enoughCredits} onClick={handleCreate}>
-                {starting && !job ? "Starting…" : `Create sofa image · ${cost} credits`}
+              <button type="button" className="btn btn-primary st-create" disabled={busy || !photo} onClick={handleCreate}>
+                {starting && !job ? "Starting…" : "Create image"}
               </button>
-              {balance !== null ? (
-                <div className={"st-credits" + (enoughCredits ? "" : " low")}>
-                  {enoughCredits
-                    ? `${balance.toLocaleString()} credits left`
-                    : `Only ${balance.toLocaleString()} credits left – each image costs ${cost}. Please top up to continue.`}
-                </div>
-              ) : null}
             </div>
             <div className="st-right">{renderResult()}</div>
           </div>

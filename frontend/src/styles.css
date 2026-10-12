@@ -713,7 +713,18 @@ h2 { font-size: 19px; }
   .rn-type { grid-area: type; }
   .rn-hint { grid-area: hint; margin-top: 0; }
   .rn-btn { grid-area: btn; }
+  .nv-layout {
+    grid-template-areas: "photo customer" "photo type" "photo hint" "photo btn" "photo .";
+    grid-template-rows: auto auto auto auto 1fr;
+  }
+  .nv-customer { grid-area: customer; }
 }
+
+/* New visualisation: customer suggestions */
+.nv-suggest { margin-top: 6px; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; }
+.nv-suggest .row-item { width: 100%; background: none; border: none; border-bottom: 1px solid var(--line); padding: 10px 12px; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.nv-suggest .row-item:last-child { border-bottom: none; }
+.nv-suggest .avatar { width: 34px; height: 34px; font-size: 12px; }
 
 /* Add furniture */
 .furn-empty { display: none; }

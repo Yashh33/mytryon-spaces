@@ -8,6 +8,7 @@ import Login from "./pages/Login.jsx";
 import Customers from "./pages/Customers.jsx";
 import Customer from "./pages/Customer.jsx";
 import RoomNew from "./pages/RoomNew.jsx";
+import NewVisualisation from "./pages/NewVisualisation.jsx";
 import Room from "./pages/Room.jsx";
 import Furniture from "./pages/Furniture.jsx";
 import Place from "./pages/Place.jsx";
@@ -49,6 +50,16 @@ export default function App() {
               <RequireAuth>
                 <AuthedLayout>
                   <Customers />
+                </AuthedLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/new-visualisation"
+            element={
+              <RequireAuth>
+                <AuthedLayout>
+                  <NewVisualisation />
                 </AuthedLayout>
               </RequireAuth>
             }

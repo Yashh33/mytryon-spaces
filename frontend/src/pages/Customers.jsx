@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useToast } from "../components/Toast.jsx";
@@ -13,7 +13,6 @@ const OWNER_ROLES = ["owner", "superadmin"];
 export default function Customers() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const [customers, setCustomers] = useState(null);
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
@@ -37,20 +36,6 @@ export default function Customers() {
       .then(setCredits)
       .catch(() => {});
   }, []);
-
-  // Re-runs when "new" appears in the URL (e.g. Menu → New visualisation while already on Home).
-  // Removing the param flips wantsNew back to false, so this cannot loop.
-  const wantsNew = searchParams.get("new") === "1";
-  useEffect(() => {
-    if (wantsNew) {
-      setShowAdd(true);
-      setSearchParams((params) => {
-        params.delete("new");
-        return params;
-      }, { replace: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wantsNew]);
 
   const isOwnerRole = OWNER_ROLES.includes(user.role);
   const showLowCreditStrip = isOwnerRole && credits && credits.balance < credits.monthly_credits * 0.1;

@@ -33,7 +33,7 @@ export function MenuDrawer({ open, onClose }) {
 
   const rows = [
     { key: "home", icon: "home", label: "Home", to: homeTarget },
-    ...(!isSuperadmin ? [{ key: "new", icon: "new-visualisation", label: "New visualisation", to: "/?new=1" }] : []),
+    ...(!isSuperadmin ? [{ key: "new", icon: "new-visualisation", label: "New visualisation", to: "/new-visualisation" }] : []),
     { key: "account", icon: "account", label: "Account & credits", to: "/account" },
     ...(isOwnerRole ? [{ key: "admin", icon: "admin", label: "Admin", to: "/admin" }] : []),
     ...(isSuperadmin ? [{ key: "shops", icon: "shops", label: "Shops", to: "/super" }] : []),

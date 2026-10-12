@@ -13,6 +13,10 @@ const STUDIO_LOOKS = [
   { key: "studio_look_minimal", label: "Minimal" },
   { key: "studio_look_studio", label: "Studio" },
 ];
+const STUDIO_VIEWS = [
+  { key: "studio_view_front", label: "Front" },
+  { key: "studio_view_angled", label: "Angled" },
+];
 
 export default function AdminPrompt() {
   const { user } = useAuth();
@@ -27,6 +31,7 @@ export default function AdminPrompt() {
   const [studioEditPrompt, setStudioEditPrompt] = useState("");
   const [studioLookPrompt, setStudioLookPrompt] = useState("");
   const [studioLooks, setStudioLooks] = useState({});
+  const [studioViews, setStudioViews] = useState({});
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const toast = useToast();
@@ -45,6 +50,7 @@ export default function AdminPrompt() {
     setStudioEditPrompt(res.studio_edit_prompt);
     setStudioLookPrompt(res.studio_look_prompt);
     setStudioLooks(Object.fromEntries(STUDIO_LOOKS.map((l) => [l.key, res[l.key]])));
+    setStudioViews(Object.fromEntries(STUDIO_VIEWS.map((v) => [v.key, res[v.key]])));
   }
 
   async function load() {
@@ -77,6 +83,7 @@ export default function AdminPrompt() {
         studio_edit_prompt: studioEditPrompt,
         studio_look_prompt: studioLookPrompt,
         ...studioLooks,
+        ...studioViews,
         shop_id: shopIdNum,
       };
       apply(await api.post("/api/admin/prompt", { json }));
@@ -141,7 +148,8 @@ export default function AdminPrompt() {
       </div>
       <textarea className="prompt-textarea" spellCheck="false" value={studioPrompt} onChange={(e) => setStudioPrompt(e.target.value)} />
       <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-        Must contain <span className="mono">{"{{LOOK}}"}</span> where the chosen look goes.{" "}
+        Must contain <span className="mono">{"{{LOOK}}"}</span> where the chosen look goes, and{" "}
+        <span className="mono">{"{{VIEW}}"}</span> where the camera view goes (if left out, the view goes after the look).{" "}
         <button type="button" className="link-btn" onClick={() => setStudioPrompt(data.default_studio_prompt)}>
           Put back the built-in create prompt
         </button>
@@ -180,6 +188,27 @@ export default function AdminPrompt() {
               onClick={() => setStudioLooks((prev) => ({ ...prev, [l.key]: data[`default_${l.key}`] }))}
             >
               Put back the built-in {l.label.toLowerCase()} look
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {STUDIO_VIEWS.map((v) => (
+        <div key={v.key}>
+          <div className="section-label" style={{ marginTop: 26 }}>Product photo – view: {v.label}</div>
+          <textarea
+            className="prompt-textarea"
+            spellCheck="false"
+            value={studioViews[v.key] ?? ""}
+            onChange={(e) => setStudioViews((prev) => ({ ...prev, [v.key]: e.target.value }))}
+          />
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => setStudioViews((prev) => ({ ...prev, [v.key]: data[`default_${v.key}`] }))}
+            >
+              Put back the built-in {v.label.toLowerCase()} view
             </button>
           </div>
         </div>

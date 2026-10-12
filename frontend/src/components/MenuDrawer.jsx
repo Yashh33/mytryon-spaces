@@ -49,7 +49,7 @@ export function MenuDrawer({ open, onClose }) {
       <div className={"menu-drawer-backdrop" + (open ? " open" : "")} onClick={onClose} />
       <div className={"menu-drawer" + (open ? " open" : "")} role="dialog" aria-modal="true" aria-label="Menu">
         <div className="menu-drawer-top">
-          <img src="/logo.png" alt="Reflection Lifestyle" className="menu-drawer-logo" />
+          <img src="/logo-square.png" alt="Reflection Lifestyle" className="menu-drawer-logo" width={64} height={64} />
           <button type="button" className="menu-drawer-close" aria-label="Close menu" onClick={onClose}>
             <img src="/icons/close.svg" alt="" width={20} height={20} />
           </button>

@@ -32,7 +32,7 @@ export default function Login() {
         <p className="login-hero-line">Show the customer their own room, with your furniture in it.</p>
       </div>
       <div className="login-screen">
-      <img src="/logo.png" alt="Reflection Lifestyle" className="login-logo" />
+      <img src="/logo-square.png" alt="Reflection Lifestyle" className="login-logo" width={140} height={140} />
       <div className="login-tagline">Visualization tool</div>
       <form className="login-form" onSubmit={handleSubmit}>
         {error ? <div className="login-error">{error}</div> : null}

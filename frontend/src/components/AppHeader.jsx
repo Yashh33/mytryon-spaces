@@ -12,7 +12,7 @@ export function AppHeader() {
     <>
       <header className="app-header">
         <Link to={homeTarget} className="app-header-logo">
-          <img src="/logo.png" alt="Reflection Lifestyle" height={36} />
+          <img src="/logo-square.png" alt="Reflection Lifestyle" width={48} height={48} />
         </Link>
         <button type="button" className="app-header-menu-btn" aria-label="Menu" onClick={() => setMenuOpen(true)}>
           <img src="/icons/menu.svg" alt="" width={24} height={24} />

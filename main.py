@@ -544,6 +544,7 @@ class StudioImage(Base):
     parent_id = Column(Integer, ForeignKey("studio_images.id"), nullable=True)
     instruction = Column(Text, nullable=True)
     look = Column(String, nullable=True)  # one of STUDIO_LOOKS
+    view = Column(String, nullable=True)  # one of STUDIO_VIEWS
     source_path = Column(String, nullable=False)  # relative to DATA_ROOT
     result_path = Column(String, nullable=True)
     status = Column(String, nullable=False, default="pending")  # 'pending' | 'done' | 'error'
@@ -733,6 +734,8 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS placement_writer JSON"))
         # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
         conn.execute(text("ALTER TABLE studio_images ADD COLUMN IF NOT EXISTS look TEXT"))
+        # product-photo studio: which camera view (front/angled) each image used.
+        conn.execute(text("ALTER TABLE studio_images ADD COLUMN IF NOT EXISTS view TEXT"))
         # migrate DBs created before multi-tenant shops existed: add the
         # column additively (users predates shops; create_all only creates
         # brand-new tables, it won't alter this existing one).
@@ -828,10 +831,14 @@ async def lifespan(app: FastAPI):
             if db.query(Setting).filter(Setting.key == studio_look_key(look)).first() is None:
                 db.add(Setting(key=studio_look_key(look), value=DEFAULT_STUDIO_LOOK_TEXTS[look]))
                 logger.info("seeded default studio look %s", look)
+        for view in STUDIO_VIEWS:
+            if db.query(Setting).filter(Setting.key == studio_view_key(view)).first() is None:
+                db.add(Setting(key=studio_view_key(view), value=DEFAULT_STUDIO_VIEW_TEXTS[view]))
+                logger.info("seeded default studio view %s", view)
         saved_studio = db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first()
-        if saved_studio is not None and saved_studio.value == PREVIOUS_DEFAULT_STUDIO_PROMPT:
+        if saved_studio is not None and saved_studio.value in PREVIOUS_DEFAULT_STUDIO_PROMPTS:
             saved_studio.value = DEFAULT_STUDIO_PROMPT
-            logger.info("upgraded saved studio prompt to the room-display default")
+            logger.info("upgraded saved studio prompt to the current default (with the view line)")
         db.query(Setting).filter(Setting.key.in_(["image_quality", "size_mode"])).delete(synchronize_session=False)
 
         # one-time cleanup: a previously-saved custom generation prompt may
@@ -3888,10 +3895,30 @@ STUDIO_LOOK_PROMPT_KEY = "studio_look_prompt"
 LOOK_TOKEN = "{{LOOK}}"
 STUDIO_LOOKS = ["warm", "luxury", "minimal", "studio"]
 DEFAULT_STUDIO_LOOK = "warm"
+VIEW_TOKEN = "{{VIEW}}"
+STUDIO_VIEWS = ["front", "angled"]
+DEFAULT_STUDIO_VIEW = "front"
 
 
 def studio_look_key(look: str) -> str:
     return f"studio_look_{look}"
+
+
+def studio_view_key(view: str) -> str:
+    return f"studio_view_{view}"
+
+
+DEFAULT_STUDIO_VIEW_TEXTS = {
+    "front": (
+        "Camera: straight-on front view at seat height, the sofa centred and parallel to the bottom edge of the image, "
+        "symmetrical composition, the whole sofa visible with even space on both sides – like a premium furniture "
+        "catalogue hero shot."
+    ),
+    "angled": (
+        "Camera: a three-quarter view from the front-left at seat height, so the front and one side of the sofa are "
+        "visible, the whole sofa in frame and centred."
+    ),
+}
 
 
 DEFAULT_STUDIO_LOOK_TEXTS = {
@@ -3920,8 +3947,10 @@ DEFAULT_STUDIO_PROMPT = (
     "arms, legs, stitching, fabric or leather, and colour. Do not add, remove or restyle any part of it. Keep only the "
     "cushions that belong to the sofa in Image 1.\n"
     "THE ROOM: remove the showroom completely and place the sofa in a beautiful, aesthetic living room built around "
-    "it. The sofa stands against the back wall, seen from the front and turned very slightly, the whole sofa in frame, "
-    "centred, filling about half the width of the image, with nothing in front of it that hides it.\n"
+    "it.\n"
+    "{{VIEW}}\n"
+    "The sofa stands against the back wall, the whole sofa in frame, centred, filling about half the width of the "
+    "image, with nothing in front of it that hides it.\n"
     "Around the sofa: a rug under and in front of the sofa whose colour and texture complement the sofa; one framed "
     "artwork on the wall behind the sofa; a floor lamp or a side table with a lamp beside the sofa giving a soft warm "
     "glow; a low coffee table in front only if it does not hide the sofa; at most one plant. Decor stays secondary and "
@@ -3934,8 +3963,26 @@ DEFAULT_STUDIO_LOOK_PROMPT = (
     "angle, framing, the sofa's position and size, and the layout of the furniture exactly the same. Do not change the "
     "sofa at all."
 )
-# the plaster-wall default shipped before looks existed; a saved studio_prompt
-# that still equals it is upgraded at startup, a hand-edited one is left alone.
+# earlier shipped defaults; a saved studio_prompt that still equals one of
+# them is upgraded at startup, a hand-edited one is left alone.
+# the room-display default from before the {{VIEW}} line existed.
+PREVIOUS_ROOM_DISPLAY_STUDIO_PROMPT = (
+    "Image 1 is a photograph of one sofa in a furniture showroom. Create a premium product display photograph of "
+    "exactly this sofa for a furniture website, with the sofa as the clear hero of the image.\n"
+    "THE SOFA – do not change it at all: keep the exact shape, proportions, number of seats and cushions, headrests, "
+    "arms, legs, stitching, fabric or leather, and colour. Do not add, remove or restyle any part of it. Keep only the "
+    "cushions that belong to the sofa in Image 1.\n"
+    "THE ROOM: remove the showroom completely and place the sofa in a beautiful, aesthetic living room built around "
+    "it. The sofa stands against the back wall, seen from the front and turned very slightly, the whole sofa in frame, "
+    "centred, filling about half the width of the image, with nothing in front of it that hides it.\n"
+    "Around the sofa: a rug under and in front of the sofa whose colour and texture complement the sofa; one framed "
+    "artwork on the wall behind the sofa; a floor lamp or a side table with a lamp beside the sofa giving a soft warm "
+    "glow; a low coffee table in front only if it does not hide the sofa; at most one plant. Decor stays secondary and "
+    "never competes with the sofa.\n"
+    "{{LOOK}}\n"
+    "Photographic realism, interior-magazine quality, sharp focus on the sofa. No text, logos, watermarks or people."
+)
+# the plaster-wall default shipped before looks existed.
 PREVIOUS_DEFAULT_STUDIO_PROMPT = (
     "Image 1 is a photograph of one sofa taken in a furniture showroom. Create a clean product photograph of exactly "
     "this sofa for a furniture website. Keep the sofa identical: same shape, proportions, number of seats and cushions, "
@@ -3944,6 +3991,7 @@ PREVIOUS_DEFAULT_STUDIO_PROMPT = (
     "turned very slightly, the whole sofa in frame with even space around it. Soft warm studio lighting, a gentle soft "
     "shadow under the sofa, no harsh reflections. Photographic realism. No text, logos, people, extra furniture or decor."
 )
+PREVIOUS_DEFAULT_STUDIO_PROMPTS = (PREVIOUS_DEFAULT_STUDIO_PROMPT, PREVIOUS_ROOM_DISPLAY_STUDIO_PROMPT)
 DEFAULT_STUDIO_EDIT_PROMPT = (
     "Image 1 is a product photograph of a sofa. Apply only this change: {{INSTRUCTION}}. Keep the sofa itself exactly "
     "the same – shape, size, cushions, material and colour – and keep the rest of the picture as it is unless the "
@@ -3957,6 +4005,7 @@ def studio_public(row: StudioImage) -> dict:
         "parent_id": row.parent_id,
         "instruction": row.instruction,
         "look": row.look,
+        "view": row.view,
         "status": row.status,
         "error": row.error,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -3967,8 +4016,18 @@ def studio_look_text(db: Session, look: str) -> str:
     return get_setting(db, studio_look_key(look), DEFAULT_STUDIO_LOOK_TEXTS[look])
 
 
-def studio_create_prompt(db: Session, look: str) -> str:
-    return get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT).replace(LOOK_TOKEN, studio_look_text(db, look))
+def studio_view_text(db: Session, view: str) -> str:
+    return get_setting(db, studio_view_key(view), DEFAULT_STUDIO_VIEW_TEXTS[view])
+
+
+def studio_create_prompt(db: Session, look: str, view: str) -> str:
+    template = get_setting(db, STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT)
+    look_text = studio_look_text(db, look)
+    view_text = studio_view_text(db, view)
+    if VIEW_TOKEN in template:
+        return template.replace(LOOK_TOKEN, look_text).replace(VIEW_TOKEN, view_text)
+    # a hand-edited prompt without {{VIEW}}: the view goes on its own line right after the look.
+    return template.replace(LOOK_TOKEN, look_text + "\n" + view_text)
 
 
 def studio_switch_look_prompt(db: Session, look: str) -> str:
@@ -3977,6 +4036,10 @@ def studio_switch_look_prompt(db: Session, look: str) -> str:
 
 def invalid_look_error() -> JSONResponse:
     return error_response(400, "invalid_look", "Please pick one of the looks: " + ", ".join(STUDIO_LOOKS) + ".")
+
+
+def invalid_view_error() -> JSONResponse:
+    return error_response(400, "invalid_view", "Please pick one of the views: " + ", ".join(STUDIO_VIEWS) + ".")
 
 
 def resolve_studio_shop(user: User, shop_id: int | None, db: Session) -> Shop | JSONResponse:
@@ -4013,7 +4076,13 @@ def _start_studio_job(
     parent_id: int | None = None,
     instruction: str | None = None,
     look: str | None = None,
+    view: str | None = None,
+    started: dict | None = None,
 ) -> JSONResponse:
+    """Callers must be async routes: asyncio.create_task needs the running
+    event loop, which a plain `def` route (run in a worker thread) doesn't
+    have. `started` gets the new row's id once the credit hold is committed,
+    so studio_start_failed knows to refund it."""
     db.add(
         CreditLedger(
             shop_id=shop.id, user_id=user.id, attempt_id=None, delta=-CREDITS_PER_GENERATION, reason="generation", note=note
@@ -4025,11 +4094,14 @@ def _start_studio_job(
         parent_id=parent_id,
         instruction=instruction,
         look=look,
+        view=view,
         source_path=source_path,
         status="pending",
     )
     db.add(row)
     db.commit()
+    if started is not None:
+        started["image_id"] = row.id
     db.refresh(row)
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "processing", "image_id": row.id, "message": None}
@@ -4106,67 +4178,107 @@ async def run_studio_job(job_id: str, image_id: int, prompt: str, user_id: int, 
         db.close()
 
 
+def studio_start_failed(db: Session, shop: Shop | None, user: User, started: dict) -> JSONResponse:
+    """Called from inside a studio start route's `except`: logs the error and,
+    if the credit hold was already committed, refunds it in this request and
+    marks the new row failed so it isn't left pending forever."""
+    logger.exception("studio start failed user_id=%s started=%s", user.id, started)
+    db.rollback()
+    image_id = started.get("image_id")
+    if shop is not None and image_id is not None:
+        try:
+            row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
+            if row is not None:
+                row.status = "error"
+                row.error = "Couldn't start that image."
+            db.add(
+                CreditLedger(
+                    shop_id=shop.id, user_id=user.id, attempt_id=None, delta=CREDITS_PER_GENERATION, reason="refund", note="studio"
+                )
+            )
+            db.commit()
+        except Exception:
+            logger.exception("studio start refund failed image_id=%s", image_id)
+            db.rollback()
+    return error_response(500, "studio_failed", "Couldn't start that image. Please try again.")
+
+
 @app.post("/api/studio/images")
 async def api_studio_create(
     photo: UploadFile = File(...),
     shop_id: int | None = Form(None),
     look: str = Form(DEFAULT_STUDIO_LOOK),
+    view: str = Form(DEFAULT_STUDIO_VIEW),
     user: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    shop = resolve_studio_shop(user, shop_id, db)
-    if isinstance(shop, JSONResponse):
-        return shop
-    if look not in STUDIO_LOOKS:
-        return invalid_look_error()
-    short = studio_credit_error(db, shop)
-    if short is not None:
-        return short
+    shop, started = None, {}
     try:
-        source_path = await save_validated_upload(photo, STUDIO_DIR / str(shop.id))
-    except UploadValidationError as exc:
-        return error_response(exc.status_code, exc.error, exc.message)
-    prompt = studio_create_prompt(db, look)
-    return _start_studio_job(shop, user, source_path, prompt, "studio create", db, look=look)
+        shop = resolve_studio_shop(user, shop_id, db)
+        if isinstance(shop, JSONResponse):
+            return shop
+        if look not in STUDIO_LOOKS:
+            return invalid_look_error()
+        if view not in STUDIO_VIEWS:
+            return invalid_view_error()
+        short = studio_credit_error(db, shop)
+        if short is not None:
+            return short
+        try:
+            source_path = await save_validated_upload(photo, STUDIO_DIR / str(shop.id))
+        except UploadValidationError as exc:
+            return error_response(exc.status_code, exc.error, exc.message)
+        prompt = studio_create_prompt(db, look, view)
+        return _start_studio_job(shop, user, source_path, prompt, "studio create", db, look=look, view=view, started=started)
+    except Exception:
+        return studio_start_failed(db, shop, user, started)
 
 
 @app.post("/api/studio/images/{image_id}/retry")
-def api_studio_retry(
+async def api_studio_retry(
     image_id: int,
     shop_id: int | None = None,
     user: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     """Try again: same source photo and same prompt kind as the original."""
-    shop = resolve_studio_shop(user, shop_id, db)
-    if isinstance(shop, JSONResponse):
-        return shop
-    original = get_shop_studio_image(image_id, shop, db)
-    if original is None or not (DATA_ROOT / original.source_path).is_file():
-        return error_response(404, "image_not_found", "That image could not be found.")
-    short = studio_credit_error(db, shop)
-    if short is not None:
-        return short
-    # rows made before looks existed have no look; they retry with the default.
-    look = original.look if original.look in STUDIO_LOOKS else DEFAULT_STUDIO_LOOK
-    if original.instruction:
-        template = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT)
-        prompt, note = template.replace(INSTRUCTION_TOKEN, original.instruction), "studio change"
-    elif original.parent_id is not None and original.look:
-        prompt, note = studio_switch_look_prompt(db, look), "studio look"
-    else:
-        prompt, note = studio_create_prompt(db, look), "studio create"
-    return _start_studio_job(
-        shop,
-        user,
-        original.source_path,
-        prompt,
-        note,
-        db,
-        parent_id=original.parent_id,
-        instruction=original.instruction,
-        look=original.look if original.instruction else look,
-    )
+    shop, started = None, {}
+    try:
+        shop = resolve_studio_shop(user, shop_id, db)
+        if isinstance(shop, JSONResponse):
+            return shop
+        original = get_shop_studio_image(image_id, shop, db)
+        if original is None or not (DATA_ROOT / original.source_path).is_file():
+            return error_response(404, "image_not_found", "That image could not be found.")
+        short = studio_credit_error(db, shop)
+        if short is not None:
+            return short
+        # rows made before looks/views existed have none; they retry with the default.
+        look = original.look if original.look in STUDIO_LOOKS else DEFAULT_STUDIO_LOOK
+        view = original.view if original.view in STUDIO_VIEWS else DEFAULT_STUDIO_VIEW
+        if original.instruction:
+            template = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT)
+            prompt, note = template.replace(INSTRUCTION_TOKEN, original.instruction), "studio change"
+        elif original.parent_id is not None and original.look:
+            prompt, note = studio_switch_look_prompt(db, look), "studio look"
+        else:
+            prompt, note = studio_create_prompt(db, look, view), "studio create"
+        # a change/look keeps its parent's layout, so it keeps the stored view as is.
+        return _start_studio_job(
+            shop,
+            user,
+            original.source_path,
+            prompt,
+            note,
+            db,
+            parent_id=original.parent_id,
+            instruction=original.instruction,
+            look=original.look if original.instruction else look,
+            view=view if note == "studio create" else original.view,
+            started=started,
+        )
+    except Exception:
+        return studio_start_failed(db, shop, user, started)
 
 
 class StudioChangeBody(BaseModel):
@@ -4175,42 +4287,48 @@ class StudioChangeBody(BaseModel):
 
 
 @app.post("/api/studio/images/{image_id}/change")
-def api_studio_change(
+async def api_studio_change(
     image_id: int,
     body: StudioChangeBody,
     user: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    shop = resolve_studio_shop(user, body.shop_id, db)
-    if isinstance(shop, JSONResponse):
-        return shop
-    parent = get_shop_studio_image(image_id, shop, db)
-    if parent is None:
-        return error_response(404, "image_not_found", "That image could not be found.")
-    if parent.status != "done" or not parent.result_path:
-        return error_response(400, "image_not_ready", "That image isn't finished yet.")
-    instruction = " ".join(body.instruction.split())
-    if not (STUDIO_INSTRUCTION_MIN <= len(instruction) <= STUDIO_INSTRUCTION_MAX):
-        return error_response(
-            400,
-            "invalid_instruction",
-            f"Please describe the change in {STUDIO_INSTRUCTION_MIN}–{STUDIO_INSTRUCTION_MAX} characters.",
+    shop, started = None, {}
+    try:
+        shop = resolve_studio_shop(user, body.shop_id, db)
+        if isinstance(shop, JSONResponse):
+            return shop
+        parent = get_shop_studio_image(image_id, shop, db)
+        if parent is None:
+            return error_response(404, "image_not_found", "That image could not be found.")
+        if parent.status != "done" or not parent.result_path:
+            return error_response(400, "image_not_ready", "That image isn't finished yet.")
+        instruction = " ".join(body.instruction.split())
+        if not (STUDIO_INSTRUCTION_MIN <= len(instruction) <= STUDIO_INSTRUCTION_MAX):
+            return error_response(
+                400,
+                "invalid_instruction",
+                f"Please describe the change in {STUDIO_INSTRUCTION_MIN}–{STUDIO_INSTRUCTION_MAX} characters.",
+            )
+        short = studio_credit_error(db, shop)
+        if short is not None:
+            return short
+        prompt = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT).replace(INSTRUCTION_TOKEN, instruction)
+        return _start_studio_job(
+            shop,
+            user,
+            parent.result_path,
+            prompt,
+            "studio change",
+            db,
+            parent_id=parent.id,
+            instruction=instruction,
+            look=parent.look,
+            view=parent.view,
+            started=started,
         )
-    short = studio_credit_error(db, shop)
-    if short is not None:
-        return short
-    prompt = get_setting(db, STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT).replace(INSTRUCTION_TOKEN, instruction)
-    return _start_studio_job(
-        shop,
-        user,
-        parent.result_path,
-        prompt,
-        "studio change",
-        db,
-        parent_id=parent.id,
-        instruction=instruction,
-        look=parent.look,
-    )
+    except Exception:
+        return studio_start_failed(db, shop, user, started)
 
 
 class StudioLookBody(BaseModel):
@@ -4219,28 +4337,43 @@ class StudioLookBody(BaseModel):
 
 
 @app.post("/api/studio/images/{image_id}/look")
-def api_studio_switch_look(
+async def api_studio_switch_look(
     image_id: int,
     body: StudioLookBody,
     user: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     """Restyle a finished image's room to another look, keeping the layout."""
-    shop = resolve_studio_shop(user, body.shop_id, db)
-    if isinstance(shop, JSONResponse):
-        return shop
-    parent = get_shop_studio_image(image_id, shop, db)
-    if parent is None:
-        return error_response(404, "image_not_found", "That image could not be found.")
-    if parent.status != "done" or not parent.result_path:
-        return error_response(400, "image_not_ready", "That image isn't finished yet.")
-    if body.look not in STUDIO_LOOKS:
-        return invalid_look_error()
-    short = studio_credit_error(db, shop)
-    if short is not None:
-        return short
-    prompt = studio_switch_look_prompt(db, body.look)
-    return _start_studio_job(shop, user, parent.result_path, prompt, "studio look", db, parent_id=parent.id, look=body.look)
+    shop, started = None, {}
+    try:
+        shop = resolve_studio_shop(user, body.shop_id, db)
+        if isinstance(shop, JSONResponse):
+            return shop
+        parent = get_shop_studio_image(image_id, shop, db)
+        if parent is None:
+            return error_response(404, "image_not_found", "That image could not be found.")
+        if parent.status != "done" or not parent.result_path:
+            return error_response(400, "image_not_ready", "That image isn't finished yet.")
+        if body.look not in STUDIO_LOOKS:
+            return invalid_look_error()
+        short = studio_credit_error(db, shop)
+        if short is not None:
+            return short
+        prompt = studio_switch_look_prompt(db, body.look)
+        return _start_studio_job(
+            shop,
+            user,
+            parent.result_path,
+            prompt,
+            "studio look",
+            db,
+            parent_id=parent.id,
+            look=body.look,
+            view=parent.view,
+            started=started,
+        )
+    except Exception:
+        return studio_start_failed(db, shop, user, started)
 
 
 @app.get("/api/studio/jobs/{job_id}")
@@ -4351,6 +4484,7 @@ PROMPT_PAGE_KEYS = [
     STUDIO_EDIT_PROMPT_KEY,
     STUDIO_LOOK_PROMPT_KEY,
     *[studio_look_key(look) for look in STUDIO_LOOKS],
+    *[studio_view_key(view) for view in STUDIO_VIEWS],
 ]
 
 
@@ -4381,6 +4515,8 @@ def prompt_setting_response(db: Session) -> dict:
         "default_studio_look_prompt": DEFAULT_STUDIO_LOOK_PROMPT,
         **{studio_look_key(look): value(studio_look_key(look), DEFAULT_STUDIO_LOOK_TEXTS[look]) for look in STUDIO_LOOKS},
         **{f"default_{studio_look_key(look)}": DEFAULT_STUDIO_LOOK_TEXTS[look] for look in STUDIO_LOOKS},
+        **{studio_view_key(view): value(studio_view_key(view), DEFAULT_STUDIO_VIEW_TEXTS[view]) for view in STUDIO_VIEWS},
+        **{f"default_{studio_view_key(view)}": DEFAULT_STUDIO_VIEW_TEXTS[view] for view in STUDIO_VIEWS},
     }
 
 
@@ -4406,6 +4542,8 @@ class PromptBody(BaseModel):
     studio_look_luxury: str | None = None
     studio_look_minimal: str | None = None
     studio_look_studio: str | None = None
+    studio_view_front: str | None = None
+    studio_view_angled: str | None = None
     shop_id: int | None = None
 
 
@@ -4441,6 +4579,10 @@ def api_admin_save_prompt(
         look_text = getattr(body, studio_look_key(look))
         if look_text is not None and not look_text.strip():
             return error_response(400, "empty_studio_look", f"The {look} look can't be empty.")
+    for view in STUDIO_VIEWS:
+        view_text = getattr(body, studio_view_key(view))
+        if view_text is not None and not view_text.strip():
+            return error_response(400, "empty_studio_view", f"The {view} view can't be empty.")
     if body.studio_edit_prompt is not None and not body.studio_edit_prompt.strip():
         return error_response(400, "empty_studio_edit_prompt", "The product photo change prompt can't be empty.")
     if body.studio_edit_prompt is not None and INSTRUCTION_TOKEN not in body.studio_edit_prompt:
@@ -4468,6 +4610,10 @@ def api_admin_save_prompt(
         look_text = getattr(body, studio_look_key(look))
         if look_text is not None:
             set_setting(db, studio_look_key(look), look_text.strip())
+    for view in STUDIO_VIEWS:
+        view_text = getattr(body, studio_view_key(view))
+        if view_text is not None:
+            set_setting(db, studio_view_key(view), view_text.strip())
     return JSONResponse(content=prompt_setting_response(db))
 
 

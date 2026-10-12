@@ -25,7 +25,7 @@ export default function SuperLogin() {
 
   return (
     <div className="login-screen">
-      <img src="/logo.png" alt="Reflection Lifestyle" className="login-logo" />
+      <img src="/logo-square.png" alt="Reflection Lifestyle" className="login-logo" width={140} height={140} />
       <div className="login-logo-sub">SUPERADMIN</div>
       <div className="login-tagline">Shop management</div>
       <form className="login-form" onSubmit={handleSubmit}>

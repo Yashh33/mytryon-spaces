@@ -15,6 +15,10 @@ const LOOKS = [
   { value: "minimal", label: "Minimal" },
   { value: "studio", label: "Studio" },
 ];
+const VIEWS = [
+  { value: "front", label: "Front" },
+  { value: "angled", label: "Angled" },
+];
 const POLL_MS = 2500;
 const INSTRUCTION_MIN = 3;
 const INSTRUCTION_MAX = 300;
@@ -31,6 +35,10 @@ export default function NewVisualisation() {
   const [loadError, setLoadError] = useState(null);
   const [photo, setPhoto] = useState(null);
   const [look, setLook] = useState("warm");
+  const [view, setView] = useState("front");
+  // the "Try another look" chip tapped on the current image while its job runs;
+  // separate from `look`, which is only the Create choice on the left.
+  const [pendingLook, setPendingLook] = useState(null);
   const [currentId, setCurrentId] = useState(null);
   // the running job: { jobId, previewUrl } — previewUrl is what the scanner runs over
   const [job, setJob] = useState(null);
@@ -82,6 +90,7 @@ export default function NewVisualisation() {
         } else {
           toast(res.message || "That didn't work. Your credits were returned.");
         }
+        setPendingLook(null);
         setJob(null);
       } catch (err) {
         if (err.status !== 404 || stopped) return;
@@ -89,6 +98,7 @@ export default function NewVisualisation() {
         stopped = true;
         clearInterval(timer);
         await load();
+        setPendingLook(null);
         setJob(null);
       }
     }, POLL_MS);
@@ -117,6 +127,7 @@ export default function NewVisualisation() {
     } catch (err) {
       // includes the server's not-enough-credits message (402)
       toast(err.message);
+      setPendingLook(null);
     } finally {
       setStarting(false);
     }
@@ -127,6 +138,7 @@ export default function NewVisualisation() {
     const form = new FormData();
     form.append("photo", photo);
     form.append("look", look);
+    form.append("view", view);
     if (shopId) form.append("shop_id", shopId);
     start(() => api.post("/api/studio/images", { form }), photoUrl);
   }
@@ -142,6 +154,7 @@ export default function NewVisualisation() {
 
   function handleSwitchLook(value) {
     if (busy || value === current.look) return;
+    setPendingLook(value);
     start(
       () => api.post(`/api/studio/images/${current.id}/look`, { json: { look: value, shop_id: shopId ? Number(shopId) : null } }),
       fileUrl(current.id, "result")
@@ -184,14 +197,39 @@ export default function NewVisualisation() {
     }
   }
 
+  function renderLookChips() {
+    return (
+      <div className="field" style={{ marginTop: 16 }}>
+        <label>Try another look – keeps the same layout</label>
+        <div className="chips">
+          {LOOKS.map((l) => (
+            <button
+              key={l.value}
+              type="button"
+              className={"chip" + (l.value === current.look ? " selected" : "") + (l.value === pendingLook ? " pending" : "")}
+              aria-pressed={l.value === current.look}
+              disabled={busy}
+              onClick={() => handleSwitchLook(l.value)}
+            >
+              {l.value === pendingLook ? `Applying ${l.label}…` : l.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   function renderResult() {
     if (job) {
       return (
-        <div className="st-frame st-frame-scan">
-          {job.previewUrl ? <img src={job.previewUrl} alt="" /> : null}
-          <div className="gen-scan" />
-          <div className="st-scan-label">Making your sofa image…</div>
-        </div>
+        <>
+          <div className="st-frame st-frame-scan">
+            {job.previewUrl ? <img src={job.previewUrl} alt="" /> : null}
+            <div className="gen-scan" />
+            <div className="st-scan-label">Making your sofa image…</div>
+          </div>
+          {current && pendingLook ? renderLookChips() : null}
+        </>
       );
     }
     if (!current) {
@@ -215,16 +253,7 @@ export default function NewVisualisation() {
         </div>
         {current.instruction ? <div className="hint-line">Change: {current.instruction}</div> : null}
 
-        <div className="field" style={{ marginTop: 16 }}>
-          <label>Try another look – keeps the same layout</label>
-          <div className="chips">
-            {LOOKS.map((l) => (
-              <Chip key={l.value} selected={l.value === current.look} onClick={() => handleSwitchLook(l.value)}>
-                {l.label}
-              </Chip>
-            ))}
-          </div>
-        </div>
+        {renderLookChips()}
 
         <div className="field" style={{ marginTop: 16 }}>
           <label htmlFor="st-change">Ask for a change – keeps the sofa exactly the same</label>
@@ -290,6 +319,16 @@ export default function NewVisualisation() {
                   {LOOKS.map((l) => (
                     <Chip key={l.value} selected={l.value === look} onClick={() => setLook(l.value)}>
                       {l.label}
+                    </Chip>
+                  ))}
+                </div>
+              </div>
+              <div className="field">
+                <label>3 · View</label>
+                <div className="chips">
+                  {VIEWS.map((v) => (
+                    <Chip key={v.value} selected={v.value === view} onClick={() => setView(v.value)}>
+                      {v.label}
                     </Chip>
                   ))}
                 </div>

@@ -130,6 +130,9 @@ h2 { font-size: 19px; }
   font-weight: 600;
 }
 .chip.selected { background: var(--orange); border-color: var(--orange); color: #fff; }
+.chip:disabled { opacity: 0.55; cursor: default; }
+.chip.pending { opacity: 1; border-color: var(--orange); color: var(--orange-d); border-style: dashed; }
+.chip.selected:disabled { opacity: 1; }
 .chip-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.08); }
 
 .divider { height: 1px; background: var(--line); margin: 20px 0; border: none; }
@@ -173,7 +176,7 @@ h2 { font-size: 19px; }
   justify-content: center;
   padding: 32px 24px;
 }
-.login-logo { max-width: 260px; width: 100%; object-fit: contain; margin: 0 auto 10px; }
+.login-logo { display: block; width: 140px; height: 140px; max-width: none; object-fit: contain; margin: 0 auto 10px; flex-shrink: 0; }
 .login-logo-sub {
   font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.22em; font-size: 11px;
   color: var(--orange-d); font-weight: 700; margin-bottom: 10px;
@@ -553,7 +556,10 @@ h2 { font-size: 19px; }
   margin: 0;
 }
 .app-header-logo { display: flex; align-items: center; line-height: 0; }
-.app-header-logo img { height: 36px; width: auto; object-fit: contain; }
+.app-header-logo img { width: 48px; height: 48px; object-fit: contain; flex-shrink: 0; }
+@media (max-width: 640px) {
+  .app-header-logo img { width: 40px; height: 40px; }
+}
 .app-header-menu-btn {
   width: 44px; height: 44px; border: 1px solid #DDD8D0; background: #fff; border-radius: 10px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -572,7 +578,7 @@ h2 { font-size: 19px; }
 }
 .menu-drawer.open { transform: translateX(0); }
 .menu-drawer-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
-.menu-drawer-logo { width: 160px; max-width: 160px; object-fit: contain; }
+.menu-drawer-logo { width: 64px; height: 64px; max-width: none; object-fit: contain; flex-shrink: 0; }
 .menu-drawer-close {
   width: 36px; height: 36px; border: 1px solid var(--line); background: #fff; border-radius: 9px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;

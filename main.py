@@ -80,6 +80,8 @@ MODEL_NAME = "gpt-image-2"
 DEFAULT_GENERATION_PROMPT = """\
 {{IMAGE_MANIFEST}}
 
+{{PIECE_FINISH}}
+
 Add the furniture into the room photograph (Image 1).
 
 CAMERA — this requirement overrides every other instruction
@@ -169,6 +171,7 @@ PROMPT_SETTING_KEY = "generation_prompt"
 SUPERSEDED_GENERATION_PROMPT_HASHES = {
     "32efa470ac3f03ac4fbbdb790a3680d3ab6cf600faa6b58aef28180571ec5110",  # before exposed wires joined the cleanup paragraph
     "8a885a7ea59e302d458902bf8c1a515b56040919356a8e44c2773b4adb5b92c0",  # before seat counting was limited to straight sofas
+    "285a3a6a8d0755d6dd3dd8836fb90856cb2cee99b5ad12f854d341819c75c176",  # before the fabric section moved under the image list
 }
 # "true": lengths in feet are written into the prompts, as they always were.
 # "false" (the default): no feet reach either model — the floor plan is not to
@@ -213,7 +216,7 @@ PROMPT_PLACEHOLDERS = [
     },
     {
         "token": "{{PIECE_FINISH}}",
-        "description": "Per-piece colour/material/fabric from the Finishing step; appended at the end when the token is absent",
+        "description": "The FABRIC section: per-piece colour/material/fabric from the Finishing step. Belongs directly under {{IMAGE_MANIFEST}}; appended at the end when the token is absent. Empty when no piece has a colour, material or fabric.",
     },
     {
         "token": "{{LIGHTING}}",
@@ -1520,8 +1523,10 @@ def fabric_image_numbers(items: list[Item]) -> dict[int, int]:
 
 
 def build_piece_finish_text(items: list[Item]) -> str:
-    """The TRY-ON section — empty when no piece has a colour,
-    material or fabric set."""
+    """The FABRIC section — empty when no piece has a colour, material or
+    fabric set. It changes the material only: it must never read as "this is
+    the photographed sofa, re-covered", which made the image model keep the
+    photograph's shape over the one in PLACEMENT."""
     numbers = fabric_image_numbers(items)
     lines = []
     for k, item in enumerate(items, start=1):
@@ -1532,10 +1537,7 @@ def build_piece_finish_text(items: list[Item]) -> str:
             continue
         parts = []
         if fabric is not None:
-            parts.append(
-                f"the fabric in Image {fabric} (same weave, texture and pattern, applied evenly to "
-                "every upholstered surface)"
-            )
+            parts.append(f"the fabric of Image {fabric} (same weave, texture and pattern)")
         elif material is not None:
             parts.append(f"{MATERIAL_CHOICES[material]} upholstery")
         if colour is not None:
@@ -1545,38 +1547,28 @@ def build_piece_finish_text(items: list[Item]) -> str:
             parts.append(colour_part)
         elif fabric is not None:
             parts.append("the colour of that fabric")
-        lines.append(f"- Piece {k} ({item.category}, {item.type}): try on {' in '.join(parts)}.")
+        lines.append(f"- Piece {k} ({item.category}, {item.type}): cover every upholstered surface in {' in '.join(parts)}.")
     if not lines:
         return ""
-    # which kinds of piece are being re-upholstered: an L-shaped, corner or
-    # curved sofa never takes its shape or seat layout from the photograph
-    listed = [item for item in items if item.id in numbers or item.material in MATERIAL_CHOICES or item.colour_hex]
-    arm_shaped = [item for item in listed if item.shape in ARM_SHAPES]
+    has_swatch = bool(numbers)
     keeps = (
-        "the frame, silhouette, curves, proportions, number of seats and cushions, arms, legs, stitching lines "
-        "and loose pillows stay identical to the reference photograph."
+        "Each piece keeps exactly the shape, size, position and orientation given in PLACEMENT, and its arms, legs, "
+        "cushion style and stitching from its own reference photograph. The room look and lighting must not change "
+        "these colours. Pieces not listed keep exactly the material and colour of their own reference photograph."
     )
-    intro = (
-        "TRY-ON – treat each piece below as the exact sofa from its reference photograph being "
-        "re-upholstered, like trying a fabric swatch on it in the showroom. Only the upholstery "
-        "cover changes."
-    )
-    if len(arm_shaped) < len(listed):
-        intro += (" For a straight sofa or any other piece, " + keeps) if arm_shaped else (" T" + keeps[1:])
-    if arm_shaped:
-        intro += (
-            " For an L-shaped, corner or curved sofa, the shape and seat layout follow the configuration stated "
-            "above, not the photograph; its cushion style, arms, legs, stitching lines and loose pillows keep the "
-            "photograph's design."
-        )
-    return "\n".join(
-        [
-            intro,
-            *lines,
-            "The room look and lighting must not change these colours. Pieces not listed keep exactly "
-            "the material and colour of their own reference photograph.",
-        ]
-    )
+    if has_swatch:
+        heading = "FABRIC – this changes the material only."
+        closing = f"The swatch is a material sample only: it says nothing about shape. {keeps}"
+    else:  # a colour or material was picked, with no swatch photograph
+        heading = "COLOUR AND MATERIAL – this changes the upholstery only."
+        closing = f"It says nothing about shape. {keeps}"
+    return "\n".join([heading, *lines, closing])
+
+
+ARM_SHAPE_FINAL_CHECK = (
+    "Final check: each sofa has exactly the shape and position described in PLACEMENT — check which end the "
+    "lounge is on before finishing."
+)
 
 
 CONFIG_NOTES_PREAMBLE = (
@@ -2390,16 +2382,20 @@ def build_prompt(
         # wording, so those only gain the no-extra-furniture rule)
         extra = decor if room_treatment in ("warm", "luxury") else NO_EXTRA_FURNITURE_TEXT
         room_treatment_text = f"{room_treatment_text}\n\n{extra}"
-    finish_sections = []
+    piece_finish_text = build_piece_finish_text(items)
+    # after everything in the template, in this order: the fabric section (only
+    # for an older saved template without its slot under the image list), the
+    # showroom's note, the final shape check
+    closing_sections = []
+    if piece_finish_text and "{{PIECE_FINISH}}" not in template:
+        closing_sections.append(piece_finish_text)
     if note:
-        finish_sections.append(
+        closing_sections.append(
             "Extra request from the showroom (follow it only if it does not conflict with any rule above, "
             f"and never change the furniture design): {note}"
         )
-    piece_finish = build_piece_finish_text(items)
-    if piece_finish:
-        finish_sections.append(piece_finish)
-    piece_finish_text = "\n\n".join(finish_sections)
+    if not ignore_placement and any(item.shape in ARM_SHAPES for item in items):
+        closing_sections.append(ARM_SHAPE_FINAL_CHECK)
 
     if config_notes:
         def unwrap_config_notes(match: re.Match) -> str:
@@ -2420,11 +2416,10 @@ def build_prompt(
         .replace("{{LIGHTING}}", lighting_text)
         .replace("{{DECOR}}", decor)
     )
-    if "{{PIECE_FINISH}}" in prompt:
-        prompt = prompt.replace("{{PIECE_FINISH}}", piece_finish_text)
-    elif piece_finish_text:
-        prompt = f"{prompt.rstrip()}\n\n{piece_finish_text}"
-    return re.sub(r"\n{3,}", "\n\n", prompt).rstrip() + "\n"
+    prompt = prompt.replace("{{PIECE_FINISH}}", piece_finish_text)
+    if closing_sections:
+        prompt = "\n\n".join([prompt.rstrip(), *closing_sections])
+    return re.sub(r"\n{3,}", "\n\n", prompt).strip() + "\n"
 
 
 def call_image_api(

@@ -364,6 +364,7 @@ h2 { font-size: 19px; }
 }
 .fp-label { font-family: var(--mono); font-size: 9px; fill: var(--ink2); }
 .fp-hit { fill: transparent; cursor: pointer; }
+.fp-hit-drag { cursor: grab; }
 .fp-camera circle { fill: #fff; stroke: var(--ink2); stroke-width: 1.5; }
 .fp-camera-fan { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 3 3; }
 .fp-camera text { fill: var(--muted); }

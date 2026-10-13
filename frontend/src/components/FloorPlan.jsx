@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import {
   ARM_SHAPES,
   armExtent,
@@ -28,6 +28,7 @@ import {
   roomFeet,
   rotateBy,
   rotateSteps,
+  shiftSpan,
   shadeColor,
   sofaName,
   sofaSeatCount,
@@ -90,6 +91,7 @@ export function FloorPlan({
   addObstructionMode = false,
   onAddObstructionAt = noop,
   onTapFeature = noop,
+  onMoveFeature = noop, // (wall, indices, span): a feature was dragged along its wall
   onTapObstruction = noop,
   readOnly = false,
   onSvg = null, // called with the <svg> node, for exporting the plan as an image
@@ -97,10 +99,17 @@ export function FloorPlan({
   const svgRef = useRef(null);
   const dragRef = useRef(null); // { mode: "move"|"resize"|"rotate", key, pointerId, startX, startY, orig, moved, ... }
 
+  const featureDragRef = useRef(null); // { wall, gi, pointerId, start, span, clientX, clientY, moved }
+  // a feature being dragged along its wall: { wall, gi, span } while the finger is down
+  const [featureDrag, setFeatureDrag] = useState(null);
+
   const layout = room.layout_json;
   const geom = planGeometry(layout?.depth_vs_width);
   const feet = roomFeet(layout?.depth_vs_width);
   const features = planFeatures(layout);
+  if (featureDrag && features.walls[featureDrag.wall]?.[featureDrag.gi]) {
+    features.walls[featureDrag.wall][featureDrag.gi].span = featureDrag.span; // drawn where it is being dragged
+  }
 
   function toNormalized(clientX, clientY) {
     const rect = svgRef.current.getBoundingClientRect();
@@ -211,6 +220,47 @@ export function FloorPlan({
     };
   }
 
+  /** A wall feature is tapped (Remove is offered) or dragged along its own
+   * wall — it can never leave that wall — and saved once, on release. */
+  function featureHandlers(wall, gi, group) {
+    if (readOnly) return {};
+    const along = (e) => {
+      const p = toNormalized(e.clientX, e.clientY);
+      return wall === "far" || wall === "near" ? p.x : p.y;
+    };
+    const mine = (e) => {
+      const drag = featureDragRef.current;
+      return drag && drag.wall === wall && drag.gi === gi && drag.pointerId === e.pointerId ? drag : null;
+    };
+    const finish = (e, cancelled) => {
+      const drag = mine(e);
+      if (!drag) return;
+      e.stopPropagation(); // not a tap on the plan's background
+      featureDragRef.current = null;
+      setFeatureDrag(null);
+      if (cancelled) return;
+      if (!drag.moved) onTapFeature(wall, group.indices);
+      else onMoveFeature(wall, group.indices, shiftSpan(drag.span, along(e) - drag.start));
+    };
+    return {
+      onPointerDown: (e) => {
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        featureDragRef.current = { wall, gi, pointerId: e.pointerId, start: along(e), span: group.span, clientX: e.clientX, clientY: e.clientY, moved: false };
+      },
+      onPointerMove: (e) => {
+        const drag = mine(e);
+        if (!drag) return;
+        // a few pixels of jitter is still a tap
+        if (!drag.moved && Math.hypot(e.clientX - drag.clientX, e.clientY - drag.clientY) < 6) return;
+        drag.moved = true;
+        setFeatureDrag({ wall, gi, span: shiftSpan(drag.span, along(e) - drag.start) });
+      },
+      onPointerUp: (e) => finish(e, false),
+      onPointerCancel: (e) => finish(e, true),
+    };
+  }
+
   /** One wall's features, each a thick coloured segment ON the wall line
    * (dashed when uncertain) or a filled square for a pillar, plus its tap
    * target. Drawn above the furniture, so a sofa against the wall can't
@@ -254,15 +304,8 @@ export function FloorPlan({
           key={`${key}-hit`}
           x={Math.min(a.x, b.x) - outX} y={Math.min(a.y, b.y) - outY}
           width={Math.abs(b.x - a.x) + outX + inX} height={Math.abs(b.y - a.y) + outY + inY}
-          className="fp-hit"
-          onPointerUp={
-            readOnly
-              ? undefined
-              : (e) => {
-                  e.stopPropagation();
-                  onTapFeature(wall, group.indices);
-                }
-          }
+          className={"fp-hit" + (readOnly ? "" : " fp-hit-drag")}
+          {...featureHandlers(wall, gi, group)}
         />
       );
     });

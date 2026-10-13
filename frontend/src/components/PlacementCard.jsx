@@ -21,6 +21,7 @@ export function PlacementCard({
   addObstructionMode,
   onAddObstructionAt,
   onTapFeature,
+  onMoveFeature,
   onTapObstruction,
   onRotate,
   onFlip,
@@ -55,11 +56,12 @@ export function PlacementCard({
         addObstructionMode={addObstructionMode}
         onAddObstructionAt={onAddObstructionAt}
         onTapFeature={onTapFeature}
+        onMoveFeature={onMoveFeature}
         onTapObstruction={onTapObstruction}
         onSvg={onSvg}
       />
       {hasWallFeatures ? (
-        <div className="hint-line fp-feature-hint">Tap a door, window or opening on the wall to remove it if it&apos;s wrong.</div>
+        <div className="hint-line fp-feature-hint">Tap a door or window to remove it, or drag it along the wall to move it.</div>
       ) : null}
 
       {hideControls ? null : (

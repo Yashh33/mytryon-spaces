@@ -179,20 +179,60 @@ export function featureSpan(position, size, wall) {
   return [round4(lo + pad), round4(hi - pad)];
 }
 
+/** A feature the salesman dragged along its wall carries its own `span`. */
+function ownSpan(feature) {
+  const s = feature.span;
+  return Array.isArray(s) && s.length === 2 && s[0] < s[1] ? [clamp01(s[0]), clamp01(s[1])] : null;
+}
+
+/** Where a feature is drawn: its own span when it was dragged, otherwise the
+ * span worked out from its position words and size. */
+export function featureOwnSpan(feature, wall) {
+  return ownSpan(feature) || featureSpan(feature.position, feature.size, wall);
+}
+
+const THIRD_NAMES = {
+  across: ["left third", "centre", "right third"], // far and near walls
+  along: ["far third", "middle third", "near third"], // side walls
+};
+
+/** Position words for a span, in the room reader's vocabulary, so everything
+ * that reads `position` (the backend's prompt text included) follows a
+ * dragged feature: every third the span covers a fair part of, e.g.
+ * "centre and right third". */
+export function positionForSpan(span, wall) {
+  const names = wall === "far" || wall === "near" ? THIRD_NAMES.across : THIRD_NAMES.along;
+  const length = span[1] - span[0];
+  const covered = THIRD_BOUNDS.map(([lo, hi], i) => ({ i, overlap: Math.min(span[1], hi) - Math.max(span[0], lo) })).filter(
+    (t) => t.overlap > Math.min(length, 1 / 3) * 0.3
+  );
+  const picked = covered.length ? covered.map((t) => t.i) : [Math.min(2, Math.floor(((span[0] + span[1]) / 2) * 3))];
+  return picked.map((i) => names[i]).join(" and ");
+}
+
+/** A span slid along its wall by `delta`, kept whole inside the wall. */
+export function shiftSpan(span, delta) {
+  const d = Math.max(-span[0], Math.min(1 - span[1], delta));
+  return [round4(span[0] + d), round4(span[1] + d)];
+}
+
 /** Groups a wall's features into render-ready groups, merging runs of
  * touching features of the same type into one wider span instead of drawing
  * several overlapping segments. Each group carries the original `indices`
- * it was built from, so removing a merged segment removes all of them. */
+ * it was built from, so removing a merged segment removes all of them. A
+ * feature the salesman dragged is never merged: it stays where he put it. */
 export function mergeAdjacentFeatures(features, wall) {
   const entries = features
-    .map((feature, index) => ({ feature, index, thirds: featureThirds(feature.position, wall) }))
-    .filter((e) => e.thirds.length)
-    .sort((a, b) => a.thirds[0] - b.thirds[0]);
+    .map((feature, index) => ({ feature, index, thirds: featureThirds(feature.position, wall), placed: ownSpan(feature) }))
+    .filter((e) => e.thirds.length || e.placed)
+    .sort((a, b) => (a.placed ? a.placed[0] * 3 : a.thirds[0]) - (b.placed ? b.placed[0] * 3 : b.thirds[0]));
 
   const groups = [];
   entries.forEach((entry) => {
     const prev = groups[groups.length - 1];
-    if (prev && prev.type === entry.feature.type && entry.thirds[0] <= prev.lastSlot + 1) {
+    if (entry.placed) {
+      groups.push({ type: entry.feature.type, members: [entry], lastSlot: -9, placed: true });
+    } else if (prev && !prev.placed && prev.type === entry.feature.type && entry.thirds[0] <= prev.lastSlot + 1) {
       prev.members.push(entry);
       prev.lastSlot = Math.max(prev.lastSlot, entry.thirds[entry.thirds.length - 1]);
     } else {
@@ -201,7 +241,7 @@ export function mergeAdjacentFeatures(features, wall) {
   });
 
   return groups.map((group) => {
-    const spans = group.members.map((m) => featureSpan(m.feature.position, m.feature.size, wall));
+    const spans = group.members.map((m) => featureOwnSpan(m.feature, wall));
     return {
       type: group.type,
       notes: group.members[0].feature.notes,

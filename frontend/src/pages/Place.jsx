@@ -23,6 +23,7 @@ import {
   flipPlacement,
   itemsToBlocks,
   planFeatures,
+  positionForSpan,
   resizePlacement,
   roomFeet,
   rotatePlacement,
@@ -36,7 +37,8 @@ import { exportPlanPng } from "../planExport.js";
 // again next time.
 function uncertainFeatureCheck(room) {
   const groups = Object.values(planFeatures(room.layout_json).walls).flat().filter((g) => g.uncertain);
-  const signature = JSON.stringify(groups.map((g) => [g.wall, g.type, g.span]));
+  // which uncertain features there are, not where: moving one along its wall is not a new question
+  const signature = JSON.stringify(groups.map((g) => [g.wall, g.type]));
   return { labels: groups.map((g) => g.label), signature, key: `plan-features-checked:${room.id}` };
 }
 
@@ -274,12 +276,33 @@ export default function Place() {
   async function updateLayout(mutate) {
     const current = room.layout_json || emptyLayout();
     const updated = mutate(current);
+    // shown at once (a dragged feature must not jump back while it saves), then confirmed by the server
+    setAttempt((prev) => ({ ...prev, room: { ...prev.room, layout_json: updated } }));
     try {
       const data = await api.patch(`/api/rooms/${room.id}/layout`, { json: { layout_json: updated } });
       setAttempt((prev) => ({ ...prev, room: { ...prev.room, ...data.room } }));
     } catch (err) {
+      setAttempt((prev) => ({ ...prev, room: { ...prev.room, layout_json: current } }));
       toast(err.message);
     }
+  }
+
+  /** A feature dragged along its wall: it keeps its place in the list with
+   * the new span and matching position words. A segment that was several
+   * touching features drawn as one becomes that one feature. */
+  function handleMoveFeature(wall, indices, span) {
+    const key = WALL_KEY[wall];
+    const [first, ...rest] = Array.isArray(indices) ? indices : [indices];
+    const dropped = new Set(rest);
+    updateLayout((layout) => ({
+      ...layout,
+      [key]: {
+        ...layout[key],
+        features: (layout[key]?.features || [])
+          .map((feature, i) => (i === first ? { ...feature, span, position: positionForSpan(span, wall) } : feature))
+          .filter((_, i) => !dropped.has(i)),
+      },
+    }));
   }
 
   function handleAddObstructionAt(x, y) {
@@ -401,6 +424,7 @@ export default function Place() {
     addObstructionMode,
     onAddObstructionAt: handleAddObstructionAt,
     onTapFeature: handleTapFeature,
+    onMoveFeature: handleMoveFeature,
     onTapObstruction: handleTapObstruction,
     onRotate: () => selectedKey && handleRotateBlock(selectedKey),
     onFlip: () => selectedKey && handleFlipBlock(selectedKey),
@@ -529,7 +553,7 @@ export default function Place() {
         <BottomSheet title="Check the plan" onClose={() => setFeatureCheck(null)}>
           <p style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 6 }}>Please check the features marked ? — are they really there?</p>
           <p className="muted" style={{ fontSize: 13.5, marginBottom: 18 }}>
-            {featureCheck.labels.join(", ")}. Tap one on the wall to remove it if it&apos;s wrong.
+            {featureCheck.labels.join(", ")}. Tap one on the wall to remove it, or drag it along the wall to move it.
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <button

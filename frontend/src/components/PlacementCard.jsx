@@ -1,4 +1,4 @@
-import { ARM_SHAPES } from "../placement.js";
+import { ARM_SHAPES, planFeatures } from "../placement.js";
 import { RoomPlanView } from "./RoomPlanView.jsx";
 
 /** The floor-plan card used on the placement screen: the plan itself, the
@@ -30,6 +30,7 @@ export function PlacementCard({
   hideControls = false,
   onSvg = null,
 }) {
+  const hasWallFeatures = Object.values(planFeatures(room.layout_json).walls).some((groups) => groups.length > 0);
   return (
     <div className="placement-card">
       <div className="placement-card-top">
@@ -57,6 +58,9 @@ export function PlacementCard({
         onTapObstruction={onTapObstruction}
         onSvg={onSvg}
       />
+      {hasWallFeatures ? (
+        <div className="hint-line fp-feature-hint">Tap a door, window or opening on the wall to remove it if it&apos;s wrong.</div>
+      ) : null}
 
       {hideControls ? null : (
         <PieceControls selectedBlock={selectedBlock} onRotate={onRotate} onFlip={onFlip} onRequestRemove={onRequestRemove} />

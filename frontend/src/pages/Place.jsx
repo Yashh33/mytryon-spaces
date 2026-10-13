@@ -22,11 +22,39 @@ import {
   defaultPlacement,
   flipPlacement,
   itemsToBlocks,
+  planFeatures,
   resizePlacement,
   roomFeet,
   rotatePlacement,
 } from "../placement.js";
 import { exportPlanPng } from "../planExport.js";
+
+// "Are the features marked ? really there?" is asked once per plan: the
+// answer is remembered for exactly the uncertain features it was given for,
+// so a room read again, or a feature added, is asked about again. Only a
+// convenience — if the browser won't store it, the question is simply asked
+// again next time.
+function uncertainFeatureCheck(room) {
+  const groups = Object.values(planFeatures(room.layout_json).walls).flat().filter((g) => g.uncertain);
+  const signature = JSON.stringify(groups.map((g) => [g.wall, g.type, g.span]));
+  return { labels: groups.map((g) => g.label), signature, key: `plan-features-checked:${room.id}` };
+}
+
+function featuresAlreadyChecked(check) {
+  try {
+    return window.localStorage.getItem(check.key) === check.signature;
+  } catch {
+    return false;
+  }
+}
+
+function rememberFeaturesChecked(check) {
+  try {
+    window.localStorage.setItem(check.key, check.signature);
+  } catch {
+    // not stored: the question comes up again next time
+  }
+}
 
 function emptyLayout() {
   return {
@@ -57,6 +85,7 @@ export default function Place() {
   const [showAddFeature, setShowAddFeature] = useState(false);
   const [addObstructionMode, setAddObstructionMode] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null); // { kind: "piece"|"feature"|"obstruction", label, onConfirm }
+  const [featureCheck, setFeatureCheck] = useState(null); // the "features marked ?" question, while it is open
   const [fullScreen, setFullScreen] = useState(false);
   const [phoneView, setPhoneView] = useState("plan"); // phone only: "plan" | "photo"
   // Guards against stale server replies: every local change to a block's
@@ -321,6 +350,17 @@ export default function Place() {
   // Next: send the plan, as drawn, to the server so the placement writer can
   // start while the salesman picks his finishing options. Entirely optional —
   // any failure here is ignored and generation falls back to the plain facts.
+  /** Next, as tapped: first asks about features the room reader was unsure
+   * of (once per plan), since a wrong one ends up painted into the picture. */
+  function handleNextTap() {
+    const check = uncertainFeatureCheck(attempt.room);
+    if (check.labels.length && !featuresAlreadyChecked(check)) {
+      setFeatureCheck(check);
+      return;
+    }
+    handleNext();
+  }
+
   async function handleNext() {
     setLeaving(true);
     try {
@@ -485,6 +525,30 @@ export default function Place() {
       {/* Fixed-position sheet — rendered once regardless of full-screen,
          since it already overlays everything via its own backdrop. */}
       {removeTarget ? <RemoveConfirmSheet target={removeTarget} onClose={() => setRemoveTarget(null)} /> : null}
+      {featureCheck ? (
+        <BottomSheet title="Check the plan" onClose={() => setFeatureCheck(null)}>
+          <p style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 6 }}>Please check the features marked ? — are they really there?</p>
+          <p className="muted" style={{ fontSize: 13.5, marginBottom: 18 }}>
+            {featureCheck.labels.join(", ")}. Tap one on the wall to remove it if it&apos;s wrong.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              onClick={() => {
+                rememberFeaturesChecked(featureCheck);
+                setFeatureCheck(null);
+                handleNext();
+              }}
+            >
+              They&apos;re right
+            </button>
+            <button type="button" className="btn btn-ghost btn-small" onClick={() => setFeatureCheck(null)}>
+              Let me check
+            </button>
+          </div>
+        </BottomSheet>
+      ) : null}
 
       <StepFooter
         backTo={adjust.backTo || `/attempt/${id}/furniture`}
@@ -492,7 +556,7 @@ export default function Place() {
         primaryLabel="Next"
         primaryBusyLabel="Saving plan…"
         busy={leaving}
-        onPrimary={handleNext}
+        onPrimary={handleNextTap}
         secondaryLabel="Skip placement"
         onSecondary={() => navigate(`/attempt/${id}/finish?ignore_placement=true${adjust.query ? `&${adjust.query}` : ""}`)}
       />

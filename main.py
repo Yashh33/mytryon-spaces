@@ -1233,13 +1233,14 @@ def derive_size(width: int, height: int) -> str:
     return "1024x1024"
 
 
-# The image model only returns these sizes. A photo of another shape (16:9,
-# 4:3, ...) sent as it is comes back re-framed to fit. So it is padded to the
-# output's shape with plain grey first, and the render is cropped back to
-# where the photo was.
+# The image model only returns these sizes. A photo of a clearly different
+# shape (16:9 into 3:2) sent as it is comes back re-framed to fit. So it is
+# padded to the output's shape with plain grey first, and the render is
+# cropped back to where the photo was. Ordinary phone shapes (4:3, 3:4) are
+# close enough and go exactly as they always did, unpadded.
 OUTPUT_SIZES = ((1536, 1024), (1024, 1536), (1024, 1024))
 PAD_COLOUR = (128, 128, 128)
-PAD_RATIO_TOLERANCE = 0.02  # a photo this close to the output's shape is sent as it is
+PAD_RATIO_TOLERANCE = 0.15  # pad only when the photo's shape is more than this far from the output's
 PADDED_ROOM_LINE = "The grey border is not part of the room — leave it unchanged."
 
 
@@ -1259,7 +1260,8 @@ def pad_to_output_ratio(image: Image.Image, size: str) -> tuple[Image.Image, tup
     out_w, out_h = (int(n) for n in size.split("x"))
     width, height = image.size
     target = out_w / out_h
-    if abs(width / height - target) / target <= PAD_RATIO_TOLERANCE:
+    shape = width / height
+    if max(shape / target, target / shape) - 1 <= PAD_RATIO_TOLERANCE:
         return image, None
     if width / height > target:  # wider than the output: bars above and below
         canvas_w, canvas_h = width, round(width / target)
@@ -2669,6 +2671,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "50d610ff2b7b08858499cd3caea7892698d278b295a7a98b632dd867bc3a8c0c",  # before LANDMARKS replaced wall fractions
     "fc864c5e94212bdcab7715a7b32b4cd66a3e490d0c484457b5b90b6b0ba093b1",  # before open floor was described in plain terms
     "41d38fcfde38e29472fa2cc19a117f4e93ae5e24e974e2510cfc161f1a9ed679",  # before features not visible in the photo were left out
+    "8eb1aad11db5353ef8871ba12d2d49f52e25f87e86f1a5aec1d0cf23e8a4ff6c",  # before "?" features were never called a window, door or opening
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2696,7 +2699,7 @@ b) Size gaps along a wall with visible objects such as windows and doors, never 
 c) Also say what stays empty, in landmark terms: 'nothing stands below Window 1', 'the corner left of Window 1 stays bare'.
 d) Use a fraction only as a backup when no landmark is near, and then describe it by the frame, e.g. 'the sofa's left arm is at about the middle of the far wall as seen in the photograph'.
 e) If the plan and the photograph place a feature differently, follow the photograph's position of the feature and keep the sofa's relation to it as the plan shows (e.g. 'starts just after Window 1'), and note it under CONFLICTS.
-f) Before using any labelled feature as a landmark, find it in Image 1. If you cannot clearly see it there, never mention it and never use it as a landmark; list it under CONFLICTS as 'not visible in the photo: <label>'.
+f) Before using any labelled feature as a landmark, find it in Image 1. If you cannot clearly see it there, never mention it and never use it as a landmark; list it under CONFLICTS as 'not visible in the photo: <label>'. For a feature whose label ends in '?', never call it a window, door or opening; describe only what is visible (e.g. 'the panelled section of the far wall'), or leave it out.
 
 RULES
 1. Keep every "Piece N — ..." header line exactly as given, including "from Image k". In those headers "Image k" refers to the generator's product photographs, NOT to your Image 2 floor plan. Under each header, write numbered lines; numbering continues across pieces.
@@ -3141,7 +3144,9 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             with Image.open(room_path) as room_image:
                 size = nearest_output_size(*room_image.size)
                 padded, photo_box = pad_to_output_ratio(room_image, size)
-                if photo_box is not None:
+                if photo_box is None:
+                    size = derive_size(*room_image.size)  # close enough: sent exactly as before
+                else:
                     buffer = io.BytesIO()
                     padded.save(buffer, format="JPEG", quality=92)
                     room_file = (room_path.name, buffer.getvalue(), "image/jpeg")

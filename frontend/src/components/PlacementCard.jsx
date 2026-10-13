@@ -92,9 +92,6 @@ export function PieceControls({ selectedBlock, onRotate, onFlip, onRequestRemove
           Remove
         </button>
       </div>
-      {selectedBlock.outsidePhoto ? (
-        <div className="outside-photo-note">Part of this piece is outside the photo — move it into the white area to see it fully.</div>
-      ) : null}
     </div>
   );
 }

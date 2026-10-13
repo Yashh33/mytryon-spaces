@@ -2529,6 +2529,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "217801ac98e8bde664415ea4fb169ebb82e6c92f6c03ad3172c365a1006042a7",  # before "never mention feet" and proportions in BUILD lines
     "e718360df61e328b89e2f7b40a4b84bfbd69f652891870457075f7729891430c",  # the last prompt that was given the placement facts
     "bedd92dd206ca321d56a9a6022a101bf67cd10bb4dc5b7d5030e4a1491a5e6d8",  # before "drawn against a wall TOUCHES", one arm on an L, a size for every GAP
+    "c2e3bab1286627607cead0915ba6f2d07d4d2a37ced40c48b94175131b7a5c3c",  # before "measure the lounge from the wall the long run stands on"
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2558,6 +2559,7 @@ RULES
    - it TOUCHES: name what it touches (the far wall, the right wall, the far-right corner, another piece).
    - there is a GAP: give the gap's size as a share of that wall or of the room (about a tenth, a fifth, a quarter, a third, half), and name what lies beyond the gap (bare wall, which window, which door, a pillar, another piece, open floor).
    For an L-shaped or corner sofa, do this separately for the long run and for the lounge or second run. Always say where the lounge's open tip ends compared with the nearest window or door.
+   Measure the lounge's length from the wall the long run stands on to the lounge's open tip — the whole lounge, including the part beside the long run's seat, not only the part that sticks out past it.
    A block drawn against a wall line TOUCHES that wall. A sliver thinner than about a twentieth of the wall is not a gap — call it TOUCHES.
    For each end of every run, also state the gap to the wall or corner in that direction (e.g. "about a third of the far wall stays empty between the left end and the left wall"), in addition to any window or door in between.
    Every GAP must have a size.

@@ -1226,11 +1226,10 @@ def load_local_image_with_debug(path: Path, role: str, url: str) -> tuple[tuple[
 
 
 def derive_size(width: int, height: int) -> str:
-    if width > height:
-        return "1536x1024"
-    if height > width:
-        return "1024x1536"
-    return "1024x1024"
+    """Landscape photo -> landscape picture, portrait -> portrait. The square
+    output is never used: a square or nearly square photo goes to whichever
+    of the two is closer (landscape for an exact square)."""
+    return "1536x1024" if width >= height else "1024x1536"
 
 
 # The image model only returns these sizes. A photo of a clearly different
@@ -1238,18 +1237,9 @@ def derive_size(width: int, height: int) -> str:
 # padded to the output's shape with plain grey first, and the render is
 # cropped back to where the photo was. Ordinary phone shapes (4:3, 3:4) are
 # close enough and go exactly as they always did, unpadded.
-OUTPUT_SIZES = ((1536, 1024), (1024, 1536), (1024, 1024))
 PAD_COLOUR = (128, 128, 128)
 PAD_RATIO_TOLERANCE = 0.15  # pad only when the photo's shape is more than this far from the output's
 PADDED_ROOM_LINE = "The grey border is not part of the room — leave it unchanged."
-
-
-def nearest_output_size(width: int, height: int) -> str:
-    """The output size closest in shape to the photo, so the padding is as
-    thin as it can be (a nearly square photo gets the square output)."""
-    ratio = math.log(width / height)
-    w, h = min(OUTPUT_SIZES, key=lambda s: abs(math.log(s[0] / s[1]) - ratio))
-    return f"{w}x{h}"
 
 
 def pad_to_output_ratio(image: Image.Image, size: str) -> tuple[Image.Image, tuple[float, float, float, float] | None]:
@@ -3146,13 +3136,11 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         room_path = DATA_ROOT / room.photo_path
         room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
         photo_box = None  # where the photo sits in a padded Image 1; None when it is sent as it is
+        size = derive_size(room_debug["width"], room_debug["height"])
         if pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
-                size = nearest_output_size(*room_image.size)
                 padded, photo_box = pad_to_output_ratio(room_image, size)
-                if photo_box is None:
-                    size = derive_size(*room_image.size)  # close enough: sent exactly as before
-                else:
+                if photo_box is not None:
                     buffer = io.BytesIO()
                     padded.save(buffer, format="JPEG", quality=92)
                     room_file = (room_path.name, buffer.getvalue(), "image/jpeg")
@@ -3165,8 +3153,6 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                         "size_bytes": len(buffer.getvalue()),
                         "padded": True,
                     }
-        else:
-            size = derive_size(room_debug["width"], room_debug["height"])
         image_files.append(room_file)
         debug_images.append(room_debug)
 

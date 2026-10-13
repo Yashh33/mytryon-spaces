@@ -537,10 +537,7 @@ export function FloorPlan({
         <>
           <path d={fig.seat.d} fill={seatFill} stroke={seatBorder} strokeWidth={fig.seat.r * 2 + 3} strokeLinejoin="round" />
           <path d={fig.seat.d} fill={seatFill} stroke={seatFill} strokeWidth={fig.seat.r * 2} strokeLinejoin="round" />
-          <path
-            d={fig.back.d} fill="none" stroke={color} strokeWidth={fig.back.width} strokeLinecap="round"
-            strokeDasharray={`${fig.back.dash} ${fig.back.gap}`} strokeDashoffset={fig.back.offset}
-          />
+          <path d={fig.back.d} fill="none" stroke={color} strokeWidth={fig.back.width} strokeLinecap="round" />
           {handRests(fig)}
         </>
       );

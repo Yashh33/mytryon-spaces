@@ -111,12 +111,15 @@ Change nothing except adding the furniture.
 Remove any people from the photograph.
 
 Each piece takes its fabric, colour, texture, arm, leg and cushion style
-from ITS OWN reference photograph. The NUMBER of seats and cushions is
-never taken from the photograph — it comes only from the configuration
-stated above. Where a photograph shows fewer or more seats than the
-stated configuration, rebuild that piece longer or shorter in the same
-design, adding or removing matching seat and back cushions. Do not apply
-one piece's material or colour to another.
+from ITS OWN reference photograph. For a straight sofa, the NUMBER of
+seats and cushions is never taken from the photograph — it comes only
+from the configuration stated above. Where a photograph shows fewer or
+more seats than the stated configuration, rebuild that piece longer or
+shorter in the same design, adding or removing matching seat and back
+cushions. An L-shaped, corner or curved sofa has no stated seat count:
+build it to the shape and size stated in its placement, with as many
+whole seats as fit that length. Do not apply one piece's material or
+colour to another.
 
 {{CONFIG_NOTES}}
 
@@ -165,6 +168,7 @@ PROMPT_SETTING_KEY = "generation_prompt"
 # current default at startup; an edited prompt is left alone.
 SUPERSEDED_GENERATION_PROMPT_HASHES = {
     "32efa470ac3f03ac4fbbdb790a3680d3ab6cf600faa6b58aef28180571ec5110",  # before exposed wires joined the cleanup paragraph
+    "8a885a7ea59e302d458902bf8c1a515b56040919356a8e44c2773b4adb5b92c0",  # before seat counting was limited to straight sofas
 }
 # "true": lengths in feet are written into the prompts, as they always were.
 # "false" (the default): no feet reach either model — the floor plan is not to
@@ -1387,9 +1391,9 @@ CONFIG_NOTES = {
     ("Sofa", "3-seater"): "One straight sofa with exactly three seat cushions side by side and three back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
     ("Sofa", "4-seater"): "One straight sofa with exactly four seat cushions side by side and four back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
     ("Sofa", "5-seater"): "One straight sofa with exactly five seat cushions side by side and five back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
-    ("Sofa", "L-shape"): "Exactly TWO arms meeting at ONE corner, at the lengths stated in the piece header. No third section and no extra arm along any other wall. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this L in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set. The lounger has no backrest — it is an open chaise. Only the long run has a backrest.",
-    ("Sofa", "Corner"): "Exactly TWO arms meeting at ONE square corner, at the lengths stated in the piece header, with a backrest along BOTH arms and hand-rests at both ends. No third section and no extra arm along any other wall. Not curved, no chaise lounge. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this corner shape in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set.",
-    ("Sofa", "Curved"): "One continuous curve with a gently arcing back, at the length stated in the piece header. No straight extra sections. If the reference photograph shows a straight sofa, rebuild the whole sofa into this curve in the same design. A single piece.",
+    ("Sofa", "L-shape"): "Exactly TWO arms meeting at ONE corner, at the lengths stated in the piece header. No third section and no extra arm along any other wall. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this L in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set. The lounger has no backrest — it is an open chaise. Only the long run has a backrest. The lounge starts where the last full seat of the long run ends — never partway through a seat. No seat count is given: fit whole seats to the length shown.",
+    ("Sofa", "Corner"): "Exactly TWO runs meeting at ONE square corner, at the lengths stated in the piece header, with a backrest along BOTH runs and an arm at both outer ends. No third section and no extra run along any other wall. Not curved, and no open chaise: neither end is a lounger. No seat count is given: fit whole seats to the length shown. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this corner shape in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set.",
+    ("Sofa", "Curved"): "One continuous curve with a gently arcing back, at the length stated in the piece header. No straight extra sections. If the reference photograph shows a straight sofa, rebuild the whole sofa into this curve in the same design. No seat count is given: fit whole seats to the length shown. A single piece.",
     ("Dining table", "4 seater"): "A dining table with four chairs around it.",
     ("Dining table", "6 seater"): "A dining table with six chairs around it.",
     ("Dining table", "8 seater"): "A long dining table with eight chairs around it.",
@@ -1471,7 +1475,9 @@ def build_image_manifest(items: list[Item], feet: bool = False) -> str:
         lines.append(
             f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
             "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
-            "legs, stitching, material, colour and texture. Only the number of seats and the overall "
+            "legs, stitching, material, colour and texture. "
+            # no seat count is ever stated for an L-shaped, corner or curved sofa
+            + ("Only its shape and the overall " if item.shape in ARM_SHAPES else "Only the number of seats and the overall ")
             + (
                 "width follow the configuration stated below; everything else must match this photograph."
                 if feet
@@ -1558,9 +1564,10 @@ def build_piece_finish_text(items: list[Item]) -> str:
 CONFIG_NOTES_PREAMBLE = (
     "Build each piece in the configuration stated below. Keep the exact "
     "design of its reference photograph – silhouette, curves, arm and back "
-    "shape, cushions and legs. Where the photograph shows a different number "
-    "of seats or sections, add or remove matching seats in that same design; "
-    "never replace it with a different or generic sofa."
+    "shape, cushions and legs. For a straight sofa with a stated seat count, "
+    "where the photograph shows a different number of seats, add or remove "
+    "matching seats in that same design. Never replace a piece with a "
+    "different or generic sofa."
 )
 
 

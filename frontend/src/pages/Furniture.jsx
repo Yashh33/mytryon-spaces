@@ -72,10 +72,7 @@ function TypeIcon({ kind, selected }) {
       <g transform="translate(10 6)">
         <path d={fig.seat.d} fill="#e5e7eb" stroke={GREY} strokeWidth={fig.seat.r * 2 + 3} strokeLinejoin="round" />
         <path d={fig.seat.d} fill="#e5e7eb" stroke="#e5e7eb" strokeWidth={fig.seat.r * 2} strokeLinejoin="round" />
-        <path
-          d={fig.back.d} fill="none" stroke={backFill} strokeWidth={fig.back.width} strokeLinecap="round"
-          strokeDasharray={`${fig.back.dash} ${fig.back.gap}`} strokeDashoffset={fig.back.offset}
-        />
+        <path d={fig.back.d} fill="none" stroke={backFill} strokeWidth={fig.back.width} strokeLinecap="round" />
         {fig.handRests.map((r, i) => pillRect(r, `h${i}`, GREY))}
       </g>
     );

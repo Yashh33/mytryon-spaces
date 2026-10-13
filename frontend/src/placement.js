@@ -802,17 +802,17 @@ export function straightFigure(L, D, n) {
 }
 
 /** L-shape = a sofa plus an open lounger (chaise). The long arm Lf x d has
- * the only backrest, along its outer (wall) side. The lounge is the short
+ * the only backrest, along its outer (wall) side: ONE continuous bar, never
+ * split into cushions — an L has no seat count. The lounge is the short
  * arm at the u = 0 end running out to S: just the open seat shape — no
  * backrest, no armrest, nothing along its outer edge or across its tip.
  * (A sofa with backrests on both arms is the Corner type: see cornerFigure.) */
 export function lFigure(Lf, S, d) {
   const { bt, g } = figureMetrics(Lf, d);
   const Sx = Math.max(S, d + 1);
-  const n = Math.max(2, Math.round(Lf / Math.max(d * 0.95, 1)));
   return {
     handRests: [],
-    backPills: pillRow(0, Lf, bt, n),
+    backPills: pillRow(0, Lf, bt, 1),
     seatPoints: [[1, bt + g], [Lf - 1, bt + g], [Lf - 1, d - 1], [d - 1, d - 1], [d - 1, Sx - 1], [1, Sx - 1]],
     seatRadii: [6, 6, 6, 2, 6, 6],
     labelLong: { u0: d, v0: bt + g, u1: Lf - 1, v1: d - 1 },
@@ -821,25 +821,19 @@ export function lFigure(Lf, S, d) {
 }
 
 /** Corner sofa: a square corner with a backrest along BOTH outer arms (v = 0
- * and u = 0), a hand-rest at each far end, and one L-shaped seat. */
+ * and u = 0) drawn as one continuous bar round the corner — never split into
+ * cushions, a corner sofa has no seat count — a hand-rest at each far end,
+ * and one L-shaped seat. */
 export function cornerFigure(Lf, S, d) {
   const { t, bt, g } = figureMetrics(Lf, d);
   const Sx = Math.max(S, d + 1);
   const seatEndU = Lf - t - g;
   const seatEndV = Sx - t - g;
-  const nLong = Math.max(1, Math.round((seatEndU - (bt + g)) / Math.max(d * 0.95, 1)));
-  const nShort = Math.max(1, Math.round((seatEndV - (bt + g)) / Math.max(d * 0.95, 1)));
-  const wLong = Math.max((seatEndU - (bt + g) - 2 * (nLong - 1)) / nLong, 1);
-  const wShort = Math.max((seatEndV - (bt + g) - 2 * (nShort - 1)) / nShort, 1);
-  const backPills = [{ u0: 0, v0: 0, u1: bt, v1: bt }];
-  for (let i = 0; i < nLong; i += 1) {
-    const u0 = bt + g + i * (wLong + 2);
-    backPills.push({ u0, v0: 0, u1: u0 + wLong, v1: bt });
-  }
-  for (let i = 0; i < nShort; i += 1) {
-    const v0 = bt + g + i * (wShort + 2);
-    backPills.push({ u0: 0, v0, u1: bt, v1: v0 + wShort });
-  }
+  // two bars sharing the corner square, so they read as one bent backrest
+  const backPills = [
+    { u0: 0, v0: 0, u1: seatEndU, v1: bt },
+    { u0: 0, v0: 0, u1: bt, v1: seatEndV },
+  ];
   return {
     handRests: [{ u0: Lf - t, v0: 0, u1: Lf, v1: d }, { u0: 0, v0: Sx - t, u1: d, v1: Sx }],
     backPills,
@@ -850,8 +844,9 @@ export function cornerFigure(Lf, S, d) {
 }
 
 /** Curved sofa: quarter-annulus around centre (Lf, S) in the local frame.
- * The back is a thick round-capped dashed stroke along the outer arc, one
- * seat band, a hand-rest at each end. */
+ * The back is ONE thick round-capped stroke along the outer arc (never
+ * dashed into cushions — a curved sofa has no seat count), one seat band, a
+ * hand-rest at each end. */
 export function curvedFigure(Lf, S, d) {
   const { bt, g } = figureMetrics(Lf, d);
   const rx = Math.max(Lf, d + 2);
@@ -865,27 +860,14 @@ export function curvedFigure(Lf, S, d) {
     a0 = 0.15;
     a1 = Math.PI / 2 - 0.15;
   }
-  // back: dashed round-capped stroke on the outer arc's centre line
+  // back: one round-capped stroke on the outer arc's centre line, pulled in
+  // by half its width at each end so the round caps stop where the arc does
   const bx = rx - bt / 2;
   const by = ry - bt / 2;
-  const b0 = pt(bx, by, a0);
-  const b1 = pt(bx, by, a1);
-  let arcLen = 0;
-  let prev = b0;
-  for (let i = 1; i <= 24; i += 1) {
-    const cur = pt(bx, by, a0 + ((a1 - a0) * i) / 24);
-    arcLen += Math.hypot(cur[0] - prev[0], cur[1] - prev[1]);
-    prev = cur;
-  }
-  const n = Math.max(2, Math.round(arcLen / Math.max(d * 0.95, 1)));
-  const pitch = arcLen / n;
-  const back = {
-    d: `M ${b0[0]} ${b0[1]} A ${bx} ${by} 0 0 1 ${b1[0]} ${b1[1]}`,
-    width: bt,
-    dash: Math.max(pitch - 2 - bt, 0.1),
-    gap: bt + 2,
-    offset: -bt / 2,
-  };
+  const capTrim = Math.min(bt / 2 / Math.max((bx + by) / 2, 1), (a1 - a0) / 4);
+  const b0 = pt(bx, by, a0 + capTrim);
+  const b1 = pt(bx, by, a1 - capTrim);
+  const back = { d: `M ${b0[0]} ${b0[1]} A ${bx} ${by} 0 0 1 ${b1[0]} ${b1[1]}`, width: bt };
   // seat band: an inset annular sector; FloorPlan rounds it by stroking it
   const r = clampNum((d - bt - g) / 4, 1.5, 4);
   const sox = Math.max(rx - bt - g - r, 1);

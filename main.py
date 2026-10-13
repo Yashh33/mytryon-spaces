@@ -1391,7 +1391,7 @@ CONFIG_NOTES = {
     ("Sofa", "3-seater"): "One straight sofa with exactly three seat cushions side by side and three back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
     ("Sofa", "4-seater"): "One straight sofa with exactly four seat cushions side by side and four back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
     ("Sofa", "5-seater"): "One straight sofa with exactly five seat cushions side by side and five back cushions. If the reference photograph shows a different number, add or remove matching cushions and lengthen or shorten the frame. Never keep the photograph's seat count. A single piece, not a set.",
-    ("Sofa", "L-shape"): "Exactly TWO arms meeting at ONE corner, at the lengths stated in the piece header. No third section and no extra arm along any other wall. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this L in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set. The lounger has no backrest — it is an open chaise. Only the long run has a backrest. The lounge starts where the last full seat of the long run ends — never partway through a seat. No seat count is given: fit whole seats to the length shown.",
+    ("Sofa", "L-shape"): "Exactly TWO runs meeting at ONE corner — a long run and a lounge — at the lengths stated in the piece header. No third section and no extra run along any other wall. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this L in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set. The lounger has no backrest — it is an open chaise. Only the long run has a backrest. It has exactly ONE armrest, at the end of the long run away from the lounge. The end where the long run meets the lounge has no armrest, and the lounge tip has no armrest. The lounge starts where the last full seat of the long run ends — never partway through a seat. No seat count is given: fit whole seats to the length shown.",
     ("Sofa", "Corner"): "Exactly TWO runs meeting at ONE square corner, at the lengths stated in the piece header, with a backrest along BOTH runs and an arm at both outer ends. No third section and no extra run along any other wall. Not curved, and no open chaise: neither end is a lounger. No seat count is given: fit whole seats to the length shown. If the reference photograph shows a straight sofa or a different layout, rebuild the whole sofa into this corner shape in the same design — never keep the photographed sofa as one block and add sections around it. A single piece, not a set.",
     ("Sofa", "Curved"): "One continuous curve with a gently arcing back, at the length stated in the piece header. No straight extra sections. If the reference photograph shows a straight sofa, rebuild the whole sofa into this curve in the same design. No seat count is given: fit whole seats to the length shown. A single piece.",
     ("Dining table", "4 seater"): "A dining table with four chairs around it.",
@@ -1548,12 +1548,30 @@ def build_piece_finish_text(items: list[Item]) -> str:
         lines.append(f"- Piece {k} ({item.category}, {item.type}): try on {' in '.join(parts)}.")
     if not lines:
         return ""
+    # which kinds of piece are being re-upholstered: an L-shaped, corner or
+    # curved sofa never takes its shape or seat layout from the photograph
+    listed = [item for item in items if item.id in numbers or item.material in MATERIAL_CHOICES or item.colour_hex]
+    arm_shaped = [item for item in listed if item.shape in ARM_SHAPES]
+    keeps = (
+        "the frame, silhouette, curves, proportions, number of seats and cushions, arms, legs, stitching lines "
+        "and loose pillows stay identical to the reference photograph."
+    )
+    intro = (
+        "TRY-ON – treat each piece below as the exact sofa from its reference photograph being "
+        "re-upholstered, like trying a fabric swatch on it in the showroom. Only the upholstery "
+        "cover changes."
+    )
+    if len(arm_shaped) < len(listed):
+        intro += (" For a straight sofa or any other piece, " + keeps) if arm_shaped else (" T" + keeps[1:])
+    if arm_shaped:
+        intro += (
+            " For an L-shaped, corner or curved sofa, the shape and seat layout follow the configuration stated "
+            "above, not the photograph; its cushion style, arms, legs, stitching lines and loose pillows keep the "
+            "photograph's design."
+        )
     return "\n".join(
         [
-            "TRY-ON – treat each piece below as the exact sofa from its reference photograph being "
-            "re-upholstered, like trying a fabric swatch on it in the showroom. Only the upholstery "
-            "cover changes. The frame, silhouette, curves, proportions, number of seats and cushions, "
-            "arms, legs, stitching lines and loose pillows stay identical to the reference photograph.",
+            intro,
             *lines,
             "The room look and lighting must not change these colours. Pieces not listed keep exactly "
             "the material and colour of their own reference photograph.",
@@ -2123,11 +2141,13 @@ def piece_header_line(piece_number: int, record: dict) -> str:
     return f"Piece {piece_number} — {record['header']}, from Image {record['image_number']}."
 
 
-def build_piece_headers_text(items: list[Item], layout_json: dict | None, feet: bool = False) -> str:
-    """Only the "Piece N — ..." header lines, one per placed piece, exactly as
-    build_placement_text writes them. This is all the placement writer is told
-    about the pieces; where they stand it reads off the plan picture."""
-    records = flatten_placed_subpieces(items, layout_json, feet)
+def build_piece_headers_text(items: list[Item], layout_json: dict | None) -> str:
+    """Only the "Piece N — ..." header lines, one per placed piece, as
+    build_placement_text writes them with feet off. This is all the placement
+    writer is told about the pieces; where they stand and how long they are
+    it reads off the plan picture, so these never state a length in feet —
+    not even when feet_in_prompt is on (the fallback facts still do then)."""
+    records = flatten_placed_subpieces(items, layout_json, False)
     return "\n".join(piece_header_line(index + 1, record) for index, record in enumerate(records))
 
 
@@ -2508,6 +2528,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "9393b7dace2582b249897f5acef3862b8ae40da90a55c9d801baf5fd5ddbe805",  # before "lounge at whichever end it prefers"
     "217801ac98e8bde664415ea4fb169ebb82e6c92f6c03ad3172c365a1006042a7",  # before "never mention feet" and proportions in BUILD lines
     "e718360df61e328b89e2f7b40a4b84bfbd69f652891870457075f7729891430c",  # the last prompt that was given the placement facts
+    "bedd92dd206ca321d56a9a6022a101bf67cd10bb4dc5b7d5030e4a1491a5e6d8",  # before "drawn against a wall TOUCHES", one arm on an L, a size for every GAP
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2537,11 +2558,14 @@ RULES
    - it TOUCHES: name what it touches (the far wall, the right wall, the far-right corner, another piece).
    - there is a GAP: give the gap's size as a share of that wall or of the room (about a tenth, a fifth, a quarter, a third, half), and name what lies beyond the gap (bare wall, which window, which door, a pillar, another piece, open floor).
    For an L-shaped or corner sofa, do this separately for the long run and for the lounge or second run. Always say where the lounge's open tip ends compared with the nearest window or door.
+   A block drawn against a wall line TOUCHES that wall. A sliver thinner than about a twentieth of the wall is not a gap — call it TOUCHES.
+   For each end of every run, also state the gap to the wall or corner in that direction (e.g. "about a third of the far wall stays empty between the left end and the left wall"), in addition to any window or door in between.
+   Every GAP must have a size.
 5. Then, for every DOOR, WINDOW, OPENING and PILLAR near a piece, describe it from the feature's side, e.g. "Window 1 stays fully clear; a stretch of bare wall separates it from the sofa's left arm." If a piece covers part of a feature on the plan, say exactly how much, e.g. "the lounge stands in front of the lower third of Window 2".
-6. If the plan shows a gap, your text must state that gap. If the plan shows touching, say touching. Never use the words: next to, beside, near, close to, just to the right of, just to the left of, adjacent.
+6. If the plan shows a gap, your text must state that gap. If the plan shows touching, say touching. Never use the words: next to, beside, close to, just to the right of, just to the left of, adjacent.
 7. Give each piece's length only as a share of the wall it stands along (e.g. "about two-thirds of the far wall"). Never use feet, metres or other units. Add a line that the generator must keep the gaps and size the piece to fit them, never stretch it to fill the wall.
 8. Never state a number of seats for an L-shaped, corner or curved sofa — the generator fits the seats to the length. For an L-shape, say that the lounge starts where the last full seat of the long run ends, never partway through a seat.
-9. For multi-part pieces (L-shape, corner, curved), say which part is where, which way each part's back and seats face, and which end is plain. For an L-shape, the lounge is an open chaise with no backrest; never write that it has a back or that its back faces any direction. A corner sofa has a backrest along both runs and an arm at both outer ends.
+9. For multi-part pieces (L-shape, corner, curved), say which part is where, which way each part's back and seats face, and which end is plain. For an L-shape, the lounge is an open chaise with no backrest; never write that it has a back or that its back faces any direction. An L-shaped sofa has exactly ONE arm, at the end of the long run away from the lounge. The end where the long run meets the lounge has no arm, and the lounge tip has no arm. A corner sofa has a backrest along both runs and an arm at both outer ends.
 10. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule it out with a line starting "NOT". A NOT line must never forbid something the plan actually shows.
 11. Use CAPS only for the single key word in a line: CENTRED, FAR, NEAR, LEFT, RIGHT, NOT, TOUCHES, GAP.
 12. When two pieces overlap side to side on the plan, say which one stands IN FRONT (nearer the camera, lower in the frame) and which stands BEHIND, and that neither slides sideways to make room for the other.
@@ -2772,7 +2796,7 @@ def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session)
     if not plan_path:
         return "no_plan"
     feet = feet_in_prompt(db)
-    pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json, feet)
+    pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json)
     model = get_active_vision_model(db)
     product_paths, _lines = writer_product_images(attempt.items)
     signature = writer_signature(
@@ -2812,7 +2836,7 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
     generation_debug: the piece list the writer was given, the fallback
     facts, raw output, used/fallback + reason, usage."""
     feet = feet_in_prompt(db)
-    pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json, feet)
+    pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json)
     info: dict = {
         "pieces": pieces,
         "fallback_facts": build_placement_text(attempt.items, attempt.room.layout_json, False, feet),

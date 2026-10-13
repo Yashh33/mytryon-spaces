@@ -714,6 +714,27 @@ export function resizePlacement(shape, placement, nx, ny, feet, snapFt, handle =
   return { placement: rect, widthFt: lengthFt };
 }
 
+/** Drawing only: a block whose outer edge is within DRAW_FLUSH_TOLERANCE of
+ * a wall is drawn flush on that wall line, so a hair's-width sliver can never
+ * read as a gap on the plan (or in the plan image the placement writer
+ * sees). The whole block shifts; its size and the stored placement do not
+ * change. */
+export const DRAW_FLUSH_TOLERANCE = 0.02;
+
+export function flushToWalls(shape, placement) {
+  const rects = placementRects(shape, placement);
+  const x0 = Math.min(...rects.map((r) => r.x));
+  const y0 = Math.min(...rects.map((r) => r.y));
+  const x1 = Math.max(...rects.map((r) => r.x + r.w));
+  const y1 = Math.max(...rects.map((r) => r.y + r.h));
+  const shift = (lo, hi) => (lo <= DRAW_FLUSH_TOLERANCE ? -lo : 1 - hi <= DRAW_FLUSH_TOLERANCE ? 1 - hi : 0);
+  const dx = shift(x0, x1);
+  const dy = shift(y0, y1);
+  if (!dx && !dy) return placement;
+  const moved = (r) => ({ ...r, x: r.x + dx, y: r.y + dy });
+  return ARM_SHAPES.has(shape) ? { ...placement, long: moved(placement.long), short: moved(placement.short) } : moved(placement);
+}
+
 /** The rects a block occupies, for overlap testing. */
 export function placementRects(shape, placement) {
   return ARM_SHAPES.has(shape) ? [placement.long, placement.short] : [placement];
@@ -803,19 +824,21 @@ export function straightFigure(L, D, n) {
 
 /** L-shape = a sofa plus an open lounger (chaise). The long arm Lf x d has
  * the only backrest, along its outer (wall) side: ONE continuous bar, never
- * split into cushions — an L has no seat count. The lounge is the short
+ * split into cushions — an L has no seat count — and the sofa's ONE
+ * armrest, at its end away from the lounge (u = Lf). The lounge is the short
  * arm at the u = 0 end running out to S: just the open seat shape — no
  * backrest, no armrest, nothing along its outer edge or across its tip.
  * (A sofa with backrests on both arms is the Corner type: see cornerFigure.) */
 export function lFigure(Lf, S, d) {
-  const { bt, g } = figureMetrics(Lf, d);
+  const { t, bt, g } = figureMetrics(Lf, d);
   const Sx = Math.max(S, d + 1);
+  const seatEndU = Lf - t - g;
   return {
-    handRests: [],
-    backPills: pillRow(0, Lf, bt, 1),
-    seatPoints: [[1, bt + g], [Lf - 1, bt + g], [Lf - 1, d - 1], [d - 1, d - 1], [d - 1, Sx - 1], [1, Sx - 1]],
+    handRests: [{ u0: Lf - t, v0: 0, u1: Lf, v1: d }],
+    backPills: pillRow(0, seatEndU, bt, 1),
+    seatPoints: [[1, bt + g], [seatEndU, bt + g], [seatEndU, d - 1], [d - 1, d - 1], [d - 1, Sx - 1], [1, Sx - 1]],
     seatRadii: [6, 6, 6, 2, 6, 6],
-    labelLong: { u0: d, v0: bt + g, u1: Lf - 1, v1: d - 1 },
+    labelLong: { u0: d, v0: bt + g, u1: seatEndU, v1: d - 1 },
     labelLounge: { u0: 1, v0: d, u1: d - 1, v1: Sx - 1 },
   };
 }

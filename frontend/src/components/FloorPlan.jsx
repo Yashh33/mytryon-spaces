@@ -7,6 +7,7 @@ import {
   cameraGeometry,
   clamp01,
   cornerFigure,
+  flushToWalls,
   curvedFigure,
   featureFootprint,
   frameApply,
@@ -408,7 +409,8 @@ export function FloorPlan({
    * handle(s) sit. Facing is read only to know which side is the BACK (no
    * arrows drawn any more). */
   function blockDrawing(block) {
-    const { shape, placement } = block;
+    const { shape } = block;
+    const placement = flushToWalls(shape, block.placement); // drawn flush on a wall it all but touches
 
     if (ARM_SHAPES.has(shape)) {
       const { p, e } = pxArms(placement);

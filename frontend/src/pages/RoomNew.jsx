@@ -53,7 +53,7 @@ export default function RoomNew() {
         </div>
         <div className="field rn-photo">
           <label>Photo of the space</label>
-          <UploadBox file={photo} onChange={setPhoto} />
+          <UploadBox file={photo} onChange={setPhoto} required label="Add the room photo" />
         </div>
         <div className="hint-line rn-hint">Stand at the opposite wall, phone at chest height, keep the floor visible.</div>
         <button type="button" className="btn btn-primary rn-btn" disabled={submitting} onClick={handleSubmit}>

@@ -18,25 +18,25 @@ export function StepBar({ current, attemptId, roomId, query = "" }) {
   }
 
   return (
-    <div className="step-bar">
+    <nav className="step-bar" aria-label="Steps">
       {STEPS.map((s) => {
         const state = s.n < current ? "done" : s.n === current ? "current" : "upcoming";
         const content = (
           <>
-            <span className={"step-dot" + (state === "current" ? " current" : state === "done" ? " done" : "")}>{s.n}</span>
+            <span className="step-dot" aria-hidden="true">{state === "done" ? "✓" : s.n}</span>
             <span className="step-label">{s.label}</span>
           </>
         );
         return state === "done" ? (
-          <Link key={s.n} to={targetFor(s.n)} className="step-seg step-seg-link">
+          <Link key={s.n} to={targetFor(s.n)} className="step-seg done" aria-label={`${s.label} (done)`}>
             {content}
           </Link>
         ) : (
-          <span key={s.n} className={"step-seg" + (state === "upcoming" ? " step-seg-muted" : "")}>
+          <span key={s.n} className={"step-seg " + state} aria-current={state === "current" ? "step" : undefined}>
             {content}
           </span>
         );
       })}
-    </div>
+    </nav>
   );
 }

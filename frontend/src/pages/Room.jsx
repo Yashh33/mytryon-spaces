@@ -4,6 +4,8 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
+import { StepBar } from "../components/StepBar.jsx";
+import { StepFooter } from "../components/StepFooter.jsx";
 import { roomLookLabel } from "../utils.js";
 
 export default function Room() {
@@ -54,7 +56,7 @@ export default function Room() {
   );
 
   return (
-    <div className="screen">
+    <div className="screen has-step-footer">
       <TopBar
         backTo={`/customer/${room.customer_id}`}
         crumbs={[
@@ -63,6 +65,7 @@ export default function Room() {
           { label: room.room_type },
         ]}
       />
+      <StepBar current={1} roomId={room.id} />
       <div className="eyebrow">{room.customer_name}</div>
       <h1 style={{ marginBottom: 16 }}>{room.room_type}</h1>
 
@@ -72,9 +75,6 @@ export default function Room() {
           <div className="hint-line" style={{ textAlign: "center" }}>
             ROOM PHOTO &middot; REUSED FOR EVERY ATTEMPT
           </div>
-          <button type="button" className="dashed-card room-new-side" disabled={creating} onClick={handleNewAttempt}>
-            {creating ? "Creating…" : "+ New attempt"}
-          </button>
         </div>
 
         <div className="room-main">
@@ -96,12 +96,20 @@ export default function Room() {
                 </div>
               </Link>
             ))}
-            <button type="button" className="dashed-card room-new-inline" disabled={creating} onClick={handleNewAttempt}>
-              {creating ? "Creating…" : "+ New attempt"}
-            </button>
           </div>
+          {attempts.length === 0 ? <div className="empty-state">No attempts yet. Tap Next to start one.</div> : null}
         </div>
       </div>
+
+      <StepFooter
+        backTo={`/customer/${room.customer_id}`}
+        status={room.photo_url ? "Next starts a new attempt with this room photo" : "Add a room photo to continue"}
+        primaryLabel="Next"
+        primaryBusyLabel="Creating…"
+        busy={creating}
+        primaryDisabled={!room.photo_url}
+        onPrimary={handleNewAttempt}
+      />
     </div>
   );
 }

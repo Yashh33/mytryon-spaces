@@ -522,6 +522,10 @@ export function FloorPlan({
     );
     const handRests = (fig) => fig.handRests.map((r, i) => pill(r, `h${i}`, { fill: color, fillOpacity: 0.7 }));
     const backPills = (fig) => fig.backPills.map((r, i) => pill(r, `b${i}`, { fill: color }));
+    // "1 · 3 SEATER": the number matches the piece's row in the pieces list;
+    // no-break spaces keep the number on the first line of a two-line name
+    const nbsp = String.fromCharCode(160);
+    const numbered = (text) => `${block.number}${nbsp}·${nbsp}${text}`;
     let frame;
     let group;
     let names;
@@ -540,7 +544,7 @@ export function FloorPlan({
           {handRests(fig)}
         </>
       );
-      names = seatName("CURVED", frame, { u0: fig.label.u - fig.label.w / 2, u1: fig.label.u + fig.label.w / 2, v0: fig.label.v - fig.label.h / 2, v1: fig.label.v + fig.label.h / 2 }, color, "n");
+      names = seatName(numbered("CURVED"), frame, { u0: fig.label.u - fig.label.w / 2, u1: fig.label.u + fig.label.w / 2, v0: fig.label.v - fig.label.h / 2, v1: fig.label.v + fig.label.h / 2 }, color, "n");
     } else if (drawing.kind === "corner") {
       frame = drawing.frame;
       const fig = cornerFigure(drawing.longPx, drawing.shortPx, drawing.depthPx);
@@ -551,7 +555,7 @@ export function FloorPlan({
           {handRests(fig)}
         </>
       );
-      names = seatName("CORNER SOFA", frame, fig.label, color, "n");
+      names = seatName(numbered("CORNER SOFA"), frame, fig.label, color, "n");
     } else if (drawing.kind === "L") {
       frame = drawing.frame;
       const fig = lFigure(drawing.longPx, drawing.shortPx, drawing.depthPx);
@@ -564,7 +568,7 @@ export function FloorPlan({
       );
       names = (
         <>
-          {seatName("L-SHAPE", frame, fig.labelLong, color, "n1")}
+          {seatName(numbered("L-SHAPE"), frame, fig.labelLong, color, "n1")}
           {seatName("LOUNGE", frame, fig.labelLounge, color, "n2")}
         </>
       );
@@ -583,7 +587,7 @@ export function FloorPlan({
           {handRests(fig)}
         </>
       );
-      names = seatName(chair ? "CHAIR" : sofaName(sofaSeatCount(block)), frame, fig.label, color, "n");
+      names = seatName(numbered(chair ? "CHAIR" : sofaName(sofaSeatCount(block))), frame, fig.label, color, "n");
     }
 
     return (
@@ -637,7 +641,7 @@ export function FloorPlan({
           transform={labelRotated ? `rotate(-90 ${labelXY[0]} ${labelXY[1]})` : undefined}
           className="fp-sofa-label" textAnchor="middle"
         >
-          BED
+          {block.number} · BED
         </text>
       </>
     );

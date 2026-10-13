@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
+import { StepFooter } from "../components/StepFooter.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
@@ -213,7 +214,7 @@ function PieceCard({ item, saving, onSave }) {
       ) : showUpload ? (
         <div className="fabric-row">
           <div className="fabric-box">
-            <UploadBox file={null} existingUrl={null} onChange={addFabric} />
+            <UploadBox file={null} existingUrl={null} onChange={addFabric} label="Add the fabric photo" hint="Tap to take or choose one" />
           </div>
           <div className="hint-line">A close, well-lit photo of the fabric works best.</div>
         </div>
@@ -308,8 +309,10 @@ export default function Finish() {
   if (!attempt && !error) return <div className="screen"><Loading /></div>;
   if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
 
+  const customisedCount = attempt.items.filter((it) => it.colour_hex || it.material || it.fabric_url).length;
+
   return (
-    <div className="screen">
+    <div className="screen has-step-footer">
       <TopBar
         backTo={adjust.backTo || `/attempt/${id}/place`}
         crumbs={[
@@ -416,18 +419,17 @@ export default function Finish() {
             </div>
           ))}
         </div>
-
-        <div className="finish-btn">
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={starting || anySaving}
-            onClick={handleGenerate}
-          >
-            {starting ? "Starting…" : anySaving ? "Saving…" : "Generate"}
-          </button>
-        </div>
       </div>
+
+      <StepFooter
+        backTo={adjust.backTo || `/attempt/${id}/place`}
+        status={`${customisedCount} of ${attempt.items.length} ${attempt.items.length === 1 ? "piece" : "pieces"} customised`}
+        primaryLabel={anySaving ? "Saving…" : "Generate"}
+        primaryBusyLabel="Starting…"
+        busy={starting}
+        primaryDisabled={anySaving}
+        onPrimary={handleGenerate}
+      />
     </div>
   );
 }

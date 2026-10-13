@@ -311,7 +311,7 @@ export default function NewVisualisation() {
             <div className="st-left">
               <div className="field">
                 <label>1 · Sofa photo</label>
-                <UploadBox file={photo} onChange={setPhoto} />
+                <UploadBox file={photo} onChange={setPhoto} required label="Add the sofa photo" />
               </div>
               <div className="field">
                 <label>2 · The look</label>

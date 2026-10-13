@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
+import { StepFooter } from "../components/StepFooter.jsx";
 import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
@@ -239,8 +240,10 @@ export default function Furniture() {
   const total = choice ? Math.max(1, Math.min(count, remaining)) : 0;
   const canAddMore = total < remaining;
 
+  const pieceCount = attempt.items.length;
+
   return (
-    <div className="screen">
+    <div className="screen has-step-footer">
       <TopBar
         backTo={adjust.backTo || `/room/${attempt.room.id}`}
         crumbs={[
@@ -283,7 +286,7 @@ export default function Furniture() {
         <div className="add-piece-card">
           <div className="field">
             <label>Photo of the piece</label>
-            <UploadBox file={photo} onChange={setPhoto} />
+            <UploadBox file={photo} onChange={setPhoto} required label="Add the furniture photo" />
             <div className="count-hint" style={{ textAlign: "left" }}>One photo for all the pieces below</div>
           </div>
 
@@ -373,15 +376,6 @@ export default function Furniture() {
         </div>
       )}
         </div>
-      <button
-        type="button"
-        className="btn btn-primary furn-next"
-        style={{ marginTop: 20 }}
-        disabled={!attempt.items.length}
-        onClick={() => navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`)}
-      >
-        Next — placement
-      </button>
       </div>
 
       {showPlan ? (
@@ -389,6 +383,14 @@ export default function Furniture() {
           <RoomPlanView room={attempt.room} readOnly />
         </BottomSheet>
       ) : null}
+
+      <StepFooter
+        backTo={adjust.backTo || `/room/${attempt.room.id}`}
+        status={pieceCount ? `${pieceCount} ${pieceCount === 1 ? "piece" : "pieces"} added` : "Add a piece of furniture to continue"}
+        primaryLabel="Next"
+        primaryDisabled={!pieceCount}
+        onPrimary={() => navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`)}
+      />
     </div>
   );
 }

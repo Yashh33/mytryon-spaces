@@ -5,12 +5,14 @@ import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
+import { StepFooter } from "../components/StepFooter.jsx";
 import { useAdjustMode } from "../adjustMode.js";
 import { BottomSheet } from "../components/BottomSheet.jsx";
-import { PieceControls, PlacementCard } from "../components/PlacementCard.jsx";
+import { PlacementCard } from "../components/PlacementCard.jsx";
 import { RoomPhotoReference } from "../components/RoomPhotoReference.jsx";
 import {
   ADDABLE_FEATURE_TYPES,
+  ARM_SHAPES,
   FAR_NEAR_POSITIONS,
   SIDE_POSITIONS,
   WALL_KEY,
@@ -368,8 +370,18 @@ export default function Place() {
     },
   };
 
+  // The list shows each piece with its product photo, so it's easy to tell
+  // which block on the plan is which.
+  const itemById = new Map(attempt.items.map((it) => [it.id, it]));
+  const listBlocks = blocks.map((b) => {
+    const item = itemById.get(b.itemId) || {};
+    return { ...b, photo_url: item.photo_url, category: item.category ?? b.category, type: item.type ?? b.type, width_ft: item.width_ft };
+  });
+  const selectedListBlock = listBlocks.find((b) => b.key === selectedKey) || null;
+  const placedCount = blocks.filter((b) => b.placement).length;
+
   return (
-    <div className="screen">
+    <div className="screen has-step-footer">
       <TopBar
         backTo={adjust.backTo || `/attempt/${id}/furniture`}
         crumbs={[
@@ -382,7 +394,7 @@ export default function Place() {
       <StepBar current={3} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} />
       <h1 style={{ marginBottom: 4 }}>Where does each piece go?</h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
-        {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it"}
+        {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece in the list, then tap the plan to place it"}
       </div>
 
       <div className="place-layout" data-view={phoneView}>
@@ -414,51 +426,51 @@ export default function Place() {
         </div>
 
         <div className="place-side">
-          <PieceControls
-            selectedBlock={selectedBlock}
+          <SelectedPieceCard
+            block={selectedListBlock}
             onRotate={placementCardProps.onRotate}
             onFlip={placementCardProps.onFlip}
             onRequestRemove={placementCardProps.onRequestRemove}
           />
 
-          <div className="chips" style={{ marginTop: 12 }}>
-            {blocks.map((b) => (
+          <div className="section-label">Pieces</div>
+          <div className="piece-list">
+            {listBlocks.map((b) => (
               <button
                 key={b.key}
                 type="button"
-                className={"chip" + (b.key === selectedKey ? " selected" : "") + (b.placement ? " chip-placed" : "")}
+                className={"piece-row" + (b.key === selectedKey ? " selected" : "")}
+                aria-pressed={b.key === selectedKey}
                 onClick={() => handleSelectBlock(b.key)}
               >
-                <span className="chip-dot" style={{ background: b.color }} />
-                {b.number} &middot; {b.label}
+                <PieceThumb block={b} />
+                <span className="piece-row-text">
+                  <span className="piece-row-name">{pieceName(b)}</span>
+                  <span className="piece-row-size">{formatFeet(b.widthFt ?? b.width_ft)} ft</span>
+                </span>
+                {b.placement ? (
+                  <span className="piece-row-state placed">Placed ✓</span>
+                ) : (
+                  <span className="piece-row-state">Tap the plan</span>
+                )}
               </button>
             ))}
           </div>
 
           {room.layout_status !== "pending" ? (
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button type="button" className="btn btn-ghost btn-small" style={{ flex: 1 }} onClick={() => setShowAddFeature(true)}>
+            <div className="place-add-row">
+              <button type="button" className="btn btn-ghost btn-small" onClick={() => setShowAddFeature(true)}>
                 + Add feature
               </button>
               <button
                 type="button"
                 className={"btn btn-small" + (addObstructionMode ? " btn-primary" : " btn-ghost")}
-                style={{ flex: 1 }}
                 onClick={() => setAddObstructionMode((v) => !v)}
               >
                 {addObstructionMode ? "Tap the plan…" : "+ Add obstruction"}
               </button>
             </div>
           ) : null}
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 20 }}>
-            <button type="button" className="btn btn-primary" disabled={leaving} onClick={handleNext}>
-              {leaving ? "Saving plan…" : "Next"}
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/finish?ignore_placement=true${adjust.query ? `&${adjust.query}` : ""}`)}>
-              Skip placement
-            </button>
-          </div>
         </div>
       </div>
 
@@ -473,6 +485,84 @@ export default function Place() {
       {/* Fixed-position sheet — rendered once regardless of full-screen,
          since it already overlays everything via its own backdrop. */}
       {removeTarget ? <RemoveConfirmSheet target={removeTarget} onClose={() => setRemoveTarget(null)} /> : null}
+
+      <StepFooter
+        backTo={adjust.backTo || `/attempt/${id}/furniture`}
+        status={`${placedCount} of ${blocks.length} ${blocks.length === 1 ? "piece" : "pieces"} placed`}
+        primaryLabel="Next"
+        primaryBusyLabel="Saving plan…"
+        busy={leaving}
+        onPrimary={handleNext}
+        secondaryLabel="Skip placement"
+        onSecondary={() => navigate(`/attempt/${id}/finish?ignore_placement=true${adjust.query ? `&${adjust.query}` : ""}`)}
+      />
+    </div>
+  );
+}
+
+function formatFeet(ft) {
+  if (ft == null) return "–";
+  return Number.isInteger(ft) ? String(ft) : Number(ft).toFixed(1);
+}
+
+/** "Sofa · 3-seater"; a piece of a split set names its own part ("Sofa · 2-seater"). */
+function pieceName(block) {
+  return `${block.category} · ${block.inSet ? block.subLabel : block.type}`;
+}
+
+/** Product photo with the block's colour ring and its number badge, so a row
+ * matches its block on the plan at a glance. */
+function PieceThumb({ block }) {
+  return (
+    <span className="piece-thumb-wrap">
+      {block.photo_url ? (
+        <img className="piece-thumb-img" src={block.photo_url} alt="" style={{ boxShadow: `0 0 0 2px #fff, 0 0 0 4px ${block.color}` }} />
+      ) : (
+        <span className="piece-thumb-img" style={{ background: block.color, boxShadow: `0 0 0 2px #fff, 0 0 0 4px ${block.color}` }} />
+      )}
+      <span className="piece-badge" style={{ background: block.color }}>
+        {block.number}
+      </span>
+    </span>
+  );
+}
+
+/** Rotate / Flip / Remove for the selected piece, above the list. */
+function SelectedPieceCard({ block, onRotate, onFlip, onRequestRemove }) {
+  if (!block) {
+    return (
+      <div className="sel-piece-card">
+        <div className="sel-piece-empty">Tap a piece to move, rotate or remove it.</div>
+      </div>
+    );
+  }
+  const placed = Boolean(block.placement);
+  return (
+    <div className="sel-piece-card">
+      <div className="section-label sel-piece-label">Selected piece</div>
+      <div className="sel-piece-head">
+        <PieceThumb block={block} />
+        <div className="piece-row-text">
+          <span className="piece-row-name">{pieceName(block)}</span>
+          <span className="piece-row-size">
+            {formatFeet(block.widthFt ?? block.width_ft)} ft{placed ? "" : " · tap the plan to place it"}
+          </span>
+        </div>
+      </div>
+      <div className="fp-control-bar-buttons sel-piece-buttons">
+        <button type="button" className="fp-control-btn" disabled={!placed} onClick={onRotate}>
+          <img src="/icons/rotate.svg" alt="" width={20} height={20} />
+          Rotate
+        </button>
+        <button type="button" className="fp-control-btn" disabled={!placed || !ARM_SHAPES.has(block.shape)} onClick={onFlip}>
+          <img src="/icons/flip.svg" alt="" width={20} height={20} />
+          Flip
+        </button>
+        <button type="button" className="fp-control-btn fp-control-btn-danger" disabled={!placed} onClick={onRequestRemove}>
+          <img src="/icons/remove.svg" alt="" width={20} height={20} />
+          Remove
+        </button>
+      </div>
     </div>
   );
 }

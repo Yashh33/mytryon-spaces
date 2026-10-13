@@ -141,8 +141,8 @@ export default function AdminPrompt() {
 
       <div className="section-label" style={{ marginTop: 26 }}>Placement writer</div>
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
-        Before each picture, a vision model ({data.vision_model}) looks at the room photo and the floor plan and rewrites the
-        placement section. If it is off, fails or is slow, the plain placement facts are used instead.
+        Before each picture, a vision model ({data.vision_model}) looks at the room photo and the floor plan and writes the
+        placement section from the plan picture alone. If it is off, fails or is slow, the plain placement facts are used instead.
       </div>
       <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, marginBottom: 12, minHeight: 44 }}>
         <input type="checkbox" checked={writerEnabled} onChange={(e) => setWriterEnabled(e.target.checked)} style={{ width: 20, height: 20 }} />
@@ -150,7 +150,7 @@ export default function AdminPrompt() {
       </label>
       <textarea className="prompt-textarea" spellCheck="false" value={writerPrompt} onChange={(e) => setWriterPrompt(e.target.value)} />
       <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-        Must contain <span className="mono">{"{{FACTS}}"}</span>.{" "}
+        Must contain <span className="mono">{"{{PIECES}}"}</span>.{" "}
         <button type="button" className="link-btn" onClick={() => setWriterPrompt(data.default_placement_writer_prompt)}>
           Put back the built-in writer prompt
         </button>

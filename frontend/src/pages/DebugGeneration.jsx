@@ -88,8 +88,19 @@ export default function DebugGeneration() {
             <div className="muted" style={{ fontSize: 13 }}>No plan PNG.</div>
           )}
 
-          <div className="debug-label">Facts (given to the writer; used as-is on fallback)</div>
-          <pre className="debug-pre">{writer.facts}</pre>
+          {writer.pieces != null ? (
+            <>
+              <div className="debug-label">Piece list (all the writer was given besides the pictures)</div>
+              <pre className="debug-pre">{writer.pieces || "—"}</pre>
+              <div className="debug-label">Fallback facts (not sent to the writer; used if it fails)</div>
+              <pre className="debug-pre">{writer.fallback_facts || "—"}</pre>
+            </>
+          ) : (
+            <>
+              <div className="debug-label">Facts (given to the writer; used as-is on fallback)</div>
+              <pre className="debug-pre">{writer.facts}</pre>
+            </>
+          )}
           <div className="debug-label">Writer output (raw)</div>
           <pre className="debug-pre">{writer.output || "—"}</pre>
           <div className="debug-label">CONFLICTS</div>

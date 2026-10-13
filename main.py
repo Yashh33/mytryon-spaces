@@ -2112,6 +2112,23 @@ def flatten_placed_subpieces(items: list[Item], layout_json: dict | None = None,
     return records
 
 
+def piece_header_line(piece_number: int, record: dict) -> str:
+    return f"Piece {piece_number} — {record['header']}, from Image {record['image_number']}."
+
+
+def build_piece_headers_text(items: list[Item], layout_json: dict | None, feet: bool = False) -> str:
+    """Only the "Piece N — ..." header lines, one per placed piece, exactly as
+    build_placement_text writes them. This is all the placement writer is told
+    about the pieces; where they stand it reads off the plan picture."""
+    records = flatten_placed_subpieces(items, layout_json, feet)
+    return "\n".join(piece_header_line(index + 1, record) for index, record in enumerate(records))
+
+
+def placed_geometry(items: list[Item]) -> list:
+    """Every placed block as stored — what the plan picture was drawn from."""
+    return [[record["image_number"], record["shape"], record["geometry"]] for record in flatten_placed_subpieces(items)]
+
+
 def build_placement_text(items: list[Item], layout_json: dict | None, ignore_placement: bool, feet: bool = False) -> str:
     """`feet` is the feet_in_prompt setting: when off, no length in feet is
     written and each piece's size is given as a share of its wall or the room."""
@@ -2161,7 +2178,7 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
             rec["item"].id, {"image_number": rec["image_number"], "is_split": rec["is_split"], "piece_numbers": []}
         )
         group["piece_numbers"].append(piece_number)
-        lines.append(f"Piece {piece_number} — {rec['header']}, from Image {rec['image_number']}.")
+        lines.append(piece_header_line(piece_number, rec))
         lines.append(f"{counter}. {resolved[idx]['sentence']}")
         counter += 1
         if resolved[idx]["size"]:
@@ -2459,20 +2476,21 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# PLACEMENT WRITER — a vision model rewrites the generated placement facts
-# into instructions the image model follows better, by looking at the room
-# photo and the salesman's floor plan (a PNG exported by the client). It
-# starts when the salesman leaves the plan screen and its result is cached
-# on the attempt; generation waits briefly for it and otherwise falls back,
-# silently, to the facts themselves. The plan PNG only ever goes to this
-# writer, never to the image model.
+# PLACEMENT WRITER — a vision model writes the placement section of the
+# generation prompt by looking at the room photo and the salesman's floor
+# plan (a PNG exported by the client). The plan picture is its only authority
+# on where things go: it is given the piece headers, never the generated
+# placement facts. It starts when the salesman leaves the plan screen and its
+# result is cached on the attempt; generation waits briefly for it and
+# otherwise falls back, silently, to the facts (build_placement_text). The
+# plan PNG only ever goes to this writer, never to the image model.
 # ---------------------------------------------------------------------------
 
 PLACEMENT_WRITER_ENABLED_KEY = "placement_writer_enabled"
 PLACEMENT_WRITER_PROMPT_KEY = "placement_writer_prompt"
 PLACEMENT_WRITER_WAIT_SECONDS = 45  # how long Generate waits for a writer that is still running
 PLACEMENT_WRITER_CALL_TIMEOUT = 90  # hard limit on the model call itself
-FACTS_TOKEN = "{{FACTS}}"
+WRITER_PIECES_TOKEN = "{{PIECES}}"  # in the writer prompt: the "Piece N — ..." header lines, one per placed piece
 PRODUCT_IMAGES_TOKEN = "{{PRODUCT_IMAGES}}"  # replaced by code with "Your Image 3 is the generator's Image 2." lines
 # sha256 of every earlier DEFAULT_PLACEMENT_WRITER_PROMPT. A saved prompt that
 # still equals one of these was never edited, so startup moves it to the
@@ -2482,6 +2500,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "b0f82bcda7206933d1f2602932a5db53c8a1cfaca5cb47ba5d15fea1101a67d5",  # before the L-shape open-chaise rule
     "9393b7dace2582b249897f5acef3862b8ae40da90a55c9d801baf5fd5ddbe805",  # before "lounge at whichever end it prefers"
     "217801ac98e8bde664415ea4fb169ebb82e6c92f6c03ad3172c365a1006042a7",  # before "never mention feet" and proportions in BUILD lines
+    "e718360df61e328b89e2f7b40a4b84bfbd69f652891870457075f7729891430c",  # the last prompt that was given the placement facts
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2494,36 +2513,43 @@ You write furniture placement instructions for an image generator.
 
 INPUTS
 - Image 1: a photograph of a room. The generator will add furniture into exactly this photograph.
-- Image 2: a top-down floor plan of the same room, drawn by a salesman. Top edge = far wall, bottom edge = near wall, the circle below the bottom edge = where Image 1 was photographed from. Wall features are coloured segments on the walls with capital labels such as DOOR, WINDOW, OPENING or PILLAR; numbered labels (DOOR 1, DOOR 2) mean there are several; a label ending in "?" is uncertain. Find each labelled feature in Image 1. Each piece of furniture is a coloured block with its number in a circle. Thick solid bars on a block are its backrest and arms; seats face away from the backrest. Labels like "LOUNGE" name a part of a piece.
+- Image 2: a top-down floor plan of the same room, drawn by a salesman. Top edge = far wall, bottom edge = near wall, the circle below the bottom edge = where Image 1 was photographed from. Wall features are coloured segments on the walls with capital labels such as DOOR, WINDOW, OPENING or PILLAR; numbered labels (DOOR 1, DOOR 2) mean there are several; a label ending in "?" is uncertain. Find each labelled feature in Image 1. Each piece of furniture is a coloured block with its number in a circle. Thick solid bars on a block are its backrest and arms; seats face away from the backrest. Labels like "LOUNGE" name a part of a piece. Small dashes or segments drawn behind a block are drawing marks only — never read them as a number of seats.
 - Your Image 3 onward: the product reference photographs the generator will also be given, one per distinct photograph. {{PRODUCT_IMAGES}}
-- PLACEMENT FACTS below: generated from the same plan. They are correct. Treat them and the plan as the authority on where each piece goes. Never move, add, remove or resize a piece.
+- PIECE LIST below: the header line for each piece.
+
+The floor plan (Image 2) is the only authority on where each piece goes, how long it is, and what gaps surround it. Never move, add, remove or resize a piece.
 
 YOUR JOB
-The generator cannot see the plan and does not understand feet or fractions well. Left to itself it tends to push furniture into corners, beside doors and away from windows, to slide pieces sideways so they line up, and to put an L-shaped sofa's lounge at whichever end it prefers instead of the end the plan shows. Rewrite the facts so that it follows the plan instead of those habits.
+The generator cannot see the plan. Left to itself it tends to push furniture into corners, beside doors and away from windows, to slide pieces sideways so they line up, to stretch a piece to fill a wall or close a gap, and to put an L-shaped sofa's lounge at whichever end it prefers instead of the end the plan shows. Describe the plan so precisely that it follows the plan instead of those habits.
 
 RULES
 1. Keep every "Piece N — ..." header line exactly as given, including "from Image k". In those headers "Image k" refers to the generator's product photographs, NOT to your Image 2 floor plan. Under each header, write numbered lines; numbering continues across pieces.
 2. One fact per line. Never pack several facts into one line.
-3. Anchor every position to something VISIBLE in Image 1: a labelled door or window and its edges, a corner, the sill, the bottom edge of the frame. Also say where it appears in the frame: left/right side, higher (further away) or lower (closer).
-4. Describe BOTH ends of every piece: where each end is, and what is or is not at each end.
-5. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule that out with a line starting "NOT". A NOT line must never forbid something the plan actually shows — if the plan agrees with a habit, do not mention that habit.
-6. Use CAPS only for the single key word in a line: CENTRED, FAR, NEAR, LEFT, RIGHT, NOT.
-7. For multi-part pieces (L-shape, corner, curved), say which part is where, which way each part's back and seats face, and which end of the piece is plain.
-8. When two pieces overlap side to side on the plan, say which one stands IN FRONT (nearer the camera, lower in the frame) and which stands BEHIND, and that neither slides sideways to make room for the other.
-9. Every labelled DOOR, WINDOW and OPENING must stay fully visible and usable in the result; say so for any that a piece stands near.
-10. Keep any line saying pieces from different reference photographs must differ in material and colour.
-11. Finish with numbered lines saying which floor areas stay empty, especially between the furniture and the camera.
-12. Never describe the camera or ask to change the view.
-13. If the plan and the photo disagree (a block over a door, a labelled feature you cannot find in Image 1), follow the plan and note it under CONFLICTS.
-14. For each piece, compare its reference photo with the requested shape in the header and the facts. Directly under the header, write one line starting "BUILD:" that states the requested shape in plain words (how many arms, their proportions — e.g. "a long run and a shorter lounger" — never in feet, and which end is the lounge) and, if the photo shows something different, what to change (e.g. "Image 2 shows a two-seater; rebuild it into the L described here, do not keep it as a separate block"). Always keep the facts' line saying it is one sofa.
-15. For an L-shape, the lounge is an open chaise with no backrest; never write that the lounge has a back or that its back faces any direction.
-16. Never mention feet or any other unit of length. Describe size only as a share of a wall or of the room, and keep every gap the facts state.
+3. Always use room terms, never plan terms. The top of the plan is the FAR wall, the bottom is toward the camera, the left edge is the LEFT wall, the right edge is the RIGHT wall. Never write top, bottom, upper or lower of the plan. Also say where each thing appears in the frame of Image 1: left/right side, higher (further away) or lower (closer).
+4. SURROUNDINGS — required for every piece. Go around the piece and describe what is on every side of it: its back, its front, its left end, its right end, and each of its corners. For each one, say exactly one of:
+   - it TOUCHES: name what it touches (the far wall, the right wall, the far-right corner, another piece).
+   - there is a GAP: give the gap's size as a share of that wall or of the room (about a tenth, a fifth, a quarter, a third, half), and name what lies beyond the gap (bare wall, which window, which door, a pillar, another piece, open floor).
+   For an L-shaped or corner sofa, do this separately for the long run and for the lounge or second run. Always say where the lounge's open tip ends compared with the nearest window or door.
+5. Then, for every DOOR, WINDOW, OPENING and PILLAR near a piece, describe it from the feature's side, e.g. "Window 1 stays fully clear; a stretch of bare wall separates it from the sofa's left arm." If a piece covers part of a feature on the plan, say exactly how much, e.g. "the lounge stands in front of the lower third of Window 2".
+6. If the plan shows a gap, your text must state that gap. If the plan shows touching, say touching. Never use the words: next to, beside, near, close to, just to the right of, just to the left of, adjacent.
+7. Give each piece's length only as a share of the wall it stands along (e.g. "about two-thirds of the far wall"). Never use feet, metres or other units. Add a line that the generator must keep the gaps and size the piece to fit them, never stretch it to fill the wall.
+8. Never state a number of seats for an L-shaped, corner or curved sofa — the generator fits the seats to the length. For an L-shape, say that the lounge starts where the last full seat of the long run ends, never partway through a seat.
+9. For multi-part pieces (L-shape, corner, curved), say which part is where, which way each part's back and seats face, and which end is plain. For an L-shape, the lounge is an open chaise with no backrest; never write that it has a back or that its back faces any direction. A corner sofa has a backrest along both runs and an arm at both outer ends.
+10. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule it out with a line starting "NOT". A NOT line must never forbid something the plan actually shows.
+11. Use CAPS only for the single key word in a line: CENTRED, FAR, NEAR, LEFT, RIGHT, NOT, TOUCHES, GAP.
+12. When two pieces overlap side to side on the plan, say which one stands IN FRONT (nearer the camera, lower in the frame) and which stands BEHIND, and that neither slides sideways to make room for the other.
+13. Every labelled DOOR, WINDOW and OPENING must stay usable in the result; say so for any that a piece stands near.
+14. Finish with numbered lines saying which floor areas stay empty, especially between the furniture and the camera.
+15. Never describe the camera or ask to change the view.
+16. If the plan and the photo disagree (a block over a door, a labelled feature you cannot find in Image 1), follow the plan and note it under CONFLICTS.
+17. Directly under each header, write one line starting "BUILD:" that states the requested shape in plain words (how many runs, which is longer, which end is the lounge, where the arms are) and, if the reference photo shows something different, what to change (e.g. "Image 2 shows a straight sofa; rebuild it into this L in the same design, do not keep it as a separate block"). Do not give a seat count in the BUILD line for an L-shaped, corner or curved sofa. Always include a line saying it is one sofa.
+18. In every line you write, refer to a product photograph only by the GENERATOR's number as used in the headers (Image 2, Image 3 ...), never by your own input numbering.
 
 OUTPUT
 Only the placement section, then a line "CONFLICTS", then a list (or "none"). Nothing before the first "Piece" line.
 
-PLACEMENT FACTS
-{{FACTS}}
+PIECE LIST
+{{PIECES}}
 """
 
 # attempt_id -> the writer task currently running for it (same process only,
@@ -2539,11 +2565,15 @@ def get_placement_writer_prompt(db: Session) -> str:
     return get_setting(db, PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT)
 
 
-def writer_signature(facts: str, layout_json: dict | None, prompt: str, model: str, product_paths: list[str]) -> str:
-    """Identifies exactly what a writer result was written for. Any change to
-    the placed blocks, the room's features, the product photos, the prompt or
-    the model changes it, so a stale result can never be used."""
-    payload = json.dumps([facts, layout_json, prompt, model, product_paths], sort_keys=True, ensure_ascii=False)
+def writer_signature(
+    pieces: str, geometry: list, layout_json: dict | None, prompt: str, model: str, product_paths: list[str]
+) -> str:
+    """Identifies exactly what a writer result was written for: the piece
+    headers, the placed blocks and the room's features (everything the plan
+    picture is drawn from), the product photos, the prompt and the model. A
+    change to any of them changes it, so a result written for a plan that has
+    since been moved can never be used."""
+    payload = json.dumps([pieces, geometry, layout_json, prompt, model, product_paths], sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2564,34 +2594,49 @@ def writer_product_images(items: list[Item]) -> tuple[list[str], str]:
     return paths, " ".join(lines)
 
 
-def fill_writer_prompt(template: str, facts: str, product_lines: str) -> str:
-    """Puts the numbering lines and the facts into the writer prompt. A saved
-    prompt without {{PRODUCT_IMAGES}} still gets the numbering, just above
-    the facts."""
+def fill_writer_prompt(template: str, pieces: str, product_lines: str) -> str:
+    """Puts the numbering lines and the piece headers into the writer prompt.
+    A saved prompt without {{PRODUCT_IMAGES}} still gets the numbering, just
+    above the piece list; one without {{PIECES}} gets the list at the end."""
     if PRODUCT_IMAGES_TOKEN in template:
-        return template.replace(PRODUCT_IMAGES_TOKEN, product_lines).replace(FACTS_TOKEN, facts)
-    return template.replace(FACTS_TOKEN, f"(Product photographs: {product_lines})\n{facts}" if product_lines else facts)
+        template = template.replace(PRODUCT_IMAGES_TOKEN, product_lines)
+    elif product_lines:
+        pieces = f"(Product photographs: {product_lines})\n{pieces}"
+    if WRITER_PIECES_TOKEN in template:
+        return template.replace(WRITER_PIECES_TOKEN, pieces)
+    return f"{template.rstrip()}\n\nPIECE LIST\n{pieces}\n"
 
 
-def _piece_headers(lines: list[str]) -> list[str]:
-    return [line.rstrip() for line in lines if line.startswith("Piece ")]
+def _is_piece_header(line: str) -> bool:
+    return line.strip().startswith("Piece ")
 
 
-def parse_writer_output(facts: str, output: str) -> dict:
+def _header_key(line: str) -> str:
+    """A header line without surrounding whitespace or a trailing full stop,
+    the only differences the validation forgives."""
+    return line.strip().rstrip(".").rstrip()
+
+
+def parse_writer_output(pieces: str, output: str) -> dict:
     """Splits the writer's reply into the placement section and its CONFLICTS
-    list, and validates the section: every "Piece N — ..." header from the
-    facts must appear unchanged and in the same order, and no other line may
-    start with "Piece ". Returns {ok, reason, placement, conflicts}."""
+    list, and validates the section: every "Piece N — ..." header in `pieces`
+    (the piece list, or any text holding those header lines) must appear in
+    the same order, and no other line may start with "Piece ". A header that
+    differs only by whitespace around it or by a missing or extra final full
+    stop is accepted and put back exactly as given. Returns {ok, reason,
+    placement, conflicts}."""
     lines = (output or "").replace("\r\n", "\n").split("\n")
     conflicts_at = next((i for i, line in enumerate(lines) if line.strip().rstrip(":").strip() == "CONFLICTS"), None)
     body = lines if conflicts_at is None else lines[:conflicts_at]
     conflicts = "" if conflicts_at is None else "\n".join(lines[conflicts_at + 1 :]).strip()
 
-    expected = _piece_headers(facts.split("\n"))
-    got = _piece_headers(body)
-    if got != expected:
-        missing = [h for h in expected if h not in got]
-        extra = [h for h in got if h not in expected]
+    expected = [line.strip() for line in pieces.split("\n") if _is_piece_header(line)]
+    expected_keys = [_header_key(line) for line in expected]
+    found = [index for index, line in enumerate(body) if _is_piece_header(line)]
+    got_keys = [_header_key(body[index]) for index in found]
+    if got_keys != expected_keys:
+        missing = [h for h in expected_keys if h not in got_keys]
+        extra = [h for h in got_keys if h not in expected_keys]
         if missing:
             reason = f"validation failed: header missing or changed: {missing[0]!r}"
         elif extra:
@@ -2599,9 +2644,12 @@ def parse_writer_output(facts: str, output: str) -> dict:
         else:
             reason = "validation failed: piece headers repeated or out of order"
         return {"ok": False, "reason": reason, "placement": None, "conflicts": conflicts}
+    if not found:
+        return {"ok": False, "reason": "validation failed: no pieces to write for", "placement": None, "conflicts": conflicts}
 
-    first = next(i for i, line in enumerate(body) if line.startswith("Piece "))
-    placement = "\n".join(body[first:]).strip() + "\n"
+    for index, original in zip(found, expected):
+        body[index] = original
+    placement = "\n".join(body[found[0] :]).strip() + "\n"
     return {"ok": True, "reason": None, "placement": placement, "conflicts": conflicts}
 
 
@@ -2663,7 +2711,7 @@ async def run_placement_writer(attempt_id: int, signature: str) -> None:
         if state.get("signature") != signature:
             return
         product_paths, product_lines = writer_product_images(attempt.items)
-        prompt = fill_writer_prompt(get_placement_writer_prompt(db), state["facts"], product_lines)
+        prompt = fill_writer_prompt(get_placement_writer_prompt(db), state["pieces"], product_lines)
         outcome: dict
         usage = None
         try:
@@ -2678,7 +2726,7 @@ async def run_placement_writer(attempt_id: int, signature: str) -> None:
             outcome = {"status": "failed", "ok": False, "reason": f"writer call failed: {exc.__class__.__name__}"}
         else:
             usage = result["usage"]
-            parsed = parse_writer_output(state["facts"], result["output"])
+            parsed = parse_writer_output(state["pieces"], result["output"])
             outcome = {
                 "status": "done",
                 "ok": parsed["ok"],
@@ -2716,10 +2764,13 @@ def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session)
     plan_path = plan_path or attempt.plan_path
     if not plan_path:
         return "no_plan"
-    facts = build_placement_text(attempt.items, attempt.room.layout_json, False, feet_in_prompt(db))
+    feet = feet_in_prompt(db)
+    pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json, feet)
     model = get_active_vision_model(db)
     product_paths, _lines = writer_product_images(attempt.items)
-    signature = writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths)
+    signature = writer_signature(
+        pieces, placed_geometry(attempt.items), attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths
+    )
     state = attempt.placement_writer or {}
     task = WRITER_TASKS.get(attempt.id)
     if state.get("signature") == signature and (
@@ -2731,7 +2782,9 @@ def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session)
     attempt.placement_writer = {
         "status": "running",
         "signature": signature,
-        "facts": facts,
+        "pieces": pieces,  # all the writer is told about the pieces
+        # not sent to the writer: what generation falls back to, kept for debugging
+        "fallback_facts": build_placement_text(attempt.items, attempt.room.layout_json, False, feet),
         "model": model,
         "plan_path": plan_path,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -2749,9 +2802,15 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
     section if a valid one exists for exactly this plan (waiting up to
     PLACEMENT_WRITER_WAIT_SECONDS for one still running), otherwise None so
     the caller falls back to the facts. Also returns the record saved to
-    generation_debug: facts, raw output, used/fallback + reason, usage."""
-    facts = build_placement_text(attempt.items, attempt.room.layout_json, False, feet_in_prompt(db))
-    info: dict = {"facts": facts, "used": False, "reason": None, "output": None, "conflicts": None, "usage": None, "plan_path": None}
+    generation_debug: the piece list the writer was given, the fallback
+    facts, raw output, used/fallback + reason, usage."""
+    feet = feet_in_prompt(db)
+    pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json, feet)
+    info: dict = {
+        "pieces": pieces,
+        "fallback_facts": build_placement_text(attempt.items, attempt.room.layout_json, False, feet),
+        "used": False, "reason": None, "output": None, "conflicts": None, "usage": None, "plan_path": None,
+    }
 
     def fallback(reason: str) -> tuple[None, dict]:
         info["reason"] = reason
@@ -2766,7 +2825,9 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
         return fallback("no plan image was uploaded for this layout")
     model = get_active_vision_model(db)
     product_paths, _lines = writer_product_images(attempt.items)
-    if state["signature"] != writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths):
+    if state["signature"] != writer_signature(
+        pieces, placed_geometry(attempt.items), attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths
+    ):
         return fallback("the plan, the room's features or the writer settings changed after the writer ran")
 
     info["plan_path"] = state.get("plan_path")
@@ -5084,9 +5145,11 @@ def api_admin_save_prompt(
         return error_response(400, "empty_vision_prompt", "The vision prompt can't be empty.")
     if body.vision_model is not None and not body.vision_model.strip():
         return error_response(400, "empty_vision_model", "The vision model can't be empty.")
-    if body.placement_writer_prompt is not None and FACTS_TOKEN not in body.placement_writer_prompt:
+    if body.placement_writer_prompt is not None and WRITER_PIECES_TOKEN not in body.placement_writer_prompt:
         return error_response(
-            400, "writer_prompt_missing_facts", f"The placement writer prompt must contain {FACTS_TOKEN} where the facts go."
+            400,
+            "writer_prompt_missing_pieces",
+            f"The placement writer prompt must contain {WRITER_PIECES_TOKEN} where the piece list goes.",
         )
     if body.studio_prompt is not None and not body.studio_prompt.strip():
         return error_response(400, "empty_studio_prompt", "The product photo prompt can't be empty.")

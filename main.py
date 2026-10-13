@@ -112,8 +112,7 @@ Change nothing except adding the furniture.
 
 Remove any people from the photograph.
 
-Each piece takes its fabric, colour, texture, arm, leg and cushion style
-from ITS OWN reference photograph. For a straight sofa, the NUMBER of
+{{PIECE_SOURCES}} For a straight sofa, the NUMBER of
 seats and cushions is never taken from the photograph — it comes only
 from the configuration stated above. Where a photograph shows fewer or
 more seats than the stated configuration, rebuild that piece longer or
@@ -172,6 +171,7 @@ SUPERSEDED_GENERATION_PROMPT_HASHES = {
     "32efa470ac3f03ac4fbbdb790a3680d3ab6cf600faa6b58aef28180571ec5110",  # before exposed wires joined the cleanup paragraph
     "8a885a7ea59e302d458902bf8c1a515b56040919356a8e44c2773b4adb5b92c0",  # before seat counting was limited to straight sofas
     "285a3a6a8d0755d6dd3dd8836fb90856cb2cee99b5ad12f854d341819c75c176",  # before the fabric section moved under the image list
+    "1a212a95d2f1caf48eb4a00e99aed0121067696584908cf52cb94ca7ec97d78b",  # before {{PIECE_SOURCES}}
 }
 # "true": lengths in feet are written into the prompts, as they always were.
 # "false" (the default): no feet reach either model — the floor plan is not to
@@ -217,6 +217,10 @@ PROMPT_PLACEHOLDERS = [
     {
         "token": "{{PIECE_FINISH}}",
         "description": "The FABRIC section: per-piece colour/material/fabric from the Finishing step. Belongs directly under {{IMAGE_MANIFEST}}; appended at the end when the token is absent. Empty when no piece has a colour, material or fabric.",
+    },
+    {
+        "token": "{{PIECE_SOURCES}}",
+        "description": 'The sentence saying where each piece takes its look from: "Each piece takes its fabric, colour, texture, arm, leg and cushion style from ITS OWN reference photograph." — or, for pieces with a fabric, colour or material chosen, arm, leg and cushion style from the photograph and material and colour from the FABRIC section.',
     },
     {
         "token": "{{LIGHTING}}",
@@ -1475,18 +1479,24 @@ def build_image_manifest(items: list[Item], feet: bool = False) -> str:
             n += 1
             continue
         first_image_for_photo[item.photo_path] = n
-        lines.append(
-            f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
-            "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
-            "legs, stitching, material, colour and texture. "
-            # no seat count is ever stated for an L-shaped, corner or curved sofa
-            + ("Only its shape and the overall " if item.shape in ARM_SHAPES else "Only the number of seats and the overall ")
-            + (
-                "width follow the configuration stated below; everything else must match this photograph."
-                if feet
-                else "size follow what is stated below; everything else must match this photograph."
+        # no seat count is ever stated for an L-shaped, corner or curved sofa
+        follows = "Only its shape and the overall " if item.shape in ARM_SHAPES else "Only the number of seats and the overall "
+        follows += "width follow the configuration stated below" if feet else "size follow what is stated below"
+        if item_has_finish(item):
+            # its material and colour were chosen on the Finishing step, so the
+            # photograph must not be named as their reference
+            lines.append(
+                f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
+                "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
+                f"legs and stitching. Its material and colour come from the {finish_section_name(items)} section, not "
+                f"from this photograph. {follows}; the rest of the design must match this photograph."
             )
-        )
+        else:
+            lines.append(
+                f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
+                "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
+                f"legs, stitching, material, colour and texture. {follows}; everything else must match this photograph."
+            )
         n += 1
     numbers = fabric_image_numbers(items)
     for k, item in enumerate(items, start=1):
@@ -1520,6 +1530,40 @@ def fabric_image_numbers(items: list[Item]) -> dict[int, int]:
             numbers[item.id] = n
             n += 1
     return numbers
+
+
+def item_has_finish(item: Item) -> bool:
+    """A fabric swatch, a material or a colour was chosen for this piece on the
+    Finishing step, so it is listed in the FABRIC section."""
+    return fabric_file_exists(item) or item.material in MATERIAL_CHOICES or bool(item.colour_hex)
+
+
+def finish_section_name(items: list[Item]) -> str:
+    """The heading build_piece_finish_text gives its section."""
+    return "FABRIC" if fabric_image_numbers(items) else "COLOUR AND MATERIAL"
+
+
+PIECE_SOURCES_PLAIN = "Each piece takes its fabric, colour, texture, arm, leg and cushion style\nfrom ITS OWN reference photograph."
+
+
+def build_piece_sources_text(items: list[Item]) -> str:
+    """{{PIECE_SOURCES}}: where each piece takes its look from. Unchanged
+    wording when no piece has a fabric, colour or material chosen; those that
+    do take only their arm, leg and cushion style from the photograph."""
+    chosen = [k for k, item in enumerate(items, start=1) if item_has_finish(item)]
+    if not chosen:
+        return PIECE_SOURCES_PLAIN
+    from_section = (
+        "arm, leg and cushion style from ITS OWN reference photograph, and its material and colour from the "
+        f"{finish_section_name(items)} section"
+    )
+    if len(chosen) == len(items):
+        return f"Each piece takes its {from_section}."
+    who = f"Piece {chosen[0]} takes" if len(chosen) == 1 else f"Pieces {_format_piece_list(chosen)} each take"
+    return (
+        f"{who} its {from_section}. Every other piece takes its fabric, colour, texture, arm, leg and cushion "
+        "style from ITS OWN reference photograph."
+    )
 
 
 def build_piece_finish_text(items: list[Item]) -> str:
@@ -2383,6 +2427,10 @@ def build_prompt(
         extra = decor if room_treatment in ("warm", "luxury") else NO_EXTRA_FURNITURE_TEXT
         room_treatment_text = f"{room_treatment_text}\n\n{extra}"
     piece_finish_text = build_piece_finish_text(items)
+    piece_sources = build_piece_sources_text(items)
+    if "{{PIECE_SOURCES}}" not in template:
+        # older saved template: the sentence is still written out in it
+        template = template.replace(PIECE_SOURCES_PLAIN, piece_sources)
     # after everything in the template, in this order: the fabric section (only
     # for an older saved template without its slot under the image list), the
     # showroom's note, the final shape check
@@ -2416,7 +2464,7 @@ def build_prompt(
         .replace("{{LIGHTING}}", lighting_text)
         .replace("{{DECOR}}", decor)
     )
-    prompt = prompt.replace("{{PIECE_FINISH}}", piece_finish_text)
+    prompt = prompt.replace("{{PIECE_FINISH}}", piece_finish_text).replace("{{PIECE_SOURCES}}", piece_sources)
     if closing_sections:
         prompt = "\n\n".join([prompt.rstrip(), *closing_sections])
     return re.sub(r"\n{3,}", "\n\n", prompt).strip() + "\n"

@@ -1629,12 +1629,18 @@ CONFIG_NOTES_PREAMBLE = (
 )
 
 
-# Added to every sofa's note: the image model would rather build the full
-# seat count than keep a gap, and stretches the sofa under a window.
+# Added to every sofa's note: the image model would rather build a full-size
+# sofa than keep a gap, and stretches it under a window. An L-shaped, corner
+# or curved sofa has no seat count, so it gives up seats; a straight sofa's
+# seat count was chosen by the salesman, so it keeps the count and narrows.
 SOFA_GAPS_NOTE = (
     "The empty wall and gaps stated in PLACEMENT matter more than the number of seats. If a full-size sofa would "
     "not fit, use fewer seats — never close or shrink a stated gap, and never let the sofa run under a window that "
     "PLACEMENT keeps clear."
+)
+STRAIGHT_SOFA_GAPS_NOTE = (
+    "Keep exactly the stated number of seats; if space is tight, make the seats slightly narrower rather than "
+    "closing or shrinking a stated gap."
 )
 
 # With feet_in_prompt off the piece header states no lengths, so a note
@@ -1659,7 +1665,7 @@ def build_config_notes(items: list[Item], feet: bool = False) -> str:
                 for phrase in HEADER_LENGTH_PHRASES:
                     note = note.replace(phrase, PLACEMENT_PROPORTIONS_PHRASE)
             if item.category == "Sofa":
-                note = f"{note} {SOFA_GAPS_NOTE}"
+                note = f"{note} {SOFA_GAPS_NOTE if item.shape in ARM_SHAPES else STRAIGHT_SOFA_GAPS_NOTE}"
             lines.append(f"{item.type} — {note}")
         if item.category == "Sofa" and item.type in MULTI_PIECE_SOFA_TYPES:
             has_multi_piece_sofa = True
@@ -2590,6 +2596,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "bedd92dd206ca321d56a9a6022a101bf67cd10bb4dc5b7d5030e4a1491a5e6d8",  # before "drawn against a wall TOUCHES", one arm on an L, a size for every GAP
     "c2e3bab1286627607cead0915ba6f2d07d4d2a37ced40c48b94175131b7a5c3c",  # before "measure the lounge from the wall the long run stands on"
     "50d610ff2b7b08858499cd3caea7892698d278b295a7a98b632dd867bc3a8c0c",  # before LANDMARKS replaced wall fractions
+    "fc864c5e94212bdcab7715a7b32b4cd66a3e490d0c484457b5b90b6b0ba093b1",  # before open floor was described in plain terms
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2613,7 +2620,7 @@ The generator cannot see the plan. Left to itself it tends to push furniture int
 
 LANDMARKS — the generator edits the photograph and cannot measure fractions of a wall. Describe positions and gaps by what is visible in Image 1:
 a) Anchor every end of every run, and every gap edge, to something visible in Image 1: a window edge, a door frame, a corner, a pillar, the sill. Say where the sofa starts or stops relative to it, e.g. 'the sofa's left arm starts a little to the RIGHT of Window 1's right edge'.
-b) Size gaps with visible objects, never wall fractions: 'about half a window-width of bare wall', 'about the width of the doorway'. Never size anything in seats.
+b) Size gaps along a wall with visible objects such as windows and doors, never wall fractions: 'about half a window-width of bare wall', 'about the width of the doorway'. Describe open floor in plain terms (e.g. 'open floor up to the near wall'), not in window-widths. Never size anything in seats.
 c) Also say what stays empty, in landmark terms: 'nothing stands below Window 1', 'the corner left of Window 1 stays bare'.
 d) Use a fraction only as a backup when no landmark is near, and then describe it by the frame, e.g. 'the sofa's left arm is at about the middle of the far wall as seen in the photograph'.
 e) If the plan and the photograph place a feature differently, follow the photograph's position of the feature and keep the sofa's relation to it as the plan shows (e.g. 'starts just after Window 1'), and note it under CONFLICTS.
@@ -2629,7 +2636,7 @@ RULES
    Measure the lounge's length from the wall the long run stands on to the lounge's open tip — the whole lounge, including the part beside the long run's seat, not only the part that sticks out past it — and give it with a landmark where one exists (e.g. "the lounge tip stops where Window 2 begins").
    A block drawn against a wall line TOUCHES that wall. A sliver thinner than about a twentieth of the wall is not a gap — call it TOUCHES.
    For each end of every run, also state the gap to the wall or corner in that direction, in landmark terms (e.g. "bare wall runs from the far-left corner, past Window 1, to the sofa's left end"), in addition to any window or door in between.
-   Every GAP must have a size.
+   Every GAP along a wall must have a size; a GAP of open floor is described in plain terms (LANDMARKS b).
 5. Then, for every DOOR, WINDOW, OPENING and PILLAR near a piece, describe it from the feature's side, e.g. "Window 1 stays fully clear; a stretch of bare wall separates it from the sofa's left arm." If a piece covers part of a feature on the plan, say exactly how much, e.g. "the lounge stands in front of the lower third of Window 2".
 6. If the plan shows a gap, your text must state that gap. If the plan shows touching, say touching. Never use the words: next to, beside, close to, just to the right of, just to the left of, adjacent.
 7. Give each piece's length by where each of its ends starts and stops against the landmarks (LANDMARKS a), with a share of the wall only as the backup of LANDMARKS d. Never use feet, metres or other units. Add a line that the generator must keep the gaps and size the piece to fit them, never stretch it to fill the wall.

@@ -163,7 +163,6 @@ PROMPT_SETTING_KEY = "generation_prompt"
 # current default; an edited one is left alone.
 SUPERSEDED_VISION_PROMPT_HASHES = {
     "4beea0248af0786569c079d2823cc15e6717606823450305e8378aa7e8c8e793",  # before left/right_wall_visible_to
-    "ee258e7b9e2de06dbe2dcee0a12215b53085e7a118499a7298606ac1922fd205",  # first wording of the visible_to instructions (often answered 1)
 }
 PROMPT_PLACEHOLDERS = [
     {
@@ -281,19 +280,9 @@ plainly in notes.
 How much of each side wall the photograph shows ("left_wall_visible_to"
 and "right_wall_visible_to"): follow each side wall's skirting/floor line
 from the far corner toward the camera and report where it leaves the
-frame — through the left or right edge of the photo, or the bottom edge —
-as a number from 0 to 1 along the room's depth (0 = the far wall, 1 = the
-near wall, where the camera stands).
-- The camera stands inside the room looking forward, so the floor beside
-  and behind it is not in the photo: the answer is almost always below 1.
-  Use 1 only if you can actually see the near corner where that side wall
-  ends.
-- Judge by distance, not by height in the picture: the floor near the
-  camera fills a large part of the photo. Compare how far from the camera
-  the point where the line leaves the frame is with how far away the far
-  wall is. Half as far as the far wall is 0.5; a third as far is about
-  0.67; a quarter as far is 0.75; a fifth as far is 0.8.
-If unsure, use null.
+frame, as a number from 0 to 1 along the room's depth (0 = the far wall,
+1 = the near wall, where the camera stands). If the whole wall is visible
+down to the near corner, use 1. If unsure, use null.
 
 Return only JSON in exactly this shape:
 

@@ -12,8 +12,8 @@ import { Chip } from "../components/Chip.jsx";
 
 const ROOM_TREATMENTS = [
   { value: "keep", label: "Keep room as it is", desc: "Same walls, floor and decor – only the furniture is added" },
-  { value: "warm", label: "Aesthetic warm", desc: "Cosy home: warm lights, art, rug, plant" },
-  { value: "luxury", label: "Luxury", desc: "Deep tones, panelling, marble, brass, chandelier" },
+  { value: "warm", label: "Aesthetic warm", desc: "Cosy home: warm light, rug, maybe art or a plant" },
+  { value: "luxury", label: "Luxury", desc: "Deep tones, marble, brass, rich finishes" },
   { value: "minimal", label: "Minimal", desc: "White walls, light wood, almost empty" },
 ];
 const LIGHTINGS = [

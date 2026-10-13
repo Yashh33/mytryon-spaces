@@ -356,19 +356,23 @@ ROOM_TREATMENT_TEXT = {
     "warm": _ROOM_TREATMENT_BASE + (
         "Within those unchanged boundaries, style the room as a warm, "
         "aesthetic, lived-in home: warm white or soft beige wall paint, warm "
-        "wood tones, warm ceiling lighting (cove or a pendant) and one floor "
-        "or table lamp glowing softly, a large textured rug under the front "
-        "of the seating, one or two framed artworks on the main wall, soft "
-        "linen curtains at the windows and one tall indoor plant. Cosy, "
-        "inviting, magazine-quality."
+        "wood tones and warm ceiling lighting (cove or a pendant). The room "
+        "may include a few of these, only where they fit naturally: a "
+        "textured rug under the front of the seating, one or two framed "
+        "artworks on a wall, a floor lamp, soft linen curtains, an indoor "
+        "plant. Use only what suits this room; fewer is better than crowded. "
+        "Cosy, inviting, magazine-quality."
     ),
     "luxury": _ROOM_TREATMENT_BASE + (
         "Within those unchanged boundaries, style the room as a high-end "
-        "luxury interior: a feature wall with panelling or stone/marble "
-        "texture behind the main seating, deep rich tones, brass or gold "
-        "accents, a statement chandelier or cove lighting with hidden warm "
-        "LED strips, a plush large rug, one large statement artwork, a marble "
-        "or stone coffee table and elegant floor-length drapes. Dramatic, "
+        "luxury interior: deep rich tones, brass or gold accents, cove "
+        "lighting with hidden warm LED strips, a marble or stone coffee "
+        "table, a plush large rug and elegant floor-length drapes. The room "
+        "may also include a few of these, only where they fit naturally: a "
+        "feature wall with panelling or stone/marble texture on a wall that "
+        "is free of furniture and windows, if one is available; a statement "
+        "chandelier; one large statement artwork; an indoor plant. Use only "
+        "what suits this room; fewer is better than crowded. Dramatic, "
         "premium, hotel-like."
     ),
     "minimal": _ROOM_TREATMENT_BASE + (
@@ -379,17 +383,35 @@ ROOM_TREATMENT_TEXT = {
         "Lots of empty space and clean lines."
     ),
 }
+# Decor in the warm and luxury looks is a menu, not a checklist: the look
+# text says what the room MAY include, and this limits how much and where.
 LOOK_DECOR_TEXT = (
+    "Decor is optional and secondary. Add at most three decorative items in "
+    "total, and only where there is clearly free space. Never place any decor "
+    "behind, beside, on or overlapping the furniture being placed, never in "
+    "front of a window or doorway, and never in the floor area between the "
+    "furniture and the camera. Leave the space around the furniture clear so "
+    "it stands on its own."
+)
+# The wording LOOK_DECOR_TEXT had before decor became optional. A saved
+# prompt that pasted it in verbatim is moved to the {{DECOR}} slot at startup.
+PREVIOUS_LOOK_DECOR_TEXT = (
     "Decor is part of the chosen look above: add only the items it names, "
     "keep them secondary to the furniture, and never place anything in front "
     "of or overlapping the furniture."
 )
+# Added to the decor text of EVERY look: the model must not invent furniture.
+NO_EXTRA_FURNITURE_TEXT = (
+    "Never add any furniture or appliance that is not in the piece list: no "
+    "TV, TV unit or console, shelves, cabinets, side tables, extra chairs or "
+    "extra sofas. A coffee table and a rug are the only additions allowed "
+    "besides decor."
+)
 
 
 def decor_text(room_treatment: str) -> str:
-    if room_treatment in ("warm", "luxury"):
-        return LOOK_DECOR_TEXT
-    return NO_DECOR_TEXT
+    look_text = LOOK_DECOR_TEXT if room_treatment in ("warm", "luxury") else NO_DECOR_TEXT
+    return f"{look_text}\n{NO_EXTRA_FURNITURE_TEXT}"
 
 
 MATERIAL_CHOICES = {
@@ -945,6 +967,12 @@ async def lifespan(app: FastAPI):
                 if variant in saved_prompt.value:
                     saved_prompt.value = saved_prompt.value.replace(variant, "{{DECOR}}")
                     logger.info("replaced the fixed no-decor paragraph in the saved generation prompt with {{DECOR}}")
+            # same for the old "add only the items it names" decor rule, if a
+            # saved prompt pasted it in rather than using the slot
+            if PREVIOUS_LOOK_DECOR_TEXT in saved_prompt.value:
+                replacement = "" if "{{DECOR}}" in saved_prompt.value else "{{DECOR}}"
+                saved_prompt.value = saved_prompt.value.replace(PREVIOUS_LOOK_DECOR_TEXT, replacement)
+                logger.info("removed the old look-decor rule from the saved generation prompt (now the {{DECOR}} slot)")
 
         migrate_to_shops(db)
         migrate_item_shapes(db)
@@ -2183,9 +2211,12 @@ def build_prompt(
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
     decor = decor_text(room_treatment)
-    if "{{DECOR}}" not in template and room_treatment in ("warm", "luxury"):
-        # older hand-edited template without the slot: decor follows the look text
-        room_treatment_text = f"{room_treatment_text}\n\n{decor}"
+    if "{{DECOR}}" not in template:
+        # older hand-edited template without the slot: the decor rule follows
+        # the look text (keep/minimal templates carry their own no-decor
+        # wording, so those only gain the no-extra-furniture rule)
+        extra = decor if room_treatment in ("warm", "luxury") else NO_EXTRA_FURNITURE_TEXT
+        room_treatment_text = f"{room_treatment_text}\n\n{extra}"
     finish_sections = []
     if note:
         finish_sections.append(

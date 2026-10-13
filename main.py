@@ -389,9 +389,9 @@ ROOM_TREATMENT_TEXT = {
     "luxury": _ROOM_TREATMENT_BASE + (
         "Within those unchanged boundaries, style the room as a high-end "
         "luxury interior: deep rich tones, brass or gold accents, cove "
-        "lighting with hidden warm LED strips, a marble or stone coffee "
-        "table, a plush large rug and elegant floor-length drapes. The room "
-        "may also include a few of these, only where they fit naturally: a "
+        "lighting with hidden warm LED strips, a plush large rug and elegant "
+        "floor-length drapes. The room may also include a few of these, only "
+        "where they fit naturally: a marble or stone coffee table; a "
         "feature wall with panelling or stone/marble texture on a wall that "
         "is free of furniture and windows, if one is available; a statement "
         "chandelier; one large statement artwork; an indoor plant. Use only "
@@ -430,7 +430,9 @@ NO_EXTRA_FURNITURE_TEXT = (
     "Never add any furniture or appliance that is not in the piece list: no "
     "TV, TV unit or console, shelves, cabinets, side tables, extra chairs or "
     "extra sofas. A coffee table and a rug are the only additions allowed "
-    "besides decor."
+    "besides decor. If a coffee table is added, it is modest in size, sits "
+    "close in front of the seats on the rug, and never extends into the empty "
+    "floor between the furniture and the camera."
 )
 
 

@@ -67,7 +67,6 @@ export default function Place() {
   const dirtyKeys = useRef(new Set());
   const planSvg = useRef(null); // the plan's <svg>, for exporting it as an image on Next
   const [leaving, setLeaving] = useState(false);
-  const [rereading, setRereading] = useState(false);
 
   async function load() {
     setError(null);
@@ -262,24 +261,13 @@ export default function Place() {
     }));
   }
 
-  // Removing something the room reading found is remembered in
-  // `removed_features`, so "Re-read room" doesn't bring it back. (Things the
-  // salesman added himself — features with blocks_furniture, obstructions
-  // with x/y — need no record: removing them simply deletes them.)
   function doRemoveFeature(wall, indices) {
     const key = WALL_KEY[wall];
     const toRemove = new Set(Array.isArray(indices) ? indices : [indices]);
-    updateLayout((layout) => {
-      const features = layout[key]?.features || [];
-      const forgotten = features
-        .filter((f, i) => toRemove.has(i) && !("blocks_furniture" in f))
-        .map((f) => ({ wall, type: f.type }));
-      return {
-        ...layout,
-        [key]: { ...layout[key], features: features.filter((_, i) => !toRemove.has(i)) },
-        removed_features: [...(layout.removed_features || []), ...forgotten],
-      };
-    });
+    updateLayout((layout) => ({
+      ...layout,
+      [key]: { ...layout[key], features: (layout[key]?.features || []).filter((_, i) => !toRemove.has(i)) },
+    }));
   }
 
   function handleTapFeature(wall, indices) {
@@ -297,30 +285,10 @@ export default function Place() {
   }
 
   function doRemoveObstruction(index) {
-    updateLayout((layout) => {
-      const gone = (layout.obstructions || [])[index];
-      const forgotten = gone && gone.x == null ? [{ wall: null, type: gone.type }] : [];
-      return {
-        ...layout,
-        obstructions: (layout.obstructions || []).filter((_, i) => i !== index),
-        removed_features: [...(layout.removed_features || []), ...forgotten],
-      };
-    });
-  }
-
-  // Runs the room reading again on the same photo (the plan shows "Reading
-  // the room…" and the polling above picks up the result). Features added or
-  // removed by hand are kept by the server.
-  async function handleRereadRoom() {
-    setRereading(true);
-    try {
-      const data = await api.post(`/api/rooms/${room.id}/reread`);
-      setAttempt((prev) => ({ ...prev, room: { ...prev.room, ...data.room } }));
-    } catch (err) {
-      toast(err.message);
-    } finally {
-      setRereading(false);
-    }
+    updateLayout((layout) => ({
+      ...layout,
+      obstructions: (layout.obstructions || []).filter((_, i) => i !== index),
+    }));
   }
 
   function handleTapObstruction(index) {
@@ -500,9 +468,6 @@ export default function Place() {
                 onClick={() => setAddObstructionMode((v) => !v)}
               >
                 {addObstructionMode ? "Tap the plan…" : "+ Add obstruction"}
-              </button>
-              <button type="button" className="btn btn-ghost btn-small" disabled={rereading} onClick={handleRereadRoom}>
-                {rereading ? "Starting…" : "Re-read room"}
               </button>
             </div>
           ) : null}

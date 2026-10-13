@@ -410,9 +410,11 @@ ROOM_TREATMENT_TEXT = {
 # text says what the room MAY include, and this limits how much and where.
 LOOK_DECOR_TEXT = (
     "Decor is optional and secondary. Add at most three decorative items in "
-    "total, and only where there is clearly free space. Never place any decor "
-    "behind, beside, on or overlapping the furniture being placed, never in "
-    "front of a window or doorway, and never in the floor area between the "
+    "total, and only where there is clearly free space. Plants, lamps and "
+    "other decor go only on walls and in corners that have no furniture. "
+    "Never put any decor in the corner a sofa occupies, between a sofa and a "
+    "wall or window, or within about an arm's length of any sofa. Never put "
+    "decor in front of a window or doorway, or in the floor area between the "
     "furniture and the camera. Leave the space around the furniture clear so "
     "it stands on its own."
 )

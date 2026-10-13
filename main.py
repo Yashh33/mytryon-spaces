@@ -1883,12 +1883,17 @@ def resolve_round_placement(rect: dict, layout_json: dict | None = None) -> dict
     return _resolution(None, (0, 0), sentence, [rect], layout_json)
 
 
+# A feature's free-text "notes" (written by the vision model, or typed on the
+# plan) are never put into the generation prompt: they can say things about
+# the photograph itself — "partly cut off at the right edge of the photograph"
+# once made the image model re-frame the camera. Only the type, size and
+# position are used; the notes stay in layout_json and on the plan screen.
+GENERIC_FEATURE_NAMES = {"unknown": "unidentified feature", "other": "built-in feature"}
+
+
 def _feature_label(feature: dict) -> str:
     feature_type = feature.get("type") or "feature"
-    if feature_type in ("unknown", "other"):
-        notes = (feature.get("notes") or "").strip()
-        return notes if notes else "feature"
-    return feature_type
+    return GENERIC_FEATURE_NAMES.get(feature_type, feature_type)
 
 
 def _format_piece_list(numbers: list[int]) -> str:
@@ -2122,12 +2127,14 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
 
 
 def _feature_phrase(feature: dict) -> str:
-    feature_type = feature.get("type") or "feature"
-    if feature_type in ("unknown", "other"):
-        notes = (feature.get("notes") or "").strip()
-        return notes if notes else "a built-in feature"
-    parts = [p for p in (feature.get("size"), feature_type) if p]
-    phrase = "a " + " ".join(parts)
+    """e.g. "a medium doorway at the far third"; an unknown feature reads "an
+    unidentified feature at the near third". Never includes the notes."""
+    name = _feature_label(feature)
+    size = feature.get("size")
+    if size:
+        phrase = f"a {size} {name}"
+    else:
+        phrase = ("an " if name[0] in "aeiou" else "a ") + name
     position = feature.get("position")
     return f"{phrase} at the {position}" if position else phrase
 

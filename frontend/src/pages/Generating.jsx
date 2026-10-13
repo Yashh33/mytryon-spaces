@@ -6,6 +6,8 @@ import { useToast } from "../components/Toast.jsx";
 const PHASES = ["Reading the room…", "Placing the furniture…", "Setting the light…", "Adding final touches…"];
 // shown first, for as long as the server is still waiting for the placement writer
 const LAYOUT_PHASE = "Preparing layout…";
+// a "Fix this" edit of a finished picture (location.state.fix)
+const FIX_PHASES = ["Reading the picture…", "Making the changes…", "Adding final touches…"];
 
 export default function Generating() {
   const { id } = useParams();
@@ -13,6 +15,7 @@ export default function Generating() {
   const navigate = useNavigate();
   const toast = useToast();
   const jobId = location.state?.jobId;
+  const isFix = Boolean(location.state?.fix);
   const [startedAt] = useState(() => location.state?.startedAt || Date.now());
 
   const [elapsed, setElapsed] = useState(() => Date.now() - startedAt);
@@ -104,24 +107,33 @@ export default function Generating() {
         <div className="status-line">One moment — that didn't go through</div>
         <div className="msg">{errorState}</div>
         <div style={{ width: "100%", maxWidth: 280, display: "flex", flexDirection: "column", gap: 10 }}>
-          <button type="button" className="btn btn-primary" disabled={retrying} onClick={handleRetry}>
-            {retrying ? "Starting…" : "Try again"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}
-            onClick={() => navigate(`/attempt/${id}/furniture`)}
-          >
-            Back to pieces
-          </button>
+          {isFix ? (
+            // the fix was not made and its credits were returned: back to the picture, where it can be asked again
+            <button type="button" className="btn btn-primary" onClick={() => navigate(`/attempt/${id}/result`, { replace: true })}>
+              Back to the picture
+            </button>
+          ) : (
+            <>
+              <button type="button" className="btn btn-primary" disabled={retrying} onClick={handleRetry}>
+                {retrying ? "Starting…" : "Try again"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}
+                onClick={() => navigate(`/attempt/${id}/furniture`)}
+              >
+                Back to pieces
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
   }
 
   const showLayout = preparingLayout || layoutDoneAt !== null;
-  const phases = showLayout ? [LAYOUT_PHASE, ...PHASES] : PHASES;
+  const phases = isFix ? FIX_PHASES : showLayout ? [LAYOUT_PHASE, ...PHASES] : PHASES;
   const sinceLayout = layoutDoneAt === null ? elapsed : Math.max(0, elapsed - (layoutDoneAt - startedAt));
   const phaseIdx = preparingLayout ? 0 : Math.min(phases.length - 1, (showLayout ? 1 : 0) + Math.floor(sinceLayout / 4000));
 

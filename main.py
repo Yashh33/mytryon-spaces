@@ -611,6 +611,8 @@ class Render(Base):
     id = Column(Integer, primary_key=True)
     attempt_id = Column(Integer, ForeignKey("attempts.id"), nullable=False)
     image_path = Column(String, nullable=False)
+    # set on a "Fix this" result: the render (of the same attempt) it edited
+    parent_render_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -637,6 +639,9 @@ class GenerationDebug(Base):
     # {facts, output, used, reason, conflicts, usage, model, elapsed_s} — what the
     # placement writer was given, what it wrote, and whether it was used
     placement_writer = Column(JSON, nullable=True)
+    # a "Fix this" render only: {parent_render_id, pieces, room, text} — what
+    # the salesman chose; `prompt` then holds the edit prompt built from it
+    fix = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -866,6 +871,8 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS plan_path TEXT"))
         conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS placement_writer JSONB"))
         conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS placement_writer JSON"))
+        conn.execute(text("ALTER TABLE renders ADD COLUMN IF NOT EXISTS parent_render_id INTEGER"))
+        conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS fix JSON"))
         # Finishing step: per-piece colour/material/fabric and a free-text note.
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS colour_name TEXT"))
         conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS colour_hex TEXT"))
@@ -3395,11 +3402,13 @@ def item_public(item: Item) -> dict:
     }
 
 
-def render_public(render: Render) -> dict:
+def render_public(render: Render, fix_depth: int = 0) -> dict:
     return {
         "id": render.id,
         "image_url": f"/media/{render.image_path}",
         "created_at": render.created_at.isoformat() if render.created_at else None,
+        "parent_render_id": render.parent_render_id,  # set when this is a "Fix this" result
+        "fix_depth": fix_depth,  # 0 normal render, 1 a fix, 2 a fix of a fix, ...
     }
 
 
@@ -3466,6 +3475,7 @@ def attempt_summary(attempt: Attempt) -> dict:
 
 def attempt_detail(attempt: Attempt) -> dict:
     latest_render = attempt.renders[-1] if attempt.renders else None
+    renders_by_id = {r.id: r for r in attempt.renders}
     return {
         "id": attempt.id,
         "room": room_detail(attempt.room),
@@ -3476,10 +3486,11 @@ def attempt_detail(attempt: Attempt) -> dict:
         "is_picked": attempt.is_picked,
         "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
         "items": [item_public(i) for i in attempt.items],
-        "renders": [render_public(r) for r in attempt.renders],
+        "renders": [render_public(r, render_fix_depth(r, renders_by_id)) for r in attempt.renders],
         "latest_render": (
             {"id": latest_render.id, "image_url": f"/media/{latest_render.image_path}"} if latest_render else None
         ),
+        "fix_hint_depth": FIX_HINT_DEPTH,
     }
 
 
@@ -4266,6 +4277,367 @@ async def api_upload_attempt_plan(
 # ---------------------------------------------------------------------------
 # Renders
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# FIX THIS — a small, targeted edit of a finished render. The salesman picks
+# quick fixes per piece ("Push back to the wall"), room fixes ("Remove
+# plant") and/or types one; code turns them into an edit prompt, and the image
+# model edits the render itself (Image 1) with each piece's product photo
+# beside it. The result is a new render of the same attempt, linked to the
+# one it fixed by parent_render_id. Same pattern as the product-photo
+# studio's "change" (run_studio_job): credit hold up front, a background job
+# the client polls, refund on failure.
+# ---------------------------------------------------------------------------
+
+FIX_PIECE_ACTIONS = {
+    "push_back": "Push {piece} back until its back is flat against the wall behind it.",
+    "corner": "Move {piece} into the nearest corner of the room, with its back and one end against the two walls.",
+    "left": "Move {piece} a little to the LEFT, as seen in the picture.",
+    "right": "Move {piece} a little to the RIGHT, as seen in the picture.",
+    "smaller": "Make {piece} a little smaller (shorter), in the same design.",
+    "bigger": "Make {piece} a little bigger (longer), in the same design.",
+}
+FIX_ROOM_ACTIONS = {
+    "coffee_table": "Remove the coffee table; show the rug or floor that was under it.",
+    "plant": "Remove the plant; show the wall and floor that were behind it.",
+    "rug": "Remove the rug; show the floor that was under it.",
+}
+FIX_OPPOSITE_ACTIONS = (("left", "right"), ("smaller", "bigger"))
+FIX_TEXT_MAX = 300
+FIX_REWRITE_TIMEOUT = 30  # the free-text rewrite is a bonus; never hold the fix up for long
+FIX_HINT_DEPTH = 3  # a fix of a fix of a fix: the client suggests Adjust & try again instead
+FIX_KEEP_LINE = (
+    "Keep the room, camera position, angle and framing, all other furniture, the decor, the lighting and the "
+    "colours exactly the same. Keep each sofa's design exactly as in its reference photograph, and its material "
+    "and colour exactly as they are in Image 1."
+)
+FIX_REWRITE_PROMPT = """\
+A showroom salesman wants one more change made to a picture of a room with furniture in it. Rewrite his request as ONE clear instruction sentence for an image editor, in the same style as these examples:
+- Push the L-shaped sofa (Image 2) back until its back is flat against the wall behind it.
+- Move the three-seater sofa (Image 3) a little to the LEFT, as seen in the picture.
+- Remove the coffee table; show the rug or floor that was under it.
+
+The pieces in the picture are:
+{pieces}
+
+When the request is about one of these pieces, name it exactly as listed, with its Image number. Do not add any change he did not ask for. Do not mention the camera. Reply with the sentence only.
+
+His request: {text}
+"""
+
+
+def render_fix_depth(render: Render, by_id: dict[int, Render]) -> int:
+    """How many fixes deep a render is: 0 for a normal render, 1 for a fix of
+    one, and so on. `by_id` holds the attempt's renders (a fix always belongs
+    to the same attempt as the render it fixed)."""
+    depth, seen = 0, set()
+    while render is not None and render.parent_render_id and render.id not in seen:
+        seen.add(render.id)
+        depth += 1
+        render = by_id.get(render.parent_render_id)
+    return depth
+
+
+def fix_pieces(attempt: Attempt) -> tuple[list[str], list[dict]]:
+    """The product photos sent after the render (each distinct photo once, so
+    they are Images 2, 3, ...) and one record per piece the salesman can fix:
+    {item_id, sub_index, description, image_number}. A piece is named so the
+    image model can find it — "the L-shaped sofa (Image 2)" — with its wall
+    added only when two pieces would otherwise read the same."""
+    image_number: dict[str, int] = {}
+    for item in attempt.items:
+        image_number.setdefault(item.photo_path, len(image_number) + 2)
+    pieces = []
+    for item in attempt.items:
+        placed = {entry.get("sub_index"): entry for entry in (item.placement or [])}
+        sub_pieces = compute_sub_pieces(item)
+        for sub_piece in sub_pieces:
+            label = sub_piece["label"] if len(sub_pieces) > 1 else item.type
+            seats = sofa_seat_count(item.category, label)
+            if sub_piece["shape"] in ARM_SHAPES:
+                noun = {"L": "L-shaped sofa", "corner": "corner sofa"}.get(sub_piece["shape"], "curved sofa")
+            elif seats is not None:
+                noun = "single-seat sofa" if seats == 1 else f"{seat_count_word(seats)}-seater sofa"
+            else:
+                noun = item.category.lower()
+            if item.colour_name:
+                noun = f"{item.colour_name.lower()} {noun}"
+            wall = None
+            geometry = (placed.get(sub_piece["sub_index"]) or {}).get("geometry")
+            if geometry:
+                wall, _candidate = resolve_rect_wall(geometry["long"] if sub_piece["shape"] in ARM_SHAPES else geometry)
+            pieces.append(
+                {
+                    "item_id": item.id,
+                    "sub_index": sub_piece["sub_index"],
+                    "noun": noun,
+                    "wall": wall,
+                    "image_number": image_number[item.photo_path],
+                }
+            )
+    nouns = [piece["noun"] for piece in pieces]
+    for piece in pieces:
+        where = f" against the {piece['wall']} wall" if piece["wall"] and nouns.count(piece["noun"]) > 1 else ""
+        piece["description"] = f"the {piece['noun']}{where} (Image {piece['image_number']})"
+    return list(image_number), pieces
+
+
+def build_fix_prompt(pieces: list[dict], fix_lines: list[str], padded: bool = False) -> str:
+    """The edit prompt: what each image is, the list of changes, and what
+    must stay as it is."""
+    manifest = ["Image 1 is the photograph to edit." + (f" {PADDED_ROOM_LINE}" if padded else "")]
+    by_image: dict[int, list[str]] = {}
+    for piece in pieces:
+        by_image.setdefault(piece["image_number"], []).append(piece["noun"])
+    for number, nouns in sorted(by_image.items()):
+        names = " and ".join(dict.fromkeys(f"the {noun}" for noun in nouns))
+        manifest.append(f"Image {number} is the reference photograph for {names}.")
+    return "\n".join(
+        [
+            *manifest,
+            "",
+            "Edit this photograph. Change ONLY the following:",
+            *(f"- {line}" for line in fix_lines),
+            "",
+            FIX_KEEP_LINE,
+        ]
+    ) + "\n"
+
+
+def rewrite_fix_text(text_request: str, pieces: list[dict], model: str) -> dict:
+    """One call to the placement writer's model, turning the salesman's own
+    words into one instruction sentence in the style of the built-in fixes.
+    Synchronous — callers offload it to a thread and fall back to the text
+    as typed if it raises."""
+    listing = "\n".join(f"- {piece['description']}" for piece in pieces) or "- (none listed)"
+    result = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": FIX_REWRITE_PROMPT.format(pieces=listing, text=text_request)}],
+        timeout=FIX_REWRITE_TIMEOUT,
+    )
+    sentence = " ".join((result.choices[0].message.content or "").split()).lstrip("-• ").strip()
+    if not sentence or len(sentence) > 3 * FIX_TEXT_MAX:
+        raise ValueError("unusable rewrite")
+    return {"sentence": sentence, "usage": result.usage.model_dump() if result.usage else None}
+
+
+class FixPieceChoice(BaseModel):
+    item_id: int
+    sub_index: int = 0
+    action: str
+
+
+class FixBody(BaseModel):
+    pieces: list[FixPieceChoice] = []
+    room: list[str] = []
+    text: str | None = None
+
+
+async def run_fix_job(job_id: str, render_id: int, user_id: int, shop_id: int, choices: dict) -> None:
+    db = SessionLocal()
+    attempt_id = None
+    try:
+        parent = db.query(Render).filter(Render.id == render_id).first()
+        attempt = parent.attempt if parent is not None else None
+        parent_path = DATA_ROOT / parent.image_path if parent is not None else None
+        if attempt is None or parent_path is None or not parent_path.is_file():
+            JOBS[job_id] = {"status": "error", "message": "That picture could not be found."}
+            refund_generation_credits(db, shop_id, user_id, attempt.id if attempt else None)
+            return
+        attempt_id = attempt.id
+        product_paths, pieces = fix_pieces(attempt)
+        by_key = {(piece["item_id"], piece["sub_index"]): piece for piece in pieces}
+        fix_lines = [
+            FIX_PIECE_ACTIONS[choice["action"]].format(piece=by_key[(choice["item_id"], choice["sub_index"])]["description"])
+            for choice in choices["pieces"]
+        ]
+        fix_lines += [FIX_ROOM_ACTIONS[action] for action in choices["room"]]
+
+        rewrite = None  # {typed, sentence, rewritten, usage, reason}
+        if choices["text"]:
+            rewrite = {"typed": choices["text"], "sentence": choices["text"], "rewritten": False, "usage": None, "reason": None}
+            try:
+                written = await asyncio.to_thread(rewrite_fix_text, choices["text"], pieces, get_active_vision_model(db))
+                rewrite.update(sentence=written["sentence"], rewritten=True, usage=written["usage"])
+            except Exception as exc:  # the salesman's own words go in as typed
+                logger.exception("fix text rewrite failed render_id=%s", render_id)
+                rewrite["reason"] = f"rewrite failed: {exc.__class__.__name__}"
+            fix_lines.append(rewrite["sentence"])
+
+        image_files: list[tuple[str, bytes, str]] = []
+        debug_images: list[dict] = []
+        render_file, render_debug = load_local_image_with_debug(parent_path, "render to fix", f"/media/{parent.image_path}")
+        # same output size as the render: a render cropped back to a wide photo
+        # is padded the way that photo was, and the result cropped the same way
+        size = derive_size(render_debug["width"], render_debug["height"])
+        with Image.open(parent_path) as parent_image:
+            padded, photo_box = pad_to_output_ratio(parent_image, size)
+            target_size = parent_image.size
+            if photo_box is not None:
+                buffer = io.BytesIO()
+                padded.save(buffer, format="JPEG", quality=92)
+                render_file = (parent_path.name, buffer.getvalue(), "image/jpeg")
+                render_debug = {
+                    **render_debug,
+                    "original_width": render_debug["width"],
+                    "original_height": render_debug["height"],
+                    "width": padded.width,
+                    "height": padded.height,
+                    "size_bytes": len(buffer.getvalue()),
+                    "padded": True,
+                }
+        image_files.append(render_file)
+        debug_images.append(render_debug)
+        for photo_path in product_paths:
+            item_file, item_debug = load_local_image_with_debug(DATA_ROOT / photo_path, "product", f"/media/{photo_path}")
+            image_files.append(item_file)
+            debug_images.append(item_debug)
+
+        prompt = build_fix_prompt(pieces, fix_lines, photo_box is not None)
+        print(f"=== fix prompt for render {render_id} ===\n{prompt}\n=== end prompt ===", flush=True)
+        try:
+            result = await asyncio.to_thread(call_image_api, prompt, image_files, size, IMAGE_QUALITY, f"fix:{render_id}")
+        except GenerationError as exc:
+            JOBS[job_id] = {"status": "error", "message": exc.message}
+            refund_generation_credits(db, shop_id, user_id, attempt.id)
+            return
+
+        filename = f"{uuid.uuid4().hex}.jpg"
+        image = Image.open(io.BytesIO(result["image_bytes"])).convert("RGB")
+        if photo_box is not None:
+            image = crop_to_photo(image, photo_box)
+            if image.size != target_size:
+                image = image.resize(target_size, Image.LANCZOS)  # a pixel of rounding at most
+        image.save(RENDERS_DIR / filename, format="JPEG", quality=92)
+        relative_path = f"renders/{filename}"
+
+        render = Render(attempt_id=attempt.id, image_path=relative_path, parent_render_id=parent.id)
+        db.add(render)
+        db.commit()
+        db.refresh(render)
+        db.add(
+            GenerationDebug(
+                render_id=render.id,
+                prompt=prompt,
+                model=MODEL_NAME,
+                quality=IMAGE_QUALITY,
+                size=size,
+                elapsed_s=result["elapsed_s"],
+                usage=result["usage"],
+                images=debug_images,
+                placement_writer=None,
+                fix={
+                    "parent_render_id": parent.id,
+                    "pieces": [
+                        {**choice, "description": by_key[(choice["item_id"], choice["sub_index"])]["description"]}
+                        for choice in choices["pieces"]
+                    ],
+                    "room": choices["room"],
+                    "text": rewrite,
+                },
+            )
+        )
+        usage = result["usage"]
+        tokens_in = usage.get("input_tokens") if usage else None
+        tokens_out = usage.get("output_tokens") if usage else None
+        usd_cost = compute_usd_cost(usage)
+        note = f"fix of render {parent.id}"
+        if rewrite and rewrite["usage"]:
+            rewrite_in = rewrite["usage"].get("prompt_tokens") or 0
+            rewrite_out = rewrite["usage"].get("completion_tokens") or 0
+            rewrite_cost = writer_usd_cost(rewrite_in, rewrite_out)
+            tokens_in = (tokens_in or 0) + rewrite_in
+            tokens_out = (tokens_out or 0) + rewrite_out
+            usd_cost = round((usd_cost or 0) + rewrite_cost, 6)
+            note += f"; includes text rewrite: {rewrite_in} in / {rewrite_out} out tokens, ${rewrite_cost:.6f}"
+        db.add(
+            CreditLedger(
+                shop_id=shop_id,
+                user_id=user_id,
+                attempt_id=attempt.id,
+                render_id=render.id,
+                delta=0,
+                reason="generation",
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                usd_cost=usd_cost,
+                note=note,
+            )
+        )
+        db.commit()
+        JOBS[job_id] = {"status": "done", "render_id": render.id, "attempt_id": attempt.id, "image_url": f"/media/{relative_path}"}
+    except Exception:
+        logger.exception("fix job failed job_id=%s render_id=%s", job_id, render_id)
+        db.rollback()
+        JOBS[job_id] = {"status": "error", "message": "Something went wrong fixing the picture. Your credits were returned – please try again."}
+        refund_generation_credits(db, shop_id, user_id, attempt_id)
+    finally:
+        db.close()
+
+
+@app.post("/api/renders/{render_id}/fix")
+async def api_fix_render(
+    render_id: int, body: FixBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """Starts a "Fix this" edit of a finished render. Costs the same credits
+    as a normal render; poll /api/jobs/{job_id} like a generation."""
+    render = (
+        db.query(Render)
+        .join(Attempt, Render.attempt_id == Attempt.id)
+        .join(Room, Attempt.room_id == Room.id)
+        .join(Customer, Room.customer_id == Customer.id)
+        .filter(Render.id == render_id, Customer.user_id == user.id)
+        .first()
+    )
+    if render is None or not (DATA_ROOT / render.image_path).is_file():
+        return error_response(404, "render_not_found", "That picture could not be found.")
+    attempt = render.attempt
+    _paths, pieces = fix_pieces(attempt)
+    known = {(piece["item_id"], piece["sub_index"]) for piece in pieces}
+    chosen: dict[tuple[int, int], set[str]] = {}
+    piece_choices = []
+    for choice in body.pieces:
+        key = (choice.item_id, choice.sub_index)
+        if key not in known or choice.action not in FIX_PIECE_ACTIONS:
+            return error_response(400, "invalid_fix", "That fix isn't available for this picture.")
+        if choice.action in chosen.setdefault(key, set()):
+            continue
+        chosen[key].add(choice.action)
+        piece_choices.append({"item_id": choice.item_id, "sub_index": choice.sub_index, "action": choice.action})
+    for actions in chosen.values():
+        if any(a in actions and b in actions for a, b in FIX_OPPOSITE_ACTIONS):
+            return error_response(400, "conflicting_fix", "Please pick only one of left/right and one of smaller/bigger for a piece.")
+    room_choices = list(dict.fromkeys(body.room))
+    if any(action not in FIX_ROOM_ACTIONS for action in room_choices):
+        return error_response(400, "invalid_fix", "That fix isn't available for this picture.")
+    text_request = " ".join((body.text or "").split())
+    if len(text_request) > FIX_TEXT_MAX:
+        return error_response(400, "fix_text_too_long", f"Please keep the note to {FIX_TEXT_MAX} characters or fewer.")
+    if not piece_choices and not room_choices and not text_request:
+        return error_response(400, "nothing_to_fix", "Pick at least one thing to fix, or type what to change.")
+
+    shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
+    if shop is None:
+        return error_response(400, "no_shop", "Your account isn't assigned to a shop.")
+    if shop_balance(db, shop) < CREDITS_PER_GENERATION:
+        return error_response(
+            402,
+            "insufficient_credits",
+            "This month's credit pool is finished. Please contact the showroom owner to top up.",
+        )
+    db.add(
+        CreditLedger(
+            shop_id=shop.id, user_id=user.id, attempt_id=attempt.id, delta=-CREDITS_PER_GENERATION, reason="generation",
+            note=f"fix of render {render.id}",
+        )
+    )
+    db.commit()
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"status": "processing", "stage": "generating"}
+    choices = {"pieces": piece_choices, "room": room_choices, "text": text_request or None}
+    asyncio.create_task(run_fix_job(job_id, render.id, user.id, shop.id, choices))
+    return JSONResponse(content={"job_id": job_id, "attempt_id": attempt.id})
 
 
 @app.post("/api/renders/{render_id}/pick")
@@ -5535,6 +5907,7 @@ def api_debug_generation(
             "usage": debug_row.usage,
             "images": debug_row.images,
             "placement_writer": debug_row.placement_writer,
+            "fix": debug_row.fix,
         }
     )
 

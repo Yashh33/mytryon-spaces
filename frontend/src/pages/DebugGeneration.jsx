@@ -61,8 +61,32 @@ export default function DebugGeneration() {
         ))}
       </div>
 
+      {data.fix ? (
+        <>
+          <div className="section-label" style={{ marginTop: 26 }}>Fix this</div>
+          <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+            An edit of render {data.fix.parent_render_id}. The prompt above is the edit prompt built from these choices; the
+            placement writer is not involved.
+          </div>
+          <pre className="debug-pre">
+            {[
+              ...(data.fix.pieces || []).map((p) => `${p.action}: ${p.description}`),
+              ...(data.fix.room || []).map((r) => `room: ${r}`),
+              ...(data.fix.text
+                ? [
+                    `typed: ${data.fix.text.typed}`,
+                    data.fix.text.rewritten ? `rewritten: ${data.fix.text.sentence}` : `used as typed (${data.fix.text.reason || "no rewrite"})`,
+                  ]
+                : []),
+            ].join("\n") || "—"}
+          </pre>
+        </>
+      ) : null}
+
       <div className="section-label" style={{ marginTop: 26 }}>Placement writer</div>
-      {!writer ? (
+      {data.fix ? (
+        <div className="muted" style={{ fontSize: 13 }}>Not used for a fix.</div>
+      ) : !writer ? (
         <div className="muted" style={{ fontSize: 13 }}>Not recorded for this render (made before the writer existed, or placement was skipped).</div>
       ) : (
         <>

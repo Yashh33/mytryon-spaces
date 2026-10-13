@@ -1564,10 +1564,16 @@ CONFIG_NOTES_PREAMBLE = (
 )
 
 
-def build_config_notes(items: list[Item]) -> str:
+# With feet_in_prompt off the piece header states no lengths, so a note
+# pointing at them points at the piece's placement lines instead.
+HEADER_LENGTH_PHRASES = ("at the lengths stated in the piece header", "at the length stated in the piece header")
+PLACEMENT_PROPORTIONS_PHRASE = "at the proportions stated in its placement"
+
+
+def build_config_notes(items: list[Item], feet: bool = False) -> str:
     """Definitions only for configurations actually present among items —
     e.g. what "3+3" or "L-shape" means — so the prompt never explains
-    configurations that aren't in play."""
+    configurations that aren't in play. `feet` is the feet_in_prompt setting."""
     lines = []
     seen = set()
     has_multi_piece_sofa = False
@@ -1575,10 +1581,14 @@ def build_config_notes(items: list[Item]) -> str:
         key = (item.category, item.type)
         if key in CONFIG_NOTES and key not in seen:
             seen.add(key)
-            lines.append(f"{item.type} — {CONFIG_NOTES[key]}")
+            note = CONFIG_NOTES[key]
+            if not feet:
+                for phrase in HEADER_LENGTH_PHRASES:
+                    note = note.replace(phrase, PLACEMENT_PROPORTIONS_PHRASE)
+            lines.append(f"{item.type} — {note}")
         if item.category == "Sofa" and item.type in MULTI_PIECE_SOFA_TYPES:
             has_multi_piece_sofa = True
-    if has_multi_piece_sofa:
+    if has_multi_piece_sofa and feet:  # no width is stated without feet
         lines.append(MULTI_PIECE_WIDTH_NOTE)
     if not lines:
         return ""
@@ -2323,7 +2333,7 @@ def build_prompt(
     feet_in_prompt setting."""
     pieces = build_pieces_text(items, feet)
     image_manifest = build_image_manifest(items, feet)
-    config_notes = build_config_notes(items)
+    config_notes = build_config_notes(items, feet)
     if placement_text is None:
         placement_text = build_placement_text(items, room.layout_json, ignore_placement, feet)
     room_layout_text = build_room_layout_text(room.layout_json)

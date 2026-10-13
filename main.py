@@ -1625,6 +1625,14 @@ CONFIG_NOTES_PREAMBLE = (
 )
 
 
+# Added to every sofa's note: the image model would rather build the full
+# seat count than keep a gap, and stretches the sofa under a window.
+SOFA_GAPS_NOTE = (
+    "The empty wall and gaps stated in PLACEMENT matter more than the number of seats. If a full-size sofa would "
+    "not fit, use fewer seats — never close or shrink a stated gap, and never let the sofa run under a window that "
+    "PLACEMENT keeps clear."
+)
+
 # With feet_in_prompt off the piece header states no lengths, so a note
 # pointing at them points at the piece's placement lines instead.
 HEADER_LENGTH_PHRASES = ("at the lengths stated in the piece header", "at the length stated in the piece header")
@@ -1646,6 +1654,8 @@ def build_config_notes(items: list[Item], feet: bool = False) -> str:
             if not feet:
                 for phrase in HEADER_LENGTH_PHRASES:
                     note = note.replace(phrase, PLACEMENT_PROPORTIONS_PHRASE)
+            if item.category == "Sofa":
+                note = f"{note} {SOFA_GAPS_NOTE}"
             lines.append(f"{item.type} — {note}")
         if item.category == "Sofa" and item.type in MULTI_PIECE_SOFA_TYPES:
             has_multi_piece_sofa = True

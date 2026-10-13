@@ -13,6 +13,7 @@ import { RoomPhotoReference } from "../components/RoomPhotoReference.jsx";
 import {
   ADDABLE_FEATURE_TYPES,
   ARM_SHAPES,
+  OUTSIDE_PHOTO_THRESHOLD,
   FAR_NEAR_POSITIONS,
   SIDE_POSITIONS,
   WALL_KEY,
@@ -22,6 +23,7 @@ import {
   defaultPlacement,
   flipPlacement,
   itemsToBlocks,
+  outsidePhoto,
   resizePlacement,
   roomFeet,
   rotatePlacement,
@@ -378,10 +380,15 @@ export default function Place() {
   if (!attempt && !error) return <div className="screen"><TopBar backTo={adjust.backTo || `/attempt/${id}/furniture`} /><Loading /></div>;
   if (error) return <div className="screen"><TopBar backTo={adjust.backTo || `/attempt/${id}/furniture`} /><ErrorBlock message={error} onRetry={load} /></div>;
 
+  // A piece standing mostly on floor the photo doesn't show gets a soft
+  // warning (never a block on Next): the picture can only show part of it.
+  const isOutsidePhoto = (b) =>
+    Boolean(b.placement) && outsidePhoto(b.shape, b.placement, room.layout_json).fraction > OUTSIDE_PHOTO_THRESHOLD;
+
   const placementCardProps = {
     room,
     blocks,
-    selectedBlock,
+    selectedBlock: selectedBlock ? { ...selectedBlock, outsidePhoto: isOutsidePhoto(selectedBlock) } : null,
     selectedKey,
     onSelectBlock: handleSelectBlock,
     onMoveBlock: handleMoveBlock,
@@ -407,7 +414,10 @@ export default function Place() {
   const itemById = new Map(attempt.items.map((it) => [it.id, it]));
   const listBlocks = blocks.map((b) => {
     const item = itemById.get(b.itemId) || {};
-    return { ...b, photo_url: item.photo_url, category: item.category ?? b.category, type: item.type ?? b.type, width_ft: item.width_ft };
+    return {
+      ...b, photo_url: item.photo_url, category: item.category ?? b.category, type: item.type ?? b.type, width_ft: item.width_ft,
+      outsidePhoto: isOutsidePhoto(b),
+    };
   });
   const selectedListBlock = listBlocks.find((b) => b.key === selectedKey) || null;
   const placedCount = blocks.filter((b) => b.placement).length;
@@ -479,6 +489,7 @@ export default function Place() {
                 <span className="piece-row-text">
                   <span className="piece-row-name">{pieceName(b)}</span>
                   <span className="piece-row-size">{formatFeet(b.widthFt ?? b.width_ft)} ft</span>
+                  {b.outsidePhoto ? <span className="piece-row-warn">{OUTSIDE_PHOTO_NOTE}</span> : null}
                 </span>
                 {b.placement ? (
                   <span className="piece-row-state placed">Placed ✓</span>
@@ -534,6 +545,8 @@ export default function Place() {
     </div>
   );
 }
+
+const OUTSIDE_PHOTO_NOTE = "Part of this piece is outside the photo — move it into the white area to see it fully.";
 
 function formatFeet(ft) {
   if (ft == null) return "–";
@@ -598,6 +611,7 @@ function SelectedPieceCard({ block, onRotate, onFlip, onRequestRemove }) {
           Remove
         </button>
       </div>
+      {block.outsidePhoto ? <div className="outside-photo-note">{OUTSIDE_PHOTO_NOTE}</div> : null}
     </div>
   );
 }

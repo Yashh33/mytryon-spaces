@@ -1999,82 +1999,6 @@ def _half_foot(value: float) -> float:
     return round(value * 2) / 2
 
 
-# The floor the photo does not show. The vision step reports how far along
-# each side wall the photo can still see (left/right_wall_visible_to, 0 = far
-# wall, 1 = near wall); the floor outside the two lines from the camera to
-# those points is beside the camera, out of frame. Mirrors unseenFloor(),
-# outsidePhoto() and OUTSIDE_PHOTO_THRESHOLD in frontend/src/placement.js,
-# including where the plan draws the camera, so a piece the plan warns about
-# is exactly a piece the prompt words differently.
-PLAN_BASE_SIZE_PX = 400
-CAMERA_OFFSET_PX = 34
-OUTSIDE_PHOTO_THRESHOLD = 0.25
-
-
-def wall_visible_to(layout_json: dict | None, side: str) -> float | None:
-    value = (layout_json or {}).get(f"{side}_wall_visible_to")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 <= value <= 1):
-        return None
-    return float(value)
-
-
-def unseen_floor(layout_json: dict | None) -> dict[str, list[tuple[float, float]] | None]:
-    """Per side, the triangle of floor outside the camera's view in normalised
-    room coordinates, or None when that wall is fully in view or unread."""
-    aw, ah = ROOM_ASPECT.get((layout_json or {}).get("depth_vs_width"), (1, 1))
-    room_h_px = ah * PLAN_BASE_SIZE_PX / max(aw, ah)
-    position = str((layout_json or {}).get("camera_position") or "").lower()
-    cam_x = 0.15 if "left" in position else 0.85 if "right" in position else 0.5
-    cam_y = 1 + CAMERA_OFFSET_PX / room_h_px
-
-    def triangle(side: str, wall_x: float):
-        v = wall_visible_to(layout_json, side)
-        if v is None or v >= 0.999:
-            return None
-        t = (1 - cam_y) / (v - cam_y)  # where the camera->wall line crosses the near wall
-        return [(wall_x, v), (wall_x, 1.0), (cam_x + (wall_x - cam_x) * t, 1.0)]
-
-    return {"left": triangle("left", 0.0), "right": triangle("right", 1.0)}
-
-
-def _clipped_area(polygon: list[tuple[float, float]], rect: dict) -> float:
-    """Area of a convex polygon clipped to an axis-aligned rect {x, y, w, h}."""
-    x0, y0, x1, y1 = rect["x"], rect["y"], rect["x"] + rect["w"], rect["y"] + rect["h"]
-    edges = (
-        (lambda p: p[0] >= x0, lambda a, b: (x0, a[1] + (b[1] - a[1]) * (x0 - a[0]) / (b[0] - a[0]))),
-        (lambda p: p[0] <= x1, lambda a, b: (x1, a[1] + (b[1] - a[1]) * (x1 - a[0]) / (b[0] - a[0]))),
-        (lambda p: p[1] >= y0, lambda a, b: (a[0] + (b[0] - a[0]) * (y0 - a[1]) / (b[1] - a[1]), y0)),
-        (lambda p: p[1] <= y1, lambda a, b: (a[0] + (b[0] - a[0]) * (y1 - a[1]) / (b[1] - a[1]), y1)),
-    )
-    points = list(polygon)
-    for inside, cross in edges:
-        clipped = []
-        for i, cur in enumerate(points):
-            prev = points[i - 1]
-            if inside(cur):
-                if not inside(prev):
-                    clipped.append(cross(prev, cur))
-                clipped.append(cur)
-            elif inside(prev):
-                clipped.append(cross(prev, cur))
-        points = clipped
-    twice = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(points, points[1:] + points[:1]))
-    return abs(twice) / 2
-
-
-def outside_photo(shape: str, geometry: dict, layout_json: dict | None) -> tuple[float, str | None]:
-    """(fraction of the block's area on floor the photo doesn't show, the
-    side of the frame it falls off: "left" | "right" | None)."""
-    rects = [geometry["long"], geometry["short"]] if shape in ARM_SHAPES else [geometry]
-    total = sum(r["w"] * r["h"] for r in rects)
-    if not total:
-        return 0.0, None
-    unseen = unseen_floor(layout_json)
-    on = {side: sum(_clipped_area(unseen[side], r) for r in rects) if unseen[side] else 0.0 for side in ("left", "right")}
-    covered = on["left"] + on["right"]
-    return covered / total, (("left" if on["left"] >= on["right"] else "right") if covered > 0 else None)
-
-
 def arm_shape_header(shape: str, geometry: dict, width_ft: float, layout_json: dict | None) -> str:
     """Header wording for a multi-arm sofa that states its SHAPE, not just one
     length: both arms for an L or corner sofa (the long arm is the item's
@@ -2190,14 +2114,6 @@ def build_placement_text(items: list[Item], layout_json: dict | None, ignore_pla
             combined = " ".join(extra_parts)
             combined = combined[0].upper() + combined[1:]
             lines.append(f"{counter}. {combined}")
-            counter += 1
-        outside_fraction, outside_side = outside_photo(rec["shape"], rec["geometry"], layout_json)
-        if outside_fraction > OUTSIDE_PHOTO_THRESHOLD:
-            lines.append(
-                f"{counter}. Part of this piece lies outside the photograph's view, beside the camera. Show only the "
-                f"part inside the frame, cut off by the {outside_side} edge. Do not move it toward the far wall or a "
-                "corner to make it fit, and do not change the camera framing."
-            )
             counter += 1
         lines.append("")
 

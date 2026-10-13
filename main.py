@@ -4309,8 +4309,9 @@ FIX_REWRITE_TIMEOUT = 30  # the free-text rewrite is a bonus; never hold the fix
 FIX_HINT_DEPTH = 3  # a fix of a fix of a fix: the client suggests Adjust & try again instead
 FIX_KEEP_LINE = (
     "Keep the room, camera position, angle and framing, all other furniture, the decor, the lighting and the "
-    "colours exactly the same. Keep each sofa's design exactly as in its reference photograph, and its material "
-    "and colour exactly as they are in Image 1."
+    "colours exactly the same. Each sofa keeps exactly the shape, size, seat count and material it has in Image 1 "
+    "— only what is listed above changes. The reference photographs are only for small design details such as "
+    "arms, legs and stitching; never change a sofa's shape to match its photograph."
 )
 FIX_REWRITE_PROMPT = """\
 A showroom salesman wants one more change made to a picture of a room with furniture in it. Rewrite his request as ONE clear instruction sentence for an image editor, in the same style as these examples:

@@ -111,6 +111,17 @@ Keep everything else exactly the same. Preserve the walls, doorways,
 windows, floor, ceiling and room proportions precisely as they appear.
 Change nothing except adding the furniture.
 
+Never change the room to make furniture fit: never widen, lengthen or
+reshape any wall, never remove wall panels or features. The room in the
+result has exactly the size and shape of Image 1.
+
+A sofa whose back is against a wall stays flat against that wall and
+parallel to it — never pulled forward or turned at an angle. If the sofas
+on one wall do not fit at full size, make each a little shorter (narrower
+seats for straight sofas, fewer seats for L, corner or curved), keeping
+all of them flat against the wall, side by side, in the order PLACEMENT
+gives.
+
 Remove any people from the photograph.
 
 {{PIECE_SOURCES}} For a straight sofa, the NUMBER of
@@ -173,6 +184,7 @@ SUPERSEDED_GENERATION_PROMPT_HASHES = {
     "8a885a7ea59e302d458902bf8c1a515b56040919356a8e44c2773b4adb5b92c0",  # before seat counting was limited to straight sofas
     "285a3a6a8d0755d6dd3dd8836fb90856cb2cee99b5ad12f854d341819c75c176",  # before the fabric section moved under the image list
     "1a212a95d2f1caf48eb4a00e99aed0121067696584908cf52cb94ca7ec97d78b",  # before {{PIECE_SOURCES}}
+    "36d7c4b73686f438e67d29746d52dcd93a95e470bbbcc26c310f116941b84ece",  # before "never change the room to make furniture fit" and "flat against its wall"
 }
 # "true": lengths in feet are written into the prompts, as they always were.
 # "false" (the default): no feet reach either model — the floor plan is not to

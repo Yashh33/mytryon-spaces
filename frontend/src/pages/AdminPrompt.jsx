@@ -26,6 +26,7 @@ export default function AdminPrompt() {
   const [error, setError] = useState(null);
   const [prompt, setPrompt] = useState("");
   const [feetInPrompt, setFeetInPrompt] = useState(false);
+  const [padRoomPhoto, setPadRoomPhoto] = useState(true);
   const [writerEnabled, setWriterEnabled] = useState(true);
   const [writerPrompt, setWriterPrompt] = useState("");
   const [studioPrompt, setStudioPrompt] = useState("");
@@ -46,6 +47,7 @@ export default function AdminPrompt() {
     setData(res);
     setPrompt(res.prompt);
     setFeetInPrompt(Boolean(res.feet_in_prompt));
+    setPadRoomPhoto(res.pad_room_photo !== false);
     setWriterEnabled(res.placement_writer_enabled);
     setWriterPrompt(res.placement_writer_prompt);
     setStudioPrompt(res.studio_prompt);
@@ -80,6 +82,7 @@ export default function AdminPrompt() {
       const json = {
         prompt,
         feet_in_prompt: feetInPrompt,
+        pad_room_photo: padRoomPhoto,
         placement_writer_enabled: writerEnabled,
         placement_writer_prompt: writerPrompt,
         studio_prompt: studioPrompt,
@@ -137,6 +140,17 @@ export default function AdminPrompt() {
       <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, marginBottom: 12, minHeight: 44 }}>
         <input type="checkbox" checked={feetInPrompt} onChange={(e) => setFeetInPrompt(e.target.checked)} style={{ width: 20, height: 20 }} />
         Send lengths in feet to the models
+      </label>
+
+      <div className="section-label" style={{ marginTop: 26 }}>Room photo shape</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        The image model only makes 3:2, 2:3 and square pictures. When this is on, a room photo of another shape (16:9, 4:3…) is
+        sent with plain grey borders so the model does not re-frame it, and the picture is cropped back to the photo&apos;s own
+        framing. When it is off, the photo is sent as it is.
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, marginBottom: 12, minHeight: 44 }}>
+        <input type="checkbox" checked={padRoomPhoto} onChange={(e) => setPadRoomPhoto(e.target.checked)} style={{ width: 20, height: 20 }} />
+        Pad the room photo to the picture&apos;s shape
       </label>
 
       <div className="section-label" style={{ marginTop: 26 }}>Placement writer</div>

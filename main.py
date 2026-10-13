@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -177,6 +178,10 @@ SUPERSEDED_GENERATION_PROMPT_HASHES = {
 # "false" (the default): no feet reach either model — the floor plan is not to
 # scale, so sizes are described as shares of a wall or of the room instead.
 FEET_IN_PROMPT_KEY = "feet_in_prompt"
+# "true" (the default): a room photo whose shape differs from the output size
+# is padded with grey borders before it is sent, and the render is cropped
+# back to the photo's own framing. "false": the photo is sent as it is.
+PAD_ROOM_PHOTO_KEY = "pad_room_photo"
 PROMPT_PLACEHOLDERS = [
     {
         "token": "{{ROOM_TYPE}}",
@@ -938,6 +943,8 @@ async def lifespan(app: FastAPI):
             logger.info("seeded default vision model")
         if db.query(Setting).filter(Setting.key == FEET_IN_PROMPT_KEY).first() is None:
             db.add(Setting(key=FEET_IN_PROMPT_KEY, value="false"))
+        if db.query(Setting).filter(Setting.key == PAD_ROOM_PHOTO_KEY).first() is None:
+            db.add(Setting(key=PAD_ROOM_PHOTO_KEY, value="true"))
         # an unedited saved generation prompt follows the built-in default as it changes
         saved_generation_prompt = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
         if (
@@ -1226,6 +1233,51 @@ def derive_size(width: int, height: int) -> str:
     return "1024x1024"
 
 
+# The image model only returns these sizes. A photo of another shape (16:9,
+# 4:3, ...) sent as it is comes back re-framed to fit. So it is padded to the
+# output's shape with plain grey first, and the render is cropped back to
+# where the photo was.
+OUTPUT_SIZES = ((1536, 1024), (1024, 1536), (1024, 1024))
+PAD_COLOUR = (128, 128, 128)
+PAD_RATIO_TOLERANCE = 0.02  # a photo this close to the output's shape is sent as it is
+PADDED_ROOM_LINE = "The grey border is not part of the room — leave it unchanged."
+
+
+def nearest_output_size(width: int, height: int) -> str:
+    """The output size closest in shape to the photo, so the padding is as
+    thin as it can be (a nearly square photo gets the square output)."""
+    ratio = math.log(width / height)
+    w, h = min(OUTPUT_SIZES, key=lambda s: abs(math.log(s[0] / s[1]) - ratio))
+    return f"{w}x{h}"
+
+
+def pad_to_output_ratio(image: Image.Image, size: str) -> tuple[Image.Image, tuple[float, float, float, float] | None]:
+    """Centres the photo on a grey canvas of the output's shape. Returns the
+    padded image and the box (left, top, right, bottom, as fractions of the
+    canvas) the photo occupies — or the photo itself and None when its shape
+    already matches."""
+    out_w, out_h = (int(n) for n in size.split("x"))
+    width, height = image.size
+    target = out_w / out_h
+    if abs(width / height - target) / target <= PAD_RATIO_TOLERANCE:
+        return image, None
+    if width / height > target:  # wider than the output: bars above and below
+        canvas_w, canvas_h = width, round(width / target)
+    else:  # narrower: bars left and right
+        canvas_w, canvas_h = round(height * target), height
+    left, top = (canvas_w - width) // 2, (canvas_h - height) // 2
+    canvas = Image.new("RGB", (canvas_w, canvas_h), PAD_COLOUR)
+    canvas.paste(image.convert("RGB"), (left, top))
+    return canvas, (left / canvas_w, top / canvas_h, (left + width) / canvas_w, (top + height) / canvas_h)
+
+
+def crop_to_photo(image: Image.Image, box: tuple[float, float, float, float]) -> Image.Image:
+    """Cuts a render of a padded photo back to the photo's own framing."""
+    width, height = image.size
+    left, top, right, bottom = box
+    return image.crop((round(left * width), round(top * height), round(right * width), round(bottom * height)))
+
+
 def extract_image_from_result(result) -> bytes | None:
     if not result.data:
         return None
@@ -1268,6 +1320,10 @@ def get_active_prompt(db: Session) -> str:
 
 def feet_in_prompt(db: Session) -> bool:
     return get_setting(db, FEET_IN_PROMPT_KEY, "false").strip().lower() == "true"
+
+
+def pad_room_photo_enabled(db: Session) -> bool:
+    return get_setting(db, PAD_ROOM_PHOTO_KEY, "true").strip().lower() == "true"
 
 
 def get_active_vision_prompt(db: Session) -> str:
@@ -1462,7 +1518,7 @@ def compute_sub_pieces(item: Item) -> list[dict]:
     return [{"sub_index": 0, "label": item.type, "shape": item.shape, "width_ft": item.width_ft}]
 
 
-def build_image_manifest(items: list[Item], feet: bool = False) -> str:
+def build_image_manifest(items: list[Item], feet: bool = False, room_padded: bool = False) -> str:
     """One line per image, in the exact order sent to the model — the whole
     point being that the numbering here always matches reality: the clean
     room photo, then each product photo in the order pieces were added.
@@ -1470,7 +1526,7 @@ def build_image_manifest(items: list[Item], feet: bool = False) -> str:
     only the seat count and overall width follow the stated configuration —
     otherwise the model copies the photographed seat count instead of
     building what was actually asked for."""
-    lines = ["Image 1 is a room."]
+    lines = ["Image 1 is a room." + (f" {PADDED_ROOM_LINE}" if room_padded else "")]
     n = 2
     first_image_for_photo: dict[str, int] = {}
     for item in items:
@@ -2439,12 +2495,14 @@ def build_prompt(
     placement_text: str | None = None,
     note: str | None = None,
     feet: bool = False,
+    room_padded: bool = False,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
     replaces the generated facts in {{PLACEMENT}}. `feet` is the
-    feet_in_prompt setting."""
+    feet_in_prompt setting. `room_padded`: the room photo is being sent with
+    grey borders (see pad_to_output_ratio)."""
     pieces = build_pieces_text(items, feet)
-    image_manifest = build_image_manifest(items, feet)
+    image_manifest = build_image_manifest(items, feet, room_padded)
     config_notes = build_config_notes(items, feet)
     # with the writer's text, ROOM LAYOUT keeps only the shape and camera lines
     room_layout_text = build_room_layout_text(room.layout_json, features=placement_text is None)
@@ -3072,22 +3130,40 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
             writer_placement, writer_info = await resolve_writer_placement(attempt, db)
         JOBS[job_id] = {"status": "processing", "stage": "generating"}
-        prompt = build_prompt(
-            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
-            attempt.note, feet_in_prompt(db),
-        )
-        print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
-
-        room_path = DATA_ROOT / room.photo_path
-        with Image.open(room_path) as room_image:
-            size = derive_size(*room_image.size)
 
         image_files: list[tuple[str, bytes, str]] = []
         debug_images: list[dict] = []
 
+        room_path = DATA_ROOT / room.photo_path
         room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
+        photo_box = None  # where the photo sits in a padded Image 1; None when it is sent as it is
+        if pad_room_photo_enabled(db):
+            with Image.open(room_path) as room_image:
+                size = nearest_output_size(*room_image.size)
+                padded, photo_box = pad_to_output_ratio(room_image, size)
+                if photo_box is not None:
+                    buffer = io.BytesIO()
+                    padded.save(buffer, format="JPEG", quality=92)
+                    room_file = (room_path.name, buffer.getvalue(), "image/jpeg")
+                    room_debug = {
+                        **room_debug,
+                        "original_width": room_debug["width"],
+                        "original_height": room_debug["height"],
+                        "width": padded.width,
+                        "height": padded.height,
+                        "size_bytes": len(buffer.getvalue()),
+                        "padded": True,
+                    }
+        else:
+            size = derive_size(room_debug["width"], room_debug["height"])
         image_files.append(room_file)
         debug_images.append(room_debug)
+
+        prompt = build_prompt(
+            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
+            attempt.note, feet_in_prompt(db), photo_box is not None,
+        )
+        print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
 
         for item in attempt.items:
             item_file, item_debug = load_local_image_with_debug(
@@ -3123,6 +3199,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
 
         filename = f"{uuid.uuid4().hex}.jpg"
         image = Image.open(io.BytesIO(result["image_bytes"])).convert("RGB")
+        if photo_box is not None:
+            image = crop_to_photo(image, photo_box)  # back to the photo's own framing, borders gone
         image.save(RENDERS_DIR / filename, format="JPEG", quality=92)
         relative_path = f"renders/{filename}"
 
@@ -5256,6 +5334,7 @@ PROMPT_PAGE_KEYS = [
     VISION_PROMPT_SETTING_KEY,
     VISION_MODEL_SETTING_KEY,
     FEET_IN_PROMPT_KEY,
+    PAD_ROOM_PHOTO_KEY,
     PLACEMENT_WRITER_ENABLED_KEY,
     PLACEMENT_WRITER_PROMPT_KEY,
     STUDIO_PROMPT_KEY,
@@ -5283,6 +5362,7 @@ def prompt_setting_response(db: Session) -> dict:
         "vision_model": value(VISION_MODEL_SETTING_KEY, DEFAULT_VISION_MODEL),
         "default_vision_model": DEFAULT_VISION_MODEL,
         "feet_in_prompt": value(FEET_IN_PROMPT_KEY, "false").strip().lower() == "true",
+        "pad_room_photo": value(PAD_ROOM_PHOTO_KEY, "true").strip().lower() == "true",
         "placement_writer_enabled": value(PLACEMENT_WRITER_ENABLED_KEY, "true").strip().lower() == "true",
         "placement_writer_prompt": value(PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT),
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
@@ -5313,6 +5393,7 @@ class PromptBody(BaseModel):
     vision_prompt: str | None = None
     vision_model: str | None = None
     feet_in_prompt: bool | None = None
+    pad_room_photo: bool | None = None
     placement_writer_enabled: bool | None = None
     placement_writer_prompt: str | None = None
     studio_prompt: str | None = None
@@ -5380,6 +5461,8 @@ def api_admin_save_prompt(
         set_setting(db, VISION_MODEL_SETTING_KEY, body.vision_model.strip())
     if body.feet_in_prompt is not None:
         set_setting(db, FEET_IN_PROMPT_KEY, "true" if body.feet_in_prompt else "false")
+    if body.pad_room_photo is not None:
+        set_setting(db, PAD_ROOM_PHOTO_KEY, "true" if body.pad_room_photo else "false")
     if body.placement_writer_enabled is not None:
         set_setting(db, PLACEMENT_WRITER_ENABLED_KEY, "true" if body.placement_writer_enabled else "false")
     if body.placement_writer_prompt is not None:

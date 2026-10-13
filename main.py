@@ -122,7 +122,9 @@ one piece's material or colour to another.
 
 Clear away people, tools, ladders, cement bags, rubble and loose building
 material, and finish all bare surfaces — plaster becomes painted wall,
-screed becomes finished flooring.
+screed becomes finished flooring. Finish off exposed wires, conduit ends
+and unfinished electrical points as well: the wires are gone, with a neat
+ceiling light or plain finished ceiling in their place.
 
 Surfaces are often covered with newspaper, plastic sheeting, masking tape
 or protective film during painting and finishing work. Remove the
@@ -158,6 +160,12 @@ coffee table are permitted, nothing else. The room must otherwise contain
 only the furniture pieces listed below."""
 
 PROMPT_SETTING_KEY = "generation_prompt"
+# sha256 of earlier built-in generation prompts. A saved prompt that still
+# matches one of these was never edited by hand, so it is moved to the
+# current default at startup; an edited prompt is left alone.
+SUPERSEDED_GENERATION_PROMPT_HASHES = {
+    "32efa470ac3f03ac4fbbdb790a3680d3ab6cf600faa6b58aef28180571ec5110",  # before exposed wires joined the cleanup paragraph
+}
 PROMPT_PLACEHOLDERS = [
     {
         "token": "{{ROOM_TYPE}}",
@@ -909,6 +917,15 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first() is None:
             db.add(Setting(key=VISION_MODEL_SETTING_KEY, value=DEFAULT_VISION_MODEL))
             logger.info("seeded default vision model")
+        # an unedited saved generation prompt follows the built-in default as it changes
+        saved_generation_prompt = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
+        if (
+            saved_generation_prompt is not None
+            and hashlib.sha256(saved_generation_prompt.value.encode("utf-8")).hexdigest()
+            in SUPERSEDED_GENERATION_PROMPT_HASHES
+        ):
+            saved_generation_prompt.value = DEFAULT_GENERATION_PROMPT
+            logger.info("updated the saved generation prompt to the current default")
         # an unedited saved writer prompt follows the built-in default as it changes
         saved_writer_prompt = db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first()
         if (

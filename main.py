@@ -1265,7 +1265,44 @@ def get_active_vision_model(db: Session) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def run_vision_job(room_id: int) -> None:
+LAYOUT_WALL_KEYS = ("far_wall", "left_wall", "right_wall", "near_wall")
+
+
+def merge_reread_layout(old: dict | None, new: dict) -> dict:
+    """A fresh vision reading of a room that already has a layout, with the
+    salesman's own work kept on top of it:
+    - features he added (they carry `blocks_furniture`, which the vision
+      model never sets) and obstructions he placed (they carry x/y) are
+      re-attached;
+    - features and obstructions he removed (recorded by the plan screen in
+      `removed_features` as {wall, type}) are left out again;
+    - `depth_vs_width` is kept, because every furniture block is placed in
+      proportion to the plan's shape and a changed shape would distort them."""
+    old = old or {}
+    merged = dict(new)
+    removed = old.get("removed_features") or []
+    removed_on = {(r.get("wall"), r.get("type")) for r in removed if isinstance(r, dict)}
+    for key in LAYOUT_WALL_KEYS:
+        wall = key.removesuffix("_wall")
+        new_wall = dict(merged.get(key) or {})
+        fresh = [f for f in (new_wall.get("features") or []) if (wall, f.get("type")) not in removed_on]
+        by_hand = [f for f in ((old.get(key) or {}).get("features") or []) if "blocks_furniture" in f]
+        new_wall["features"] = fresh + by_hand
+        merged[key] = new_wall
+    fresh_obstructions = [o for o in (merged.get("obstructions") or []) if (None, o.get("type")) not in removed_on]
+    placed_by_hand = [o for o in (old.get("obstructions") or []) if o.get("x") is not None and o.get("y") is not None]
+    merged["obstructions"] = fresh_obstructions + placed_by_hand
+    if removed:
+        merged["removed_features"] = removed
+    if old.get("depth_vs_width"):
+        merged["depth_vs_width"] = old["depth_vs_width"]
+    return merged
+
+
+async def run_vision_job(room_id: int, reread: bool = False) -> None:
+    """Reads the room photo into layout_json. With `reread`, the room already
+    has a layout the salesman may have worked on: the new reading is merged
+    over it (see merge_reread_layout) and a failure leaves it as it was."""
     db = SessionLocal()
     try:
         room = db.query(Room).filter(Room.id == room_id).first()
@@ -1301,11 +1338,13 @@ async def run_vision_job(room_id: int) -> None:
             layout = json.loads(result.choices[0].message.content)
         except Exception:
             logger.exception("vision layout job failed room_id=%s", room_id)
-            room.layout_status = "failed"
+            db.refresh(room)
+            room.layout_status = "ready" if reread and room.layout_json else "failed"
             db.commit()
             return
 
-        room.layout_json = layout
+        db.refresh(room)  # pick up anything saved while the model was reading
+        room.layout_json = merge_reread_layout(room.layout_json, layout) if reread and room.layout_json else layout
         room.layout_status = "ready"
         db.commit()
     except Exception:
@@ -3488,6 +3527,22 @@ async def api_update_room_photo(
     db.commit()
     db.refresh(room)
     asyncio.create_task(run_vision_job(room.id))
+    return JSONResponse(content={"room": room_detail(room)})
+
+
+@app.post("/api/rooms/{room_id}/reread")
+async def api_reread_room(room_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    """Runs the vision step again on the room's existing photo — e.g. so a
+    room read before a new field existed gets it — keeping the features the
+    salesman added or removed by hand. The plan shows "Reading the room…"
+    until it is back; the client polls the room as it does after an upload."""
+    room = get_owned_room(room_id, user, db)
+    if not (DATA_ROOT / room.photo_path).is_file():
+        return error_response(404, "photo_missing", "This room's photo could not be found. Please replace the room photo.")
+    room.layout_status = "pending"
+    db.commit()
+    db.refresh(room)
+    asyncio.create_task(run_vision_job(room.id, reread=True))
     return JSONResponse(content={"room": room_detail(room)})
 
 

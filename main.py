@@ -1396,10 +1396,10 @@ def build_image_manifest(items: list[Item]) -> str:
     """One line per image, in the exact order sent to the model — the whole
     point being that the numbering here always matches reality: the clean
     room photo, then each product photo in the order pieces were added.
-    Product lines describe the photo as a design reference only (material,
-    colour, texture, styling), never as already being in the requested
-    configuration — otherwise the model copies the photographed seat count
-    instead of building what was actually asked for."""
+    Product lines make the photo the reference for the piece's exact design;
+    only the seat count and overall width follow the stated configuration —
+    otherwise the model copies the photographed seat count instead of
+    building what was actually asked for."""
     lines = ["Image 1 is a room."]
     n = 2
     first_image_for_photo: dict[str, int] = {}
@@ -1414,9 +1414,10 @@ def build_image_manifest(items: list[Item]) -> str:
             continue
         first_image_for_photo[item.photo_path] = n
         lines.append(
-            f"Image {n} is a showroom photograph of a {item.category.lower()}. It is a design "
-            "reference for material, colour, texture and styling only — the requested "
-            "configuration and size are stated below and may differ from what this photograph shows."
+            f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
+            "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
+            "legs, stitching, material, colour and texture. Only the number of seats and the overall "
+            "width follow the configuration stated below; everything else must match this photograph."
         )
         n += 1
     numbers = fabric_image_numbers(items)
@@ -1454,7 +1455,7 @@ def fabric_image_numbers(items: list[Item]) -> dict[int, int]:
 
 
 def build_piece_finish_text(items: list[Item]) -> str:
-    """The PIECE FINISHES section — empty when no piece has a colour,
+    """The TRY-ON section — empty when no piece has a colour,
     material or fabric set."""
     numbers = fabric_image_numbers(items)
     lines = []
@@ -1467,38 +1468,40 @@ def build_piece_finish_text(items: list[Item]) -> str:
         parts = []
         if fabric is not None:
             parts.append(
-                f"upholster it using the fabric in Image {fabric} – the same weave, texture and pattern, "
-                "applied evenly to all upholstered parts"
+                f"the fabric in Image {fabric} (same weave, texture and pattern, applied evenly to "
+                "every upholstered surface)"
             )
         elif material is not None:
-            parts.append(f"upholster it in {MATERIAL_CHOICES[material]}")
+            parts.append(f"{MATERIAL_CHOICES[material]} upholstery")
         if colour is not None:
-            colour_part = f"colour {item.colour_name or colour} ({colour})"
+            colour_part = f"the colour {item.colour_name or colour} ({colour})"
             if fabric is None and material is None:
-                colour_part += ", keeping the material and texture of its reference photograph"
+                colour_part += " in the same material and texture as its photograph"
             parts.append(colour_part)
         elif fabric is not None:
-            parts.append("in the colour of that fabric")
-        lines.append(f"- Piece {k} ({item.category}, {item.type}): {'; '.join(parts)}.")
+            parts.append("the colour of that fabric")
+        lines.append(f"- Piece {k} ({item.category}, {item.type}): try on {' in '.join(parts)}.")
     if not lines:
         return ""
     return "\n".join(
         [
-            "PIECE FINISHES – these change only the upholstery of the pieces named here. Shape, size, "
-            "number of seats and cushions, arms, legs and stitching still come from each piece's own "
-            "reference photograph and configuration.",
+            "TRY-ON – treat each piece below as the exact sofa from its reference photograph being "
+            "re-upholstered, like trying a fabric swatch on it in the showroom. Only the upholstery "
+            "cover changes. The frame, silhouette, curves, proportions, number of seats and cushions, "
+            "arms, legs, stitching lines and loose pillows stay identical to the reference photograph.",
             *lines,
-            "Lighting must not change these colours. Pieces not listed keep the material and colour of "
-            "their own reference photograph.",
+            "The room look and lighting must not change these colours. Pieces not listed keep exactly "
+            "the material and colour of their own reference photograph.",
         ]
     )
 
 
 CONFIG_NOTES_PREAMBLE = (
-    "Build each piece in the configuration stated below, taking only the "
-    "design language from its reference photograph. Where the photograph "
-    "shows a different number of seats, sections or pieces, follow the "
-    "written configuration and extend or rebuild the design accordingly."
+    "Build each piece in the configuration stated below. Keep the exact "
+    "design of its reference photograph – silhouette, curves, arm and back "
+    "shape, cushions and legs. Where the photograph shows a different number "
+    "of seats or sections, add or remove matching seats in that same design; "
+    "never replace it with a different or generic sofa."
 )
 
 

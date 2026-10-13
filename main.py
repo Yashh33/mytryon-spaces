@@ -166,6 +166,10 @@ PROMPT_SETTING_KEY = "generation_prompt"
 SUPERSEDED_GENERATION_PROMPT_HASHES = {
     "32efa470ac3f03ac4fbbdb790a3680d3ab6cf600faa6b58aef28180571ec5110",  # before exposed wires joined the cleanup paragraph
 }
+# "true": lengths in feet are written into the prompts, as they always were.
+# "false" (the default): no feet reach either model — the floor plan is not to
+# scale, so sizes are described as shares of a wall or of the room instead.
+FEET_IN_PROMPT_KEY = "feet_in_prompt"
 PROMPT_PLACEHOLDERS = [
     {
         "token": "{{ROOM_TYPE}}",
@@ -917,6 +921,8 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first() is None:
             db.add(Setting(key=VISION_MODEL_SETTING_KEY, value=DEFAULT_VISION_MODEL))
             logger.info("seeded default vision model")
+        if db.query(Setting).filter(Setting.key == FEET_IN_PROMPT_KEY).first() is None:
+            db.add(Setting(key=FEET_IN_PROMPT_KEY, value="false"))
         # an unedited saved generation prompt follows the built-in default as it changes
         saved_generation_prompt = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
         if (
@@ -1243,6 +1249,10 @@ def set_setting(db: Session, key: str, value: str) -> Setting:
 
 def get_active_prompt(db: Session) -> str:
     return get_setting(db, PROMPT_SETTING_KEY, DEFAULT_GENERATION_PROMPT)
+
+
+def feet_in_prompt(db: Session) -> bool:
+    return get_setting(db, FEET_IN_PROMPT_KEY, "false").strip().lower() == "true"
 
 
 def get_active_vision_prompt(db: Session) -> str:
@@ -4893,6 +4903,7 @@ PROMPT_PAGE_KEYS = [
     PROMPT_SETTING_KEY,
     VISION_PROMPT_SETTING_KEY,
     VISION_MODEL_SETTING_KEY,
+    FEET_IN_PROMPT_KEY,
     PLACEMENT_WRITER_ENABLED_KEY,
     PLACEMENT_WRITER_PROMPT_KEY,
     STUDIO_PROMPT_KEY,
@@ -4919,6 +4930,7 @@ def prompt_setting_response(db: Session) -> dict:
         "default_vision_prompt": DEFAULT_VISION_PROMPT,
         "vision_model": value(VISION_MODEL_SETTING_KEY, DEFAULT_VISION_MODEL),
         "default_vision_model": DEFAULT_VISION_MODEL,
+        "feet_in_prompt": value(FEET_IN_PROMPT_KEY, "false").strip().lower() == "true",
         "placement_writer_enabled": value(PLACEMENT_WRITER_ENABLED_KEY, "true").strip().lower() == "true",
         "placement_writer_prompt": value(PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT),
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
@@ -4948,6 +4960,7 @@ class PromptBody(BaseModel):
     prompt: str
     vision_prompt: str | None = None
     vision_model: str | None = None
+    feet_in_prompt: bool | None = None
     placement_writer_enabled: bool | None = None
     placement_writer_prompt: str | None = None
     studio_prompt: str | None = None
@@ -5011,6 +5024,8 @@ def api_admin_save_prompt(
         set_setting(db, VISION_PROMPT_SETTING_KEY, body.vision_prompt.strip())
     if body.vision_model is not None:
         set_setting(db, VISION_MODEL_SETTING_KEY, body.vision_model.strip())
+    if body.feet_in_prompt is not None:
+        set_setting(db, FEET_IN_PROMPT_KEY, "true" if body.feet_in_prompt else "false")
     if body.placement_writer_enabled is not None:
         set_setting(db, PLACEMENT_WRITER_ENABLED_KEY, "true" if body.placement_writer_enabled else "false")
     if body.placement_writer_prompt is not None:

@@ -25,6 +25,7 @@ export default function AdminPrompt() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [prompt, setPrompt] = useState("");
+  const [feetInPrompt, setFeetInPrompt] = useState(false);
   const [writerEnabled, setWriterEnabled] = useState(true);
   const [writerPrompt, setWriterPrompt] = useState("");
   const [studioPrompt, setStudioPrompt] = useState("");
@@ -44,6 +45,7 @@ export default function AdminPrompt() {
   function apply(res) {
     setData(res);
     setPrompt(res.prompt);
+    setFeetInPrompt(Boolean(res.feet_in_prompt));
     setWriterEnabled(res.placement_writer_enabled);
     setWriterPrompt(res.placement_writer_prompt);
     setStudioPrompt(res.studio_prompt);
@@ -77,6 +79,7 @@ export default function AdminPrompt() {
     try {
       const json = {
         prompt,
+        feet_in_prompt: feetInPrompt,
         placement_writer_enabled: writerEnabled,
         placement_writer_prompt: writerPrompt,
         studio_prompt: studioPrompt,
@@ -124,6 +127,17 @@ export default function AdminPrompt() {
       </div>
 
       <textarea className="prompt-textarea" spellCheck="false" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+
+      <div className="section-label" style={{ marginTop: 26 }}>Sizes in the prompt</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        The floor plan is not to scale. When this is off, no feet are sent to the models: each piece's size is described as a
+        share of its wall or of the room, exactly as it was drawn on the plan. Salesmen still pick a width when adding a piece;
+        it only sets the block's starting size.
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, marginBottom: 12, minHeight: 44 }}>
+        <input type="checkbox" checked={feetInPrompt} onChange={(e) => setFeetInPrompt(e.target.checked)} style={{ width: 20, height: 20 }} />
+        Send lengths in feet to the models
+      </label>
 
       <div className="section-label" style={{ marginTop: 26 }}>Placement writer</div>
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>

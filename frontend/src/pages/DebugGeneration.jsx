@@ -70,6 +70,9 @@ export default function DebugGeneration() {
             {writer.used ? "USED — the writer's section went into the prompt" : `FALLBACK to the facts — ${writer.reason || "no reason recorded"}`}
           </div>
           <div className="muted" style={{ fontSize: 12.5, margin: "6px 0 14px" }}>
+            {writer.reused_from_attempt
+              ? `Reused from attempt ${writer.reused_from_attempt} (same plan) — no writer call was made for this render. Figures are from the original call: `
+              : ""}
             {writer.model ? `${writer.model} · ` : ""}
             {writer.elapsed_s != null ? `${writer.elapsed_s} s · ` : ""}
             {writerUsage ? `${writerUsage.prompt_tokens} in / ${writerUsage.completion_tokens} out tokens` : "no token usage recorded"}

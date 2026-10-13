@@ -4,6 +4,8 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 
 const PHASES = ["Reading the room…", "Placing the furniture…", "Setting the light…", "Adding final touches…"];
+// shown first, for as long as the server is still waiting for the placement writer
+const LAYOUT_PHASE = "Preparing layout…";
 
 export default function Generating() {
   const { id } = useParams();
@@ -17,6 +19,10 @@ export default function Generating() {
   const [summary, setSummary] = useState(null);
   const [errorState, setErrorState] = useState(null);
   const [retrying, setRetrying] = useState(false);
+  const [preparingLayout, setPreparingLayout] = useState(false);
+  // when the wait for the layout ended, so the other steps start counting from there
+  const [layoutDoneAt, setLayoutDoneAt] = useState(null);
+  const sawLayoutRef = useRef(false);
   const stoppedRef = useRef(false);
 
   useEffect(() => {
@@ -48,6 +54,14 @@ export default function Generating() {
           stoppedRef.current = true;
           setErrorState(status.message);
           return;
+        }
+        if (status.stage === "preparing_layout") {
+          sawLayoutRef.current = true;
+          setPreparingLayout(true);
+        } else if (sawLayoutRef.current) {
+          sawLayoutRef.current = false;
+          setPreparingLayout(false);
+          setLayoutDoneAt(Date.now());
         }
       } catch (err) {
         if (err.status === 401) return;
@@ -106,7 +120,10 @@ export default function Generating() {
     );
   }
 
-  const phaseIdx = Math.min(PHASES.length - 1, Math.floor(elapsed / 4000));
+  const showLayout = preparingLayout || layoutDoneAt !== null;
+  const phases = showLayout ? [LAYOUT_PHASE, ...PHASES] : PHASES;
+  const sinceLayout = layoutDoneAt === null ? elapsed : Math.max(0, elapsed - (layoutDoneAt - startedAt));
+  const phaseIdx = preparingLayout ? 0 : Math.min(phases.length - 1, (showLayout ? 1 : 0) + Math.floor(sinceLayout / 4000));
 
   const photoUrl = summary?.room?.photo_url;
 
@@ -120,7 +137,7 @@ export default function Generating() {
         <div className="gen-side">
           <div className="ring" />
           <ol className="gen-steps">
-            {PHASES.map((label, i) => (
+            {phases.map((label, i) => (
               <li key={label} className={"gen-step" + (i < phaseIdx ? " done" : i === phaseIdx ? " active" : "")}>
                 <span className="gen-step-dot">{i < phaseIdx ? "✓" : i + 1}</span>
                 {label}

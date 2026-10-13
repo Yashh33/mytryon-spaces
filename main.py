@@ -2515,8 +2515,10 @@ def error_response(status_code: int, error: str, message: str) -> JSONResponse:
 
 PLACEMENT_WRITER_ENABLED_KEY = "placement_writer_enabled"
 PLACEMENT_WRITER_PROMPT_KEY = "placement_writer_prompt"
-PLACEMENT_WRITER_WAIT_SECONDS = 45  # how long Generate waits for a writer that is still running
-PLACEMENT_WRITER_CALL_TIMEOUT = 90  # hard limit on the model call itself
+# The writer takes 25-70 s. Generate waits this long for one still running
+# (the client shows "Preparing layout…" meanwhile), then falls back to the facts.
+PLACEMENT_WRITER_WAIT_SECONDS = 100
+PLACEMENT_WRITER_CALL_TIMEOUT = 120  # hard limit on the model call itself
 WRITER_PIECES_TOKEN = "{{PIECES}}"  # in the writer prompt: the "Piece N — ..." header lines, one per placed piece
 PRODUCT_IMAGES_TOKEN = "{{PRODUCT_IMAGES}}"  # replaced by code with "Your Image 3 is the generator's Image 2." lines
 # sha256 of every earlier DEFAULT_PLACEMENT_WRITER_PROMPT. A saved prompt that
@@ -2598,15 +2600,15 @@ def get_placement_writer_prompt(db: Session) -> str:
     return get_setting(db, PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT)
 
 
-def writer_signature(
-    pieces: str, geometry: list, layout_json: dict | None, prompt: str, model: str, product_paths: list[str]
-) -> str:
-    """Identifies exactly what a writer result was written for: the piece
-    headers, the placed blocks and the room's features (everything the plan
-    picture is drawn from), the product photos, the prompt and the model. A
-    change to any of them changes it, so a result written for a plan that has
-    since been moved can never be used."""
-    payload = json.dumps([pieces, geometry, layout_json, prompt, model, product_paths], sort_keys=True, ensure_ascii=False)
+def writer_signature(pieces: str, geometry: list, layout_json: dict | None, product_paths: list[str]) -> str:
+    """Identifies the plan a writer result was written for: the piece headers,
+    the placed blocks and the room's features (everything the plan picture is
+    drawn from) and the product photos. Moving, adding or removing a piece or
+    changing its product changes it, so a result written for a plan that has
+    since changed can never be used. The room look, lighting, colours and
+    fabrics are not part of it — nor are the writer prompt and model: a
+    result is reused as long as the plan is the same."""
+    payload = json.dumps([pieces, geometry, layout_json, product_paths], sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2625,6 +2627,30 @@ def writer_product_images(items: list[Item]) -> tuple[list[str], str]:
         theirs = f"Image {numbers[0]}" if len(numbers) == 1 else f"Images {_format_piece_list(numbers)}"
         lines.append(f"Your Image {position + 3} is the generator's {theirs}.")
     return paths, " ".join(lines)
+
+
+def writer_plan_signature(attempt: Attempt) -> str:
+    product_paths, _lines = writer_product_images(attempt.items)
+    return writer_signature(
+        build_piece_headers_text(attempt.items, attempt.room.layout_json),
+        placed_geometry(attempt.items),
+        attempt.room.layout_json,
+        product_paths,
+    )
+
+
+def writer_result_fits(state: dict, attempt: Attempt, db: Session) -> bool:
+    """True when the writer state was written for exactly the plan `attempt`
+    has now."""
+    if state.get("plan_signature"):
+        return state["plan_signature"] == writer_plan_signature(attempt)
+    # written before plan_signature existed: the piece list and the facts it
+    # recorded stand in for the plan (any moved piece cleared the state anyway)
+    return (
+        bool(state.get("pieces"))
+        and state["pieces"] == build_piece_headers_text(attempt.items, attempt.room.layout_json)
+        and state.get("fallback_facts") == build_placement_text(attempt.items, attempt.room.layout_json, False, feet_in_prompt(db))
+    )
 
 
 def fill_writer_prompt(template: str, pieces: str, product_lines: str) -> str:
@@ -2731,9 +2757,44 @@ def _with_writer_spend(unlogged: dict | None, usage: dict | None) -> dict | None
 
 def discard_placement_writer(attempt: Attempt) -> None:
     """Drops the cached writer result (and orphans any call still running)
-    because the plan changed. Keeps the not-yet-logged spend."""
+    and the plan picture on record, because the plan changed. Keeps the
+    not-yet-logged spend."""
     unlogged = (attempt.placement_writer or {}).get("unlogged_usage")
     attempt.placement_writer = {"unlogged_usage": unlogged} if unlogged else None
+    attempt.plan_path = None
+
+
+WRITER_RESULT_KEYS = ("pieces", "fallback_facts", "model", "plan_path", "output", "placement", "conflicts", "usage", "elapsed_s", "started_at")
+
+
+def reuse_placement_writer(source: Attempt, attempt: Attempt, db: Session) -> str:
+    """For an attempt just copied from `source` (Adjust & try again), whose
+    pieces are therefore exactly the source's. Carries over the source's plan
+    picture and, when it has a valid one, its writer output as it stands, so
+    the writer is not called again for an unchanged plan — only the rest of
+    the prompt (look, lighting, colour, fabric) differs. Any later change to
+    the pieces drops it (discard_placement_writer) and the writer runs afresh.
+    Returns "reused", "plan_only" (the plan was copied but there is no valid
+    output to reuse) or "none"."""
+    state = source.placement_writer or {}
+    if not source.plan_path or not state.get("signature") or not writer_result_fits(state, source, db):
+        return "none"  # no plan on record that is known to match the pieces
+    attempt.plan_path = source.plan_path
+    if not (state.get("status") == "done" and state.get("ok") and state.get("placement")):
+        return "plan_only"
+    signature = writer_plan_signature(attempt)
+    attempt.placement_writer = {
+        **{key: state.get(key) for key in WRITER_RESULT_KEYS},
+        "status": "done",
+        "ok": True,
+        "reason": None,
+        "signature": signature,
+        "plan_signature": signature,
+        # the attempt the writer actually ran for, however many copies ago
+        "reused_from_attempt": state.get("reused_from_attempt") or source.id,
+        "unlogged_usage": None,  # no call was made for this attempt
+    }
+    return "reused"
 
 
 async def run_placement_writer(attempt_id: int, signature: str) -> None:
@@ -2800,21 +2861,22 @@ def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session)
     feet = feet_in_prompt(db)
     pieces = build_piece_headers_text(attempt.items, attempt.room.layout_json)
     model = get_active_vision_model(db)
-    product_paths, _lines = writer_product_images(attempt.items)
-    signature = writer_signature(
-        pieces, placed_geometry(attempt.items), attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths
-    )
+    signature = writer_plan_signature(attempt)
     state = attempt.placement_writer or {}
     task = WRITER_TASKS.get(attempt.id)
-    if state.get("signature") == signature and (
-        state.get("status") == "done" or (state.get("status") == "running" and task is not None and not task.done())
-    ):
-        return "cached"
+    # the same plan already has a good result (its own or one carried over from
+    # the attempt it was copied from), or a call in flight: no second call
+    if state.get("signature") and writer_result_fits(state, attempt, db):
+        if state.get("status") == "done" and state.get("ok") and state.get("placement"):
+            return "cached"
+        if state.get("status") == "running" and task is not None and not task.done():
+            return "cached"
 
     attempt.plan_path = plan_path
     attempt.placement_writer = {
         "status": "running",
         "signature": signature,
+        "plan_signature": signature,
         "pieces": pieces,  # all the writer is told about the pieces
         # not sent to the writer: what generation falls back to, kept for debugging
         "fallback_facts": build_placement_text(attempt.items, attempt.room.layout_json, False, feet),
@@ -2856,13 +2918,11 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
     state = attempt.placement_writer or {}
     if not state.get("signature"):
         return fallback("no plan image was uploaded for this layout")
-    model = get_active_vision_model(db)
-    product_paths, _lines = writer_product_images(attempt.items)
-    if state["signature"] != writer_signature(
-        pieces, placed_geometry(attempt.items), attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths
-    ):
-        return fallback("the plan, the room's features or the writer settings changed after the writer ran")
+    if not writer_result_fits(state, attempt, db):
+        return fallback("the plan or the room's features changed after the writer ran")
 
+    if state.get("reused_from_attempt"):
+        info["reused_from_attempt"] = state["reused_from_attempt"]  # no writer call was made for this attempt
     info["plan_path"] = state.get("plan_path")
     info["model"] = state.get("model")
     if state.get("status") == "running":
@@ -2921,7 +2981,10 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         template = get_active_prompt(db)
         writer_placement, writer_info = (None, None)
         if not attempt.ignore_placement:
+            # may wait for a writer still running; the client shows "Preparing layout…"
+            JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
             writer_placement, writer_info = await resolve_writer_placement(attempt, db)
+        JOBS[job_id] = {"status": "processing", "stage": "generating"}
         prompt = build_prompt(
             template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
             attempt.note, feet_in_prompt(db),
@@ -3742,7 +3805,7 @@ class CreateAttemptBody(BaseModel):
 
 
 @app.post("/api/rooms/{room_id}/attempts")
-def api_create_attempt(
+async def api_create_attempt(
     room_id: int,
     body: CreateAttemptBody | None = None,
     user: User = Depends(get_current_user),
@@ -3753,6 +3816,7 @@ def api_create_attempt(
     room_treatment = DEFAULT_ROOM_TREATMENT
     lighting = DEFAULT_LIGHTING
     note = None
+    source = None
     source_items: list[Item] = []
 
     clone_from_attempt_id = body.clone_from_attempt_id if body else None
@@ -3790,6 +3854,16 @@ def api_create_attempt(
 
     db.commit()
     db.refresh(attempt)
+    if source is not None:
+        # same pieces as the source: its plan and writer output carry over
+        reuse = reuse_placement_writer(source, attempt, db)
+        db.commit()
+        db.refresh(attempt)
+        if reuse == "plan_only":
+            # the plan is known, its writer output is not usable: write it now,
+            # so it is ready by the time Generate is pressed
+            start_placement_writer(attempt, None, db)
+            db.refresh(attempt)
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 

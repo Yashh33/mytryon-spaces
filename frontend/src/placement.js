@@ -58,13 +58,90 @@ export function cameraXFraction(cameraPosition) {
   return 0.5;
 }
 
+const CAMERA_OFFSET_PX = 34; // how far below the near wall the camera circle sits, in plan pixels
+
+/** How far along a side wall ("left" | "right") the photo can still see its
+ * floor line, 0 (far wall) to 1 (near wall), as read by the vision step.
+ * Null when the room has no such reading — then nothing is shaded. */
+export function wallVisibleTo(layout, side) {
+  const v = layout?.[`${side}_wall_visible_to`];
+  return typeof v === "number" && v >= 0 && v <= 1 ? v : null;
+}
+
+/** The floor the photo does NOT show: beside the camera, outside the two
+ * lines from the camera to where each side wall leaves the frame. Normalised
+ * room coordinates (x across, y from far wall to near wall). Returns the
+ * camera point and, per side, the triangle [wall point, near corner, where
+ * the view line crosses the near wall] — or null when that whole wall is in
+ * view or has no reading. Mirrored by unseen_floor() in the backend, which
+ * words the prompt for a piece standing there. */
+export function unseenFloor(layout) {
+  const [aw, ah] = roomAspect(layout?.depth_vs_width);
+  const roomHpx = (ah * PLAN_BASE_SIZE) / Math.max(aw, ah);
+  const camera = { x: cameraXFraction(layout?.camera_position), y: 1 + CAMERA_OFFSET_PX / roomHpx };
+  const triangle = (side, wallX) => {
+    const v = wallVisibleTo(layout, side);
+    if (v == null || v >= 0.999) return null;
+    const t = (1 - camera.y) / (v - camera.y); // where the camera->wall line crosses the near wall
+    return [[wallX, v], [wallX, 1], [camera.x + (wallX - camera.x) * t, 1]];
+  };
+  return { camera, left: triangle("left", 0), right: triangle("right", 1) };
+}
+
+/** Area of a convex polygon clipped to an axis-aligned rect {x, y, w, h}. */
+function clippedArea(polygon, rect) {
+  const edges = [
+    [(p) => p[0] >= rect.x, (a, b) => [rect.x, a[1] + ((b[1] - a[1]) * (rect.x - a[0])) / (b[0] - a[0])]],
+    [(p) => p[0] <= rect.x + rect.w, (a, b) => [rect.x + rect.w, a[1] + ((b[1] - a[1]) * (rect.x + rect.w - a[0])) / (b[0] - a[0])]],
+    [(p) => p[1] >= rect.y, (a, b) => [a[0] + ((b[0] - a[0]) * (rect.y - a[1])) / (b[1] - a[1]), rect.y]],
+    [(p) => p[1] <= rect.y + rect.h, (a, b) => [a[0] + ((b[0] - a[0]) * (rect.y + rect.h - a[1])) / (b[1] - a[1]), rect.y + rect.h]],
+  ];
+  let points = polygon;
+  edges.forEach(([inside, cross]) => {
+    const next = [];
+    points.forEach((cur, i) => {
+      const prev = points[(i + points.length - 1) % points.length];
+      if (inside(cur)) {
+        if (!inside(prev)) next.push(cross(prev, cur));
+        next.push(cur);
+      } else if (inside(prev)) {
+        next.push(cross(prev, cur));
+      }
+    });
+    points = next;
+  });
+  let twice = 0;
+  points.forEach((a, i) => {
+    const b = points[(i + 1) % points.length];
+    twice += a[0] * b[1] - b[0] * a[1];
+  });
+  return Math.abs(twice) / 2;
+}
+
+export const OUTSIDE_PHOTO_THRESHOLD = 0.25;
+
+/** How much of a placed block stands on floor the photo doesn't show:
+ * { fraction: 0-1 of its area, side: "left" | "right" | null }. */
+export function outsidePhoto(shape, placement, layout) {
+  const unseen = unseenFloor(layout);
+  const rects = placementRects(shape, placement);
+  const total = rects.reduce((sum, r) => sum + r.w * r.h, 0);
+  if (!total) return { fraction: 0, side: null };
+  const on = { left: 0, right: 0 };
+  ["left", "right"].forEach((side) => {
+    if (unseen[side]) rects.forEach((r) => (on[side] += clippedArea(unseen[side], r)));
+  });
+  const side = on.left >= on.right ? "left" : "right";
+  return { fraction: (on.left + on.right) / total, side: on.left + on.right > 0 ? side : null };
+}
+
 /** Camera marker geometry: a circle below the near wall (leaving a row for
  * near-wall feature labels between), two dashed lines fanning up to the
  * wall to show the view direction, and where its "Camera" label sits. */
 export function cameraGeometry(cameraPosition, geom) {
   const cx = geom.roomX + cameraXFraction(cameraPosition) * geom.roomW;
   const wallY = geom.roomY + geom.roomH;
-  const cy = wallY + 34;
+  const cy = wallY + CAMERA_OFFSET_PX;
   return {
     cx,
     cy,

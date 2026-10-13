@@ -367,6 +367,8 @@ h2 { font-size: 19px; }
 .fp-camera circle { fill: #fff; stroke: var(--ink2); stroke-width: 1.5; }
 .fp-camera-fan { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 3 3; }
 .fp-camera text { fill: var(--muted); }
+.fp-unseen { fill: #9A948C; fill-opacity: 0.32; }
+.fp-unseen-label { font-family: var(--sans); font-size: 10px; font-weight: 700; fill: #5F5A53; paint-order: stroke; stroke: #fff; stroke-width: 2.5px; stroke-opacity: 0.85; }
 .fp-block-number {
   font-family: var(--mono); font-size: 10px; font-weight: 700; fill: #fff; pointer-events: none;
   paint-order: stroke; stroke: rgba(0,0,0,0.35); stroke-width: 2.5px;

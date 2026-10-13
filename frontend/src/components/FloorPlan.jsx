@@ -32,6 +32,7 @@ import {
   sofaSeatCount,
   straightFigure,
   translatePlacement,
+  unseenFloor,
 } from "../placement.js";
 
 const WALLS = ["far", "left", "right", "near"];
@@ -362,13 +363,50 @@ export function FloorPlan({
     ));
   }
 
+  /** The camera's view on the floor: the strips beside the camera that the
+   * photo doesn't show are shaded light grey and labelled, so the salesman
+   * keeps pieces in the white area. Drawn under the walls and furniture.
+   * A side with no reading (older rooms) gets no shading. */
+  function renderUnseenFloor() {
+    if (!layout) return null;
+    const unseen = unseenFloor(layout);
+    const px = ([x, y]) => `${geom.roomX + x * geom.roomW},${geom.roomY + y * geom.roomH}`;
+    const wallY = geom.roomY + geom.roomH;
+    return ["left", "right"].map((side) => {
+      const triangle = unseen[side];
+      if (!triangle) return null;
+      const baseWidth = Math.abs(triangle[2][0] - triangle[1][0]) * geom.roomW;
+      const height = (1 - triangle[0][1]) * geom.roomH;
+      const labelFits = baseWidth > 86 && height > 26;
+      return (
+        <g key={side} pointerEvents="none">
+          <polygon points={triangle.map(px).join(" ")} className="fp-unseen" />
+          {labelFits ? (
+            <text
+              x={side === "left" ? geom.roomX + 6 : geom.roomX + geom.roomW - 6} y={wallY - 7}
+              className="fp-unseen-label" textAnchor={side === "left" ? "start" : "end"}
+            >
+              Not in the photo
+            </text>
+          ) : null}
+        </g>
+      );
+    });
+  }
+
   function renderCamera() {
     if (!layout) return null;
     const cam = cameraGeometry(layout.camera_position, geom);
+    const unseen = unseenFloor(layout);
+    // with a reading, the camera's lines run to where each side wall leaves the photo
+    const lineEnd = (side, fan) =>
+      unseen[side] ? { x: geom.roomX + unseen[side][0][0] * geom.roomW, y: geom.roomY + unseen[side][0][1] * geom.roomH } : fan;
+    const left = lineEnd("left", cam.fanLeft);
+    const right = lineEnd("right", cam.fanRight);
     return (
       <g className="fp-camera">
-        <line x1={cam.cx} y1={cam.cy} x2={cam.fanLeft.x} y2={cam.fanLeft.y} className="fp-camera-fan" />
-        <line x1={cam.cx} y1={cam.cy} x2={cam.fanRight.x} y2={cam.fanRight.y} className="fp-camera-fan" />
+        <line x1={cam.cx} y1={cam.cy} x2={left.x} y2={left.y} className="fp-camera-fan" />
+        <line x1={cam.cx} y1={cam.cy} x2={right.x} y2={right.y} className="fp-camera-fan" />
         <circle cx={cam.cx} cy={cam.cy} r={cam.r} />
         <text x={cam.cx} y={cam.labelY} className="fp-label" textAnchor="middle">
           Camera
@@ -813,6 +851,7 @@ export function FloorPlan({
         onPointerUp={readOnly ? undefined : handleBackgroundPointerUp}
       >
         <rect x={geom.roomX} y={geom.roomY} width={geom.roomW} height={geom.roomH} className="fp-floor" />
+        {renderUnseenFloor()}
         {WALLS.map((wall) => {
           const line = wallLine(wall, geom);
           return <line key={wall} x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2} className="fp-wall" style={wallStyle(wall)} />;

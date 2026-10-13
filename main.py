@@ -158,6 +158,12 @@ coffee table are permitted, nothing else. The room must otherwise contain
 only the furniture pieces listed below."""
 
 PROMPT_SETTING_KEY = "generation_prompt"
+# sha256 of every earlier DEFAULT_VISION_PROMPT. A saved vision prompt that
+# still equals one of these was never edited, so startup moves it to the
+# current default; an edited one is left alone.
+SUPERSEDED_VISION_PROMPT_HASHES = {
+    "4beea0248af0786569c079d2823cc15e6717606823450305e8378aa7e8c8e793",  # before left/right_wall_visible_to
+}
 PROMPT_PLACEHOLDERS = [
     {
         "token": "{{ROOM_TYPE}}",
@@ -271,6 +277,13 @@ column, recess, step, unknown. If you see something that limits furniture
 placement and none of these types fit, use "other" and describe it
 plainly in notes.
 
+How much of each side wall the photograph shows ("left_wall_visible_to"
+and "right_wall_visible_to"): follow each side wall's skirting/floor line
+from the far corner toward the camera and report where it leaves the
+frame, as a number from 0 to 1 along the room's depth (0 = the far wall,
+1 = the near wall, where the camera stands). If the whole wall is visible
+down to the near corner, use 1. If unsure, use null.
+
 Return only JSON in exactly this shape:
 
 {
@@ -288,6 +301,8 @@ Return only JSON in exactly this shape:
   "left_wall":  { "confidence": "...", "features": [] },
   "right_wall": { "confidence": "...", "features": [] },
   "near_wall":  { "confidence": "...", "features": [] },
+  "left_wall_visible_to": "number 0-1, or null",
+  "right_wall_visible_to": "number 0-1, or null",
   "floor_state": "finished | unfinished",
   "obstructions": [
     { "type": "...", "location": "describe where it stands",
@@ -909,6 +924,13 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == VISION_MODEL_SETTING_KEY).first() is None:
             db.add(Setting(key=VISION_MODEL_SETTING_KEY, value=DEFAULT_VISION_MODEL))
             logger.info("seeded default vision model")
+        saved_vision_prompt = db.query(Setting).filter(Setting.key == VISION_PROMPT_SETTING_KEY).first()
+        if (
+            saved_vision_prompt is not None
+            and hashlib.sha256(saved_vision_prompt.value.encode("utf-8")).hexdigest() in SUPERSEDED_VISION_PROMPT_HASHES
+        ):
+            saved_vision_prompt.value = DEFAULT_VISION_PROMPT
+            logger.info("updated the saved vision prompt to the current default")
         # an unedited saved writer prompt follows the built-in default as it changes
         saved_writer_prompt = db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first()
         if (

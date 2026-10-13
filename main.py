@@ -2672,6 +2672,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "fc864c5e94212bdcab7715a7b32b4cd66a3e490d0c484457b5b90b6b0ba093b1",  # before open floor was described in plain terms
     "41d38fcfde38e29472fa2cc19a117f4e93ae5e24e974e2510cfc161f1a9ed679",  # before features not visible in the photo were left out
     "8eb1aad11db5353ef8871ba12d2d49f52e25f87e86f1a5aec1d0cf23e8a4ff6c",  # before "?" features were never called a window, door or opening
+    "a6a757c6dfe930a73e0d66e6d92e188a0ae9c6c7ac1ae15eca33418a5c3ac3f4",  # before picture-grid positions and "which end is near the camera"
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2700,6 +2701,11 @@ c) Also say what stays empty, in landmark terms: 'nothing stands below Window 1'
 d) Use a fraction only as a backup when no landmark is near, and then describe it by the frame, e.g. 'the sofa's left arm is at about the middle of the far wall as seen in the photograph'.
 e) If the plan and the photograph place a feature differently, follow the photograph's position of the feature and keep the sofa's relation to it as the plan shows (e.g. 'starts just after Window 1'), and note it under CONFLICTS.
 f) Before using any labelled feature as a landmark, find it in Image 1. If you cannot clearly see it there, never mention it and never use it as a landmark; list it under CONFLICTS as 'not visible in the photo: <label>'. For a feature whose label ends in '?', never call it a window, door or opening; describe only what is visible (e.g. 'the panelled section of the far wall'), or leave it out.
+g) Use a wall's features (windows, doors, panels, corners) as landmarks ONLY for the part of a sofa that stands against that same wall. A part out in the room, such as a lounge tip, is never placed using a feature on another wall; describe it by its picture grid box instead, e.g. 'the lounge tip ends in the open floor in the bottom-left box, well before the middle of the picture. It is nowhere near the far wall.'
+
+PICTURE POSITIONS
+Think of Image 1 as a 3×3 grid: columns LEFT / MIDDLE / RIGHT and rows TOP / MIDDLE / BOTTOM of the picture. For every sofa, say which grid box each end sits in, and where any lounge tip ends, e.g. 'the armrest end is in the top-left box; the lounge tip is in the bottom-left box, near the middle column'. Use these picture positions together with the wall landmarks. Never draw or mention the grid as an object.
+For every L-shaped or corner sofa, state plainly which end is closer to the camera, e.g. 'The long run's armrest end is the part farthest away, higher in the picture. The lounge is the part closest to the camera, lower in the picture.' The lounge comes out from its end of the long run INTO the room; never describe the lounge as extending 'toward the camera' when the long run itself runs toward the camera.
 
 RULES
 1. Keep every "Piece N — ..." header line exactly as given, including "from Image k". In those headers "Image k" refers to the generator's product photographs, NOT to your Image 2 floor plan. Under each header, write numbered lines; numbering continues across pieces.
@@ -2708,8 +2714,8 @@ RULES
 4. SURROUNDINGS — required for every piece. Go around the piece and describe what is on every side of it: its back, its front, its left end, its right end, and each of its corners. For each one, say exactly one of:
    - it TOUCHES: name what it touches (the far wall, the right wall, the far-right corner, another piece).
    - there is a GAP: give the gap's size by a landmark (LANDMARKS b — e.g. "about half a window-width of bare wall"), never as a share of the wall unless LANDMARKS d applies, and name what lies beyond the gap (bare wall, which window, which door, a pillar, another piece, open floor).
-   For an L-shaped or corner sofa, do this separately for the long run and for the lounge or second run. Always say where the lounge's open tip ends compared with the nearest window or door.
-   Measure the lounge's length from the wall the long run stands on to the lounge's open tip — the whole lounge, including the part beside the long run's seat, not only the part that sticks out past it — and give it with a landmark where one exists (e.g. "the lounge tip stops where Window 2 begins").
+   For an L-shaped or corner sofa, do this separately for the long run and for the lounge or second run. Always say where the lounge's open tip ends: compared with the nearest window or door on the wall the lounge itself stands against, or, when the tip is out in the room, by its picture grid box (LANDMARKS g).
+   Measure the lounge's length from the wall the long run stands on to the lounge's open tip — the whole lounge, including the part beside the long run's seat, not only the part that sticks out past it — and give it with a landmark where one exists on the wall the lounge stands against (e.g. "the lounge tip stops where Window 2 begins"), otherwise by its picture grid box.
    A block drawn against a wall line TOUCHES that wall. A sliver thinner than about a twentieth of the wall is not a gap — call it TOUCHES.
    For each end of every run, also state the gap to the wall or corner in that direction, in landmark terms (e.g. "bare wall runs from the far-left corner, past Window 1, to the sofa's left end"), in addition to any window or door in between.
    Every GAP along a wall must have a size; a GAP of open floor is described in plain terms (LANDMARKS b).
@@ -2718,7 +2724,7 @@ RULES
 7. Give each piece's length by where each of its ends starts and stops against the landmarks (LANDMARKS a), with a share of the wall only as the backup of LANDMARKS d. Never use feet, metres or other units. Add a line that the generator must keep the gaps and size the piece to fit them, never stretch it to fill the wall.
 8. Never state a number of seats for an L-shaped, corner or curved sofa — the generator fits the seats to the length. For an L-shape, say that the lounge starts where the last full seat of the long run ends, never partway through a seat.
 9. For multi-part pieces (L-shape, corner, curved), say which part is where, which way each part's back and seats face, and which end is plain. For an L-shape, the lounge is an open chaise with no backrest; never write that it has a back or that its back faces any direction. An L-shaped sofa has exactly ONE arm, at the end of the long run away from the lounge. The end where the long run meets the lounge has no arm, and the lounge tip has no arm. A corner sofa has a backrest along both runs and an arm at both outer ends.
-10. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule it out with a line starting "NOT". A NOT line must never forbid something the plan actually shows.
+10. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule it out with a line starting "NOT". A NOT line must never forbid something the plan actually shows. Before writing any NOT line, check it against the plan. Never forbid something the plan shows (e.g. if the long run runs down the left wall toward the camera, never write 'NOT extend the long run toward the near wall'). For an L, use: 'NOT put the lounge at the other end of the long run.'
 11. Use CAPS only for the single key word in a line: CENTRED, FAR, NEAR, LEFT, RIGHT, NOT, TOUCHES, GAP.
 12. When two pieces overlap side to side on the plan, say which one stands IN FRONT (nearer the camera, lower in the frame) and which stands BEHIND, and that neither slides sideways to make room for the other.
 13. Every labelled DOOR, WINDOW and OPENING that you can clearly see in Image 1 must stay usable in the result; say so for any that a piece stands near.

@@ -2356,11 +2356,23 @@ def _feature_phrase(feature: dict) -> str:
     return f"{phrase} at the {position}" if position else phrase
 
 
-def _wall_features_clause(wall_data: dict | None) -> str:
+def _feature_is_uncertain(wall_data: dict | None, feature: dict) -> bool:
+    """The features the plan labels with a "?" (planFeatures in
+    frontend/src/placement.js): anything on a wall the room reader only
+    partly saw, and anything whose type it could not tell. The reader invents
+    some of these, so the generation prompt never states one as a fact."""
+    return (wall_data or {}).get("confidence") == "partial" or feature.get("type") == "unknown"
+
+
+def _wall_features_clause(wall_data: dict | None) -> str | None:
+    """None when the wall has features but every one of them is uncertain:
+    then nothing at all is said about that wall."""
     features = (wall_data or {}).get("features") or []
     if not features:
         return "a long plain wall"
-    phrases = [_feature_phrase(f) for f in features]
+    phrases = [_feature_phrase(f) for f in features if not _feature_is_uncertain(wall_data, f)]
+    if not phrases:
+        return None
     if len(phrases) == 1:
         return f"with {phrases[0]}"
     return "with " + ", ".join(phrases[:-1]) + f" and {phrases[-1]}"
@@ -2374,25 +2386,25 @@ def _obstruction_phrase(obstruction: dict) -> str:
     return f"a {obstruction_type} {location[0].lower()}{location[1:]}"
 
 
-def build_room_layout_text(layout_json: dict | None) -> str:
+def build_room_layout_text(layout_json: dict | None, features: bool = True) -> str:
+    """`features` False leaves out every wall and obstruction line — used when
+    the placement writer's text is in the prompt: the writer has looked at
+    the photograph and names the landmarks itself, so the room reader's
+    feature list (which it sometimes invents) is not repeated as fact."""
     if not layout_json:
         return "For placement purposes only, the camera stands at the near end of the room.\n"
 
-    far_clause = _wall_features_clause(layout_json.get("far_wall"))
-    left_clause = _wall_features_clause(layout_json.get("left_wall"))
-    right_clause = _wall_features_clause(layout_json.get("right_wall"))
-
-    lines = [
-        f"The room is {layout_json.get('depth_vs_width') or 'about square'}.",
-        f"Far wall: {far_clause}.",
-        f"Left wall: {left_clause}.",
-        f"Right wall: {right_clause}.",
-    ]
-    # obstructions stand anywhere in the room, so they get their own line
-    # rather than being attached to a wall they may not be on
-    obstructions = layout_json.get("obstructions") or []
-    if obstructions:
-        lines.append("Obstructions: " + "; ".join(_obstruction_phrase(o) for o in obstructions) + ".")
+    lines = [f"The room is {layout_json.get('depth_vs_width') or 'about square'}."]
+    if features:
+        for name, key in (("Far wall", "far_wall"), ("Left wall", "left_wall"), ("Right wall", "right_wall")):
+            clause = _wall_features_clause(layout_json.get(key))
+            if clause is not None:
+                lines.append(f"{name}: {clause}.")
+        # obstructions stand anywhere in the room, so they get their own line
+        # rather than being attached to a wall they may not be on
+        obstructions = layout_json.get("obstructions") or []
+        if obstructions:
+            lines.append("Obstructions: " + "; ".join(_obstruction_phrase(o) for o in obstructions) + ".")
     lines.append(
         f"For placement purposes only, the camera stands at the {layout_json.get('camera_position') or 'near end of the room'}."
     )
@@ -2434,9 +2446,10 @@ def build_prompt(
     pieces = build_pieces_text(items, feet)
     image_manifest = build_image_manifest(items, feet)
     config_notes = build_config_notes(items, feet)
+    # with the writer's text, ROOM LAYOUT keeps only the shape and camera lines
+    room_layout_text = build_room_layout_text(room.layout_json, features=placement_text is None)
     if placement_text is None:
         placement_text = build_placement_text(items, room.layout_json, ignore_placement, feet)
-    room_layout_text = build_room_layout_text(room.layout_json)
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
     decor = decor_text(room_treatment)
@@ -2597,6 +2610,7 @@ SUPERSEDED_WRITER_PROMPT_HASHES = {
     "c2e3bab1286627607cead0915ba6f2d07d4d2a37ced40c48b94175131b7a5c3c",  # before "measure the lounge from the wall the long run stands on"
     "50d610ff2b7b08858499cd3caea7892698d278b295a7a98b632dd867bc3a8c0c",  # before LANDMARKS replaced wall fractions
     "fc864c5e94212bdcab7715a7b32b4cd66a3e490d0c484457b5b90b6b0ba093b1",  # before open floor was described in plain terms
+    "41d38fcfde38e29472fa2cc19a117f4e93ae5e24e974e2510cfc161f1a9ed679",  # before features not visible in the photo were left out
 }
 # Dollars per 1M tokens for the default vision model (gpt-6-luna), as listed
 # by third-party pricing pages in Oct 2026. Only used for the cost logged
@@ -2624,6 +2638,7 @@ b) Size gaps along a wall with visible objects such as windows and doors, never 
 c) Also say what stays empty, in landmark terms: 'nothing stands below Window 1', 'the corner left of Window 1 stays bare'.
 d) Use a fraction only as a backup when no landmark is near, and then describe it by the frame, e.g. 'the sofa's left arm is at about the middle of the far wall as seen in the photograph'.
 e) If the plan and the photograph place a feature differently, follow the photograph's position of the feature and keep the sofa's relation to it as the plan shows (e.g. 'starts just after Window 1'), and note it under CONFLICTS.
+f) Before using any labelled feature as a landmark, find it in Image 1. If you cannot clearly see it there, never mention it and never use it as a landmark; list it under CONFLICTS as 'not visible in the photo: <label>'.
 
 RULES
 1. Keep every "Piece N — ..." header line exactly as given, including "from Image k". In those headers "Image k" refers to the generator's product photographs, NOT to your Image 2 floor plan. Under each header, write numbered lines; numbering continues across pieces.
@@ -2637,7 +2652,7 @@ RULES
    A block drawn against a wall line TOUCHES that wall. A sliver thinner than about a twentieth of the wall is not a gap — call it TOUCHES.
    For each end of every run, also state the gap to the wall or corner in that direction, in landmark terms (e.g. "bare wall runs from the far-left corner, past Window 1, to the sofa's left end"), in addition to any window or door in between.
    Every GAP along a wall must have a size; a GAP of open floor is described in plain terms (LANDMARKS b).
-5. Then, for every DOOR, WINDOW, OPENING and PILLAR near a piece, describe it from the feature's side, e.g. "Window 1 stays fully clear; a stretch of bare wall separates it from the sofa's left arm." If a piece covers part of a feature on the plan, say exactly how much, e.g. "the lounge stands in front of the lower third of Window 2".
+5. Then, for every DOOR, WINDOW, OPENING and PILLAR near a piece that you can clearly see in Image 1 (LANDMARKS f), describe it from the feature's side, e.g. "Window 1 stays fully clear; a stretch of bare wall separates it from the sofa's left arm." If a piece covers part of a feature on the plan, say exactly how much, e.g. "the lounge stands in front of the lower third of Window 2".
 6. If the plan shows a gap, your text must state that gap. If the plan shows touching, say touching. Never use the words: next to, beside, close to, just to the right of, just to the left of, adjacent.
 7. Give each piece's length by where each of its ends starts and stops against the landmarks (LANDMARKS a), with a share of the wall only as the backup of LANDMARKS d. Never use feet, metres or other units. Add a line that the generator must keep the gaps and size the piece to fit them, never stretch it to fill the wall.
 8. Never state a number of seats for an L-shaped, corner or curved sofa — the generator fits the seats to the length. For an L-shape, say that the lounge starts where the last full seat of the long run ends, never partway through a seat.
@@ -2645,10 +2660,10 @@ RULES
 10. For each piece, find the habit above that would most likely move it away from where the plan puts it in this photo, and rule it out with a line starting "NOT". A NOT line must never forbid something the plan actually shows.
 11. Use CAPS only for the single key word in a line: CENTRED, FAR, NEAR, LEFT, RIGHT, NOT, TOUCHES, GAP.
 12. When two pieces overlap side to side on the plan, say which one stands IN FRONT (nearer the camera, lower in the frame) and which stands BEHIND, and that neither slides sideways to make room for the other.
-13. Every labelled DOOR, WINDOW and OPENING must stay usable in the result; say so for any that a piece stands near.
+13. Every labelled DOOR, WINDOW and OPENING that you can clearly see in Image 1 must stay usable in the result; say so for any that a piece stands near.
 14. Finish with numbered lines saying which floor areas stay empty, especially between the furniture and the camera.
 15. Never describe the camera or ask to change the view.
-16. If the plan and the photo disagree (a block over a door, a labelled feature you cannot find in Image 1), follow the plan — except for where a feature stands, which follows the photograph (LANDMARKS e) — and note it under CONFLICTS.
+16. If the plan and the photo disagree (e.g. a block over a door), follow the plan — except for where a feature stands, which follows the photograph (LANDMARKS e), and a labelled feature you cannot see in the photograph, which is left out (LANDMARKS f) — and note it under CONFLICTS.
 17. Directly under each header, write one line starting "BUILD:" that states the requested shape in plain words (how many runs, which is longer, which end is the lounge, where the arms are) and, if the reference photo shows something different, what to change (e.g. "Image 2 shows a straight sofa; rebuild it into this L in the same design, do not keep it as a separate block"). Do not give a seat count in the BUILD line for an L-shaped, corner or curved sofa. Always include a line saying it is one sofa.
 18. In every line you write, refer to a product photograph only by the GENERATOR's number as used in the headers (Image 2, Image 3 ...), never by your own input numbering.
 

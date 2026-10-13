@@ -177,7 +177,7 @@ PROMPT_PLACEHOLDERS = [
     },
     {
         "token": "{{PIECES}}",
-        "description": 'One line per added piece, in the same order the product photos are sent to the model, formatted as "- Sofa (L-shape), 7 ft wide".',
+        "description": 'One line per added piece, in the same order the product photos are sent to the model, formatted as "- Sofa (L-shape)" (or "- Sofa (L-shape), 7 ft wide" when feet are switched on).',
     },
     {
         "token": "{{IMAGE_MANIFEST}}",
@@ -1447,7 +1447,7 @@ def compute_sub_pieces(item: Item) -> list[dict]:
     return [{"sub_index": 0, "label": item.type, "shape": item.shape, "width_ft": item.width_ft}]
 
 
-def build_image_manifest(items: list[Item]) -> str:
+def build_image_manifest(items: list[Item], feet: bool = False) -> str:
     """One line per image, in the exact order sent to the model — the whole
     point being that the numbering here always matches reality: the clean
     room photo, then each product photo in the order pieces were added.
@@ -1472,7 +1472,11 @@ def build_image_manifest(items: list[Item]) -> str:
             f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
             "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
             "legs, stitching, material, colour and texture. Only the number of seats and the overall "
-            "width follow the configuration stated below; everything else must match this photograph."
+            + (
+                "width follow the configuration stated below; everything else must match this photograph."
+                if feet
+                else "size follow what is stated below; everything else must match this photograph."
+            )
         )
         n += 1
     numbers = fabric_image_numbers(items)
@@ -1970,11 +1974,14 @@ def _half_foot(value: float) -> float:
     return round(value * 2) / 2
 
 
-def arm_shape_header(shape: str, geometry: dict, width_ft: float, layout_json: dict | None) -> str:
-    """Header wording for a multi-arm sofa that states its SHAPE, not just one
-    length: both arms for an L or corner sofa (the long arm is the item's
-    width, the other is read off the plan exactly as its handle shows it),
-    overall length and seat depth for a curved one."""
+def arm_shape_header(shape: str, geometry: dict, width_ft: float, layout_json: dict | None, feet: bool = False) -> str:
+    """Header wording for a multi-arm sofa. With feet it states its SHAPE, not
+    just one length: both arms for an L or corner sofa (the long arm is the
+    item's width, the other is read off the plan exactly as its handle shows
+    it), overall length and seat depth for a curved one. Without feet it only
+    names the shape; the piece's placement lines carry its proportions."""
+    if not feet:
+        return {"L": "L-shaped sofa", "corner": "corner sofa with backrests along both arms"}.get(shape, "curved sofa")
     w_ft, h_ft = room_feet(layout_json)
     long_rect, short_rect = geometry["long"], geometry["short"]
     short_ft = _half_foot(max(short_rect["w"] * w_ft, short_rect["h"] * h_ft))
@@ -1988,7 +1995,7 @@ def arm_shape_header(shape: str, geometry: dict, width_ft: float, layout_json: d
     return f"curved sofa: {width_ft:g} ft long overall, {depth_ft:g} ft deep from back to front"
 
 
-def flatten_placed_subpieces(items: list[Item], layout_json: dict | None = None) -> list[dict]:
+def flatten_placed_subpieces(items: list[Item], layout_json: dict | None = None, feet: bool = False) -> list[dict]:
     """One record per placed sub-piece, in item order then sub_index order.
     Sub-pieces with no placement are left out entirely — {{PLACEMENT}} only
     describes what was actually placed, even though {{PIECES}} (see
@@ -2011,9 +2018,11 @@ def flatten_placed_subpieces(items: list[Item], layout_json: dict | None = None)
             else:
                 description = f"{item.category} ({item.type})"
             if sub_piece["shape"] in ARM_SHAPES:
-                header = arm_shape_header(sub_piece["shape"], entry["geometry"], sub_piece["width_ft"], layout_json)
-            else:
+                header = arm_shape_header(sub_piece["shape"], entry["geometry"], sub_piece["width_ft"], layout_json, feet)
+            elif feet:
                 header = f"{description}, {sub_piece['width_ft']:g} ft"
+            else:
+                header = description
             records.append(
                 {
                     "item": item,
@@ -2028,8 +2037,10 @@ def flatten_placed_subpieces(items: list[Item], layout_json: dict | None = None)
     return records
 
 
-def build_placement_text(items: list[Item], layout_json: dict | None, ignore_placement: bool) -> str:
-    records = flatten_placed_subpieces(items, layout_json)
+def build_placement_text(items: list[Item], layout_json: dict | None, ignore_placement: bool, feet: bool = False) -> str:
+    """`feet` is the feet_in_prompt setting: when off, no length in feet is
+    written and each piece's size is given as a share of its wall or the room."""
+    records = flatten_placed_subpieces(items, layout_json, feet)
     if ignore_placement or not records:
         return NO_PLACEMENT_LINE + "\n"
 
@@ -2209,18 +2220,21 @@ def build_room_layout_text(layout_json: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_pieces_text(items: list[Item]) -> str:
+def build_pieces_text(items: list[Item], feet: bool = False) -> str:
     """Lists every placeable sub-piece, not the parent item — a "3+2" sofa
-    lists its three-seater and two-seater separately, each with its own
-    estimated width, regardless of whether either has been placed yet."""
+    lists its three-seater and two-seater separately (each with its own
+    estimated width when `feet` is on), regardless of whether either has
+    been placed yet."""
     lines = []
     for item in items:
         sub_pieces = compute_sub_pieces(item)
         if len(sub_pieces) > 1:
             for sp in sub_pieces:
-                lines.append(f"- {item.category} ({sp['label']}), {sp['width_ft']:g} ft wide")
+                width = f", {sp['width_ft']:g} ft wide" if feet else ""
+                lines.append(f"- {item.category} ({sp['label']}){width}")
         else:
-            lines.append(f"- {item.category} ({item.type}), {item.width_ft:g} ft wide")
+            width = f", {item.width_ft:g} ft wide" if feet else ""
+            lines.append(f"- {item.category} ({item.type}){width}")
     return "\n".join(lines)
 
 
@@ -2233,14 +2247,16 @@ def build_prompt(
     ignore_placement: bool,
     placement_text: str | None = None,
     note: str | None = None,
+    feet: bool = False,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
-    replaces the generated facts in {{PLACEMENT}}."""
-    pieces = build_pieces_text(items)
-    image_manifest = build_image_manifest(items)
+    replaces the generated facts in {{PLACEMENT}}. `feet` is the
+    feet_in_prompt setting."""
+    pieces = build_pieces_text(items, feet)
+    image_manifest = build_image_manifest(items, feet)
     config_notes = build_config_notes(items)
     if placement_text is None:
-        placement_text = build_placement_text(items, room.layout_json, ignore_placement)
+        placement_text = build_placement_text(items, room.layout_json, ignore_placement, feet)
     room_layout_text = build_room_layout_text(room.layout_json)
     room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
@@ -2619,7 +2635,7 @@ def start_placement_writer(attempt: Attempt, plan_path: str | None, db: Session)
     plan_path = plan_path or attempt.plan_path
     if not plan_path:
         return "no_plan"
-    facts = build_placement_text(attempt.items, attempt.room.layout_json, False)
+    facts = build_placement_text(attempt.items, attempt.room.layout_json, False, feet_in_prompt(db))
     model = get_active_vision_model(db)
     product_paths, _lines = writer_product_images(attempt.items)
     signature = writer_signature(facts, attempt.room.layout_json, get_placement_writer_prompt(db), model, product_paths)
@@ -2653,7 +2669,7 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
     PLACEMENT_WRITER_WAIT_SECONDS for one still running), otherwise None so
     the caller falls back to the facts. Also returns the record saved to
     generation_debug: facts, raw output, used/fallback + reason, usage."""
-    facts = build_placement_text(attempt.items, attempt.room.layout_json, False)
+    facts = build_placement_text(attempt.items, attempt.room.layout_json, False, feet_in_prompt(db))
     info: dict = {"facts": facts, "used": False, "reason": None, "output": None, "conflicts": None, "usage": None, "plan_path": None}
 
     def fallback(reason: str) -> tuple[None, dict]:
@@ -2733,7 +2749,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             writer_placement, writer_info = await resolve_writer_placement(attempt, db)
         prompt = build_prompt(
             template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
-            attempt.note,
+            attempt.note, feet_in_prompt(db),
         )
         print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
 

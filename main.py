@@ -561,6 +561,9 @@ class Room(Base):
     # the render worse).
     layout_json = Column(JSONB, nullable=True)
     layout_status = Column(String, nullable=False, default="pending", server_default="pending")  # pending|ready|failed
+    # Draw on photo: the 4 floor corners on this photo (back-left, back-right,
+    # front-left, front-right), fractions of the photo — see DRAW ON PHOTO
+    floor_quad = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     attempts = relationship("Attempt", backref="room", cascade="all, delete-orphan", order_by="Attempt.id")
@@ -611,6 +614,9 @@ class Item(Base):
     colour_hex = Column(String, nullable=True)
     material = Column(String, nullable=True)
     fabric_path = Column(String, nullable=True)
+    # a few words on the product in its photo ("white boucle fabric, rounded
+    # arms, low base"), filled once by a vision call; used by Draw on photo
+    short_description = Column(Text, nullable=True)
 
 
 class Render(Base):
@@ -951,6 +957,8 @@ async def lifespan(app: FastAPI):
         add_column(conn, "attempts", "note", "TEXT")
         add_column(conn, "attempts", "placement_mode", "TEXT NOT NULL DEFAULT 'plan'")
         add_column(conn, "attempts", "shapes", "JSONB")
+        add_column(conn, "rooms", "floor_quad", "JSONB")
+        add_column(conn, "items", "short_description", "TEXT")
         # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
         add_column(conn, "studio_images", "look", "TEXT")
         # product-photo studio: which camera view (front/angled) each image used.
@@ -1060,9 +1068,13 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first() is None:
             db.add(Setting(key=PLACEMENT_WRITER_PROMPT_KEY, value=DEFAULT_PLACEMENT_WRITER_PROMPT))
             logger.info("seeded default placement writer prompt")
-        if db.query(Setting).filter(Setting.key == SHAPES_PROMPT_KEY).first() is None:
+        saved_shapes_prompt = db.query(Setting).filter(Setting.key == SHAPES_PROMPT_KEY).first()
+        if saved_shapes_prompt is None:
             db.add(Setting(key=SHAPES_PROMPT_KEY, value=DEFAULT_SHAPES_GENERATION_PROMPT))
             logger.info("seeded default shapes generation prompt")
+        elif hashlib.sha256(saved_shapes_prompt.value.encode("utf-8")).hexdigest() in SUPERSEDED_SHAPES_PROMPT_HASHES:
+            saved_shapes_prompt.value = DEFAULT_SHAPES_GENERATION_PROMPT
+            logger.info("updated the saved shapes generation prompt to the current default")
         if db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first() is None:
             db.add(Setting(key=STUDIO_PROMPT_KEY, value=DEFAULT_STUDIO_PROMPT))
             logger.info("seeded default studio prompt")
@@ -3197,295 +3209,519 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
 
 
 # ---------------------------------------------------------------------------
-# DRAW ON PHOTO — a second placement pipeline, beside the floor plan. The
-# salesman draws each piece as a coloured shape straight onto the room photo
-# (attempt.placement_mode = "shapes", attempt.shapes). For generation, code
-# draws those shapes onto the photo (the guide image) and the image model is
-# told to build each piece on its shape and then remove the shapes. The room
-# reader, the floor plan and the placement writer are not used at all.
+# DRAW ON PHOTO (Beta) — a second placement pipeline, beside the floor plan.
+#   A. Once per room photo the salesman drags 4 dots to the corners of the
+#      visible floor (room.floor_quad, fractions of the photo; dots may lie
+#      just outside it): 1 back-left, 2 back-right (where the back wall meets
+#      the floor), 3 front-left, 4 front-right (near the bottom of the photo).
+#   B. He places the pieces on a top-down plan of that floor with the usual
+#      floor-plan editor (attempt.shapes, see validate_shape_plan).
+#   C. Code maps the plan onto the photo with a perspective transform and
+#      draws each piece as a see-through box: the guide image.
+#   D. The image model gets the guide image (Image 1) and the product photos.
+# The room reader's features, the floor-plan image and the placement writer
+# are not used. Mirrors frontend/src/floorGuide.js, which draws the same guide
+# as a live preview.
 #
-# attempt.shapes = {"version": 1, "shapes": [shape, ...]}, one shape per piece
-# (sub_index splits a 3+2 set), points as fractions of the photo's width and
-# height:
-#   {"item_id", "sub_index", "kind": "rect" | "L" | "corner", "colour": "RED",
-#    "points": [[x, y], ...],   # 4 for rect; 6 for L / corner (see shape_parts)
-#    "backrest": [edge | null per part],   # edge i runs from corner i to i+1
-#    "lounge": part index | null}          # L only: the part with no backrest
-# Mirrors frontend/src/shapes.js.
+# attempt.shapes = {"version": 2, "blocks": [{item_id, sub_index, shape,
+#   geometry}]} — geometry exactly as a floor-plan block (fractions of the
+#   plan: rect / round {x, y, w, h, rotation}; L / corner {long, short,
+#   corner}). Version 1 (shapes drawn corner by corner on the photo) is no
+#   longer used: such attempts open with an empty plan.
 # ---------------------------------------------------------------------------
 
-SHAPE_COLOURS = {
-    "RED": (229, 57, 53),
-    "BLUE": (30, 91, 255),
-    "GREEN": (18, 161, 80),
-    "YELLOW": (255, 208, 0),
-    "PURPLE": (142, 59, 217),
-    "CYAN": (0, 184, 212),
-    "ORANGE": (255, 122, 0),
-    "PINK": (255, 79, 163),
-}
-GUIDE_FILL_ALPHA = 115  # about 45% opacity
-GUIDE_LINE_PX = 12
-GUIDES_DIR = DATA_ROOT / "guides"  # the guide image sent for each shapes render, for the debug page
+# Colours that never look like a sofa material (no red, orange, brown, beige,
+# grey or white). The name goes into the prompt: "(blue box)".
+GUIDE_COLOURS = [
+    ("blue", (30, 91, 255)),
+    ("magenta", (232, 32, 160)),
+    ("green", (18, 161, 80)),
+    ("purple", (142, 59, 217)),
+    ("cyan", (0, 184, 212)),
+]
+GUIDE_BOX_HEIGHT_FT = 1.4
+GUIDE_TOP_ALPHA = 97  # about 38%
+GUIDE_SIDE_ALPHA = 69  # about 27%
+GUIDE_OUTLINE_PX = 3
+GUIDE_BACK_LINE_PX = 9
+DEFAULT_FLOOR_QUAD = [[0.25, 0.58], [0.75, 0.58], [0.0, 1.0], [1.0, 1.0]]
+FLOOR_POINT_RANGE = (-0.5, 1.5)  # dots may sit a little outside the photo
+GUIDES_DIR = DATA_ROOT / "guides"  # the guide image sent for each render, for the debug page
 SHAPES_PROMPT_KEY = "shapes_generation_prompt"
-SHAPES_TOKEN = "{{SHAPES}}"
-# the edge of each part of a two-part shape that is shared with the other part
-SHARED_EDGE = {0: 2, 1: 3}
-GUIDE_IMAGE_LINE = (
-    "Image 1 is the room photograph with coloured guide shapes drawn on the floor; each thick black line marks "
-    "where a sofa's back goes."
-)
+PIECE_BLOCKS_TOKEN = "{{PIECE_BLOCKS}}"
+SHAPE_PIECE_SHAPES = ("rect", "round", "L", "corner")  # curved sofas use the floor plan
+
+DEFAULT_SHAPES_GENERATION_PROMPT = """\
+CAMERA: Keep the camera exactly as in Image 1: same position, same height, same angle, same lens, same framing. Do not zoom, crop, rotate or move the view. Every wall, window, door, corner and the floor must stay exactly where they are in Image 1.
+
+Image 1 is a photo of a real room with numbered see-through boxes drawn on the floor. Each box shows ONLY where a piece stands, which way it faces and how big it is. The boxes are plain on purpose: their colour and square shape say nothing about the design, arms, cushions, colour or material. The thick black line on a box marks the backrest side, against the wall.
+
+PIECES:
+{{PIECE_BLOCKS}}
+
+{{PIECE_FINISH}}
+
+Each piece takes its design, colour and material only from its own photograph and its own description above. Different pieces must not look alike unless their photographs are the same. If a photograph also shows tables, cushions or other furniture, use only the main piece from it.
+
+Keep the gaps between pieces as the boxes show. Build real furniture standing straight on the floor in the correct perspective of the room.
+
+Remove every box, every label and every black line completely. Nothing of the guide may remain in the final image.
+
+Never change the room to make furniture fit. Keep every wall, window, door, ceiling and the floor as they are, only finish the surfaces neatly. A coffee table is optional and modest. Do not place plants or decor next to or behind the sofas.
+
+{{ROOM_TREATMENT}}
+
+{{LIGHTING}}
+
+Final check: the camera has not moved; every piece has the colour and material of its own photograph; every L's lounge is at the stated end; every straight sofa has the stated number of seats; no box, label or line remains.
+"""
 
 
-def _prompt_section(start: str, end: str | None) -> str:
-    """A stretch of the floor-plan pipeline's default prompt, so the two
-    pipelines start from the same camera, finishing and decor wording."""
-    i = DEFAULT_GENERATION_PROMPT.index(start)
-    j = DEFAULT_GENERATION_PROMPT.index(end, i) if end else len(DEFAULT_GENERATION_PROMPT)
-    return DEFAULT_GENERATION_PROMPT[i:j].strip()
-
-
-DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
-    [
-        "{{IMAGE_MANIFEST}}",
-        "{{PIECE_FINISH}}",
-        "Add the furniture into the room photograph (Image 1), on the coloured guide shapes.",
-        SHAPES_TOKEN,
-        "Each sofa stays the size of its shape: never larger than the shape, never move a sofa off its shape or turn "
-        "it at an angle. The floor between shapes stays visible — keep every gap exactly as the shapes show. Each "
-        "sofa keeps its own material and colour from its own photograph, unless the FABRIC section gives it another.",
-        "After placing the furniture, remove all coloured guide shapes and black lines completely. No colour tint, "
-        "outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
-        _prompt_section("CAMERA —", "ROOM LAYOUT"),
-        _prompt_section("Keep everything else exactly the same.", "A sofa whose back is against a wall"),
-        "Remove any people from the photograph.",
-        _prompt_section("Clear away people, tools, ladders", "{{ROOM_TREATMENT}}"),
-        "{{ROOM_TREATMENT}}",
-        "{{DECOR}}",
-        "{{LIGHTING}}",
-        _prompt_section("The furniture being placed must be the visual focal point", None),
-    ]
-) + "\n"
+# sha256 of earlier built-in Draw-on-photo prompts: a saved prompt still equal
+# to one was never edited, so startup moves it to the current default.
+SUPERSEDED_SHAPES_PROMPT_HASHES = {
+    "5959efbe198a487bc8b1c2c20284d93d51013f3b96f96d1c42c5541649b12aa1",  # shapes drawn corner by corner on the photo
+}
 
 
 def get_shapes_prompt(db: Session) -> str:
     return get_setting(db, SHAPES_PROMPT_KEY, DEFAULT_SHAPES_GENERATION_PROMPT)
 
 
-def _line_intersection(a, b, c, d):
-    """Where line a-b meets line c-d, or None when they are parallel."""
-    (x1, y1), (x2, y2), (x3, y3), (x4, y4) = a, b, c, d
-    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(den) < 1e-9:
-        return None
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
-    return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+def plan_feet(room: Room) -> tuple[float, float]:
+    """(width, depth) in feet of the visible floor the plan shows: 12 x 10 ft,
+    turned or squared when the room reader says the room is deeper than wide
+    or about square. Mirrors planFeetFor() in frontend/src/floorGuide.js."""
+    shape = (room.layout_json or {}).get("depth_vs_width")
+    return {"deeper than wide": (10.0, 12.0), "about square": (11.0, 11.0)}.get(shape, (12.0, 10.0))
 
 
-def shape_parts(kind: str, points: list) -> list[list[tuple[float, float]]]:
-    """The 4-corner parts of a shape. An L or corner sofa is one outline of six
-    corners, p0..p5 clockwise from the outer corner of its first part:
-        p0 ------------------ p1
-        |       part 0         |
-        p5 ------------ p4     q        q = where line p5-p4 meets line p1-p2
-                        |      |
-                        |part 1|
-                        p3 -- p2
-    part 0 = p0 p1 q p5, part 1 = q p2 p3 p4, joined along q-p4."""
-    pts = [tuple(p) for p in points]
-    if kind == "rect":
-        return [pts[:4]]
-    p0, p1, p2, p3, p4, p5 = pts
-    q = _line_intersection(p5, p4, p1, p2) or ((p1[0] + p2[0]) / 2, (p4[1] + p5[1]) / 2)
-    return [[p0, p1, q, p5], [q, p2, p3, p4]]
+def homography(src: list, dst: list) -> list[float]:
+    """The 8 numbers of the perspective transform taking 4 src points to 4 dst
+    points (h33 = 1)."""
+    a, b = [], []
+    for (x, y), (u, v) in zip(src, dst):
+        a.append([x, y, 1, 0, 0, 0, -u * x, -u * y])
+        b.append(u)
+        a.append([0, 0, 0, x, y, 1, -v * x, -v * y])
+        b.append(v)
+    n = 8
+    m = [row[:] + [rhs] for row, rhs in zip(a, b)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[pivot][col]) < 1e-12:
+            raise ValueError("the floor corners don't make a usable shape")
+        m[col], m[pivot] = m[pivot], m[col]
+        for r in range(n):
+            if r != col:
+                f = m[r][col] / m[col][col]
+                m[r] = [rv - f * cv for rv, cv in zip(m[r], m[col])]
+    return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def piece_shape_kind(sub_shape: str) -> str | None:
-    """The shape a piece is drawn with; None for a curved sofa (not supported)."""
-    return {"L": "L", "corner": "corner", "curved": None}.get(sub_shape, "rect")
+def apply_homography(h: list[float], x: float, y: float) -> tuple[float, float]:
+    w = h[6] * x + h[7] * y + 1
+    return ((h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w)
 
 
-def attempt_pieces(attempt: Attempt) -> list[dict]:
-    """One entry per piece that gets its own shape (a "3+2" set is two), in
-    the order the draw screen lists them."""
+def _rect_corners(rect: dict, w_ft: float, h_ft: float) -> list[tuple[float, float]]:
+    x0, y0 = rect["x"] * w_ft, rect["y"] * h_ft
+    x1, y1 = x0 + rect["w"] * w_ft, y0 + rect["h"] * h_ft
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]  # top-left, top-right, bottom-right, bottom-left
+
+
+# the edge (by its first corner) a rect's back is on: rotation names the wall the back faces
+BACK_EDGE = {0: 0, 270: 1, 180: 2, 90: 3}
+
+
+def _trim_second_arm(long_rect: dict, short_rect: dict) -> dict:
+    """The second arm of an L / corner without the square it shares with the
+    long arm, so the two parts are drawn side by side, not on top of each other."""
+    ox0, oy0 = max(long_rect["x"], short_rect["x"]), max(long_rect["y"], short_rect["y"])
+    ox1 = min(long_rect["x"] + long_rect["w"], short_rect["x"] + short_rect["w"])
+    oy1 = min(long_rect["y"] + long_rect["h"], short_rect["y"] + short_rect["h"])
+    if ox1 <= ox0 or oy1 <= oy0:
+        return short_rect
+    r = dict(short_rect)
+    if short_rect["h"] >= short_rect["w"]:  # runs up/down the plan: cut the shared end off
+        cut = oy1 - oy0
+        if abs(oy0 - short_rect["y"]) < 1e-6:
+            r["y"] = short_rect["y"] + cut
+        r["h"] = max(short_rect["h"] - cut, 1e-4)
+    else:
+        cut = ox1 - ox0
+        if abs(ox0 - short_rect["x"]) < 1e-6:
+            r["x"] = short_rect["x"] + cut
+        r["w"] = max(short_rect["w"] - cut, 1e-4)
+    return r
+
+
+def piece_parts(shape: str, geometry: dict) -> list[dict]:
+    """The boxes a piece is drawn as: [{rect, back_edge | None, lounge}]."""
+    if shape in ("rect", "round"):
+        return [{"rect": geometry, "back": None if shape == "round" else BACK_EDGE[geometry["rotation"]], "lounge": False}]
+    long_rect, short_rect = geometry["long"], _trim_second_arm(geometry["long"], geometry["short"])
+    return [
+        {"rect": long_rect, "back": BACK_EDGE[long_rect["rotation"]], "lounge": False},
+        # an L's second part is the open chaise; a corner sofa's has its own backrest
+        {"rect": short_rect, "back": None if shape == "L" else BACK_EDGE[geometry["short"]["rotation"]], "lounge": shape == "L"},
+    ]
+
+
+def shape_plan_pieces(attempt: Attempt) -> list[dict]:
+    """Every piece in label order (a "3+2" set is two pieces), numbered 1, 2,
+    ... with its guide colour and the Image number of its product photo."""
     pieces = []
-    for index, item in enumerate(attempt.items):
+    for item_index, item in enumerate(attempt.items):
         subs = compute_sub_pieces(item)
         for sub in subs:
+            number = len(pieces) + 1
             pieces.append(
                 {
+                    "number": number,
                     "item": item,
-                    "item_index": index,
                     "sub_index": sub["sub_index"],
                     "label": sub["label"] if len(subs) > 1 else item.type,
-                    "kind": piece_shape_kind(sub["shape"]),
+                    "shape": sub["shape"],
+                    "colour": GUIDE_COLOURS[(number - 1) % len(GUIDE_COLOURS)],
+                    "image": item_index + 2,  # Image 1 is the guide; one product photo per item, in item order
                 }
             )
     return pieces
 
 
-def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | None]:
-    """Checks shapes against the attempt's pieces. Returns (clean shapes,
-    None) or (None, what is wrong)."""
-    if not isinstance(data, dict) or not isinstance(data.get("shapes"), list):
-        return None, "The shapes could not be read."
-    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
-    clean, seen = [], set()
-    for shape in data["shapes"]:
-        if not isinstance(shape, dict):
-            return None, "The shapes could not be read."
-        key = (shape.get("item_id"), shape.get("sub_index", 0))
+def piece_type_label(item: Item, label: str, shape: str) -> str:
+    """The guide's label: L-SHAPE, CORNER SOFA, 3-SEATER, ARMCHAIR, DINING TABLE ..."""
+    if shape == "L":
+        return "L-SHAPE"
+    if shape == "corner":
+        return "CORNER SOFA"
+    seats = sofa_seat_count(item.category, label)
+    if item.category == "Chair" or seats == 1:
+        return "ARMCHAIR"
+    if seats:
+        return f"{seats}-SEATER"
+    return item.category.upper()
+
+
+def validate_shape_plan(attempt: Attempt, data) -> tuple[dict | None, str | None]:
+    """Checks a version-2 shapes plan against the attempt's pieces."""
+    if not isinstance(data, dict) or not isinstance(data.get("blocks"), list):
+        return None, "The plan could not be read."
+    pieces = {(p["item"].id, p["sub_index"]): p for p in shape_plan_pieces(attempt)}
+    blocks, seen = [], set()
+    for block in data["blocks"]:
+        if not isinstance(block, dict):
+            return None, "The plan could not be read."
+        key = (block.get("item_id"), block.get("sub_index", 0))
         piece = pieces.get(key)
         if piece is None or key in seen:
-            return None, "A shape belongs to a piece that is not in this attempt."
+            return None, "A block belongs to a piece that is not in this attempt."
         seen.add(key)
-        kind = shape.get("kind")
-        if piece["kind"] is None:
-            return None, "Curved sofas can't be drawn on the photo yet — please use the floor plan."
-        if kind != piece["kind"]:
-            return None, "A shape doesn't match its piece."
-        if shape.get("colour") not in SHAPE_COLOURS:
-            return None, "A shape has an unknown colour."
-        raw = shape.get("points")
-        want = 4 if kind == "rect" else 6
-        if not isinstance(raw, list) or len(raw) != want:
-            return None, "A shape has the wrong number of corners."
-        try:
-            points = [[round(min(1.0, max(0.0, float(x))), 5), round(min(1.0, max(0.0, float(y))), 5)] for x, y in raw]
-        except (TypeError, ValueError):
-            return None, "A shape's corners could not be read."
-        parts = 1 if kind == "rect" else 2
-        backrest = shape.get("backrest")
-        if not isinstance(backrest, list) or len(backrest) != parts:
-            return None, "A shape's backrest could not be read."
-        lounge = shape.get("lounge") if kind == "L" else None
-        if kind == "L" and lounge not in (0, 1):
-            return None, "Mark which part of the L-shape is the lounge."
-        for part, edge in enumerate(backrest):
-            if part == lounge:
-                if edge is not None:
-                    return None, "The lounge has no backrest."
-                continue
-            if not isinstance(edge, int) or not 0 <= edge <= 3 or (parts == 2 and edge == SHARED_EDGE[part]):
-                return None, "Every part except a lounge needs a backrest edge on its outside."
-        clean.append(
-            {
-                "item_id": key[0],
-                "sub_index": key[1],
-                "kind": kind,
-                "colour": shape["colour"],
-                "points": points,
-                "backrest": list(backrest),
-                "lounge": lounge,
-            }
-        )
-    return clean, None
+        if piece["shape"] not in SHAPE_PIECE_SHAPES:
+            return None, "Curved sofas can't be placed this way yet — please use the floor plan."
+        geometry = validate_placement(piece["shape"], block.get("geometry"))
+        if geometry is None:
+            return None, "A block's position could not be read."
+        clean = {"item_id": key[0], "sub_index": key[1], "shape": piece["shape"], "geometry": geometry}
+        if isinstance(block.get("width_ft"), (int, float)) and 0 < block["width_ft"] <= 40:
+            clean["width_ft"] = float(block["width_ft"])
+        blocks.append(clean)
+    return {"version": 2, "blocks": blocks}, None
 
 
-def stored_shapes(attempt: Attempt) -> list[dict]:
-    """The attempt's saved shapes still valid for its current pieces (a piece
-    deleted since drops its shape), in piece order."""
-    order = {(p["item"].id, p["sub_index"]): i for i, p in enumerate(attempt_pieces(attempt))}
-    raw = (attempt.shapes or {}).get("shapes") or []
-    keep = [s for s in raw if isinstance(s, dict) and (s.get("item_id"), s.get("sub_index", 0)) in order]
-    clean, problem = validate_shapes(attempt, {"shapes": keep})
+def stored_shape_blocks(attempt: Attempt) -> dict:
+    """(item_id, sub_index) -> geometry for the attempt's saved plan (version
+    2 only), dropping pieces deleted since."""
+    data = attempt.shapes or {}
+    if data.get("version") != 2:
+        return {}
+    keep = {(p["item"].id, p["sub_index"]) for p in shape_plan_pieces(attempt)}
+    blocks = [b for b in data.get("blocks") or [] if isinstance(b, dict) and (b.get("item_id"), b.get("sub_index", 0)) in keep]
+    clean, problem = validate_shape_plan(attempt, {"blocks": blocks})
     if problem:
-        return []
-    return sorted(clean, key=lambda s: order[(s["item_id"], s["sub_index"])])
+        return {}
+    return {(b["item_id"], b["sub_index"]): b["geometry"] for b in clean["blocks"]}
 
 
 def missing_shape_pieces(attempt: Attempt) -> list[str]:
-    """Pieces that still need a shape before a shapes render can start
-    (curved sofas included: they can't be drawn yet)."""
-    drawn = {(s["item_id"], s["sub_index"]) for s in stored_shapes(attempt)}
-    return [p["label"] for p in attempt_pieces(attempt) if (p["item"].id, p["sub_index"]) not in drawn]
+    """What still stops a Draw-on-photo render: the floor corners, and every
+    piece placed on the plan (curved sofas can't be)."""
+    missing = [] if valid_floor_quad(attempt.room.floor_quad) else ["the floor corners"]
+    placed = stored_shape_blocks(attempt)
+    missing += [p["label"] for p in shape_plan_pieces(attempt) if (p["item"].id, p["sub_index"]) not in placed]
+    return missing
 
 
-def draw_guide_image(photo: Image.Image, shapes: list[dict]) -> Image.Image:
-    """The room photo with every shape filled in its colour at about 45%
-    opacity and a GUIDE_LINE_PX black line on each backrest edge."""
+def valid_floor_quad(points) -> list[list[float]] | None:
+    if not isinstance(points, list) or len(points) != 4:
+        return None
+    lo, hi = FLOOR_POINT_RANGE
+    try:
+        clean = [[round(float(x), 5), round(float(y), 5)] for x, y in points]
+    except (TypeError, ValueError):
+        return None
+    if not all(lo <= v <= hi for p in clean for v in p):
+        return None
+    try:
+        homography([(0, 0), (1, 0), (1, 1), (0, 1)], [clean[0], clean[1], clean[3], clean[2]])
+    except ValueError:
+        return None
+    return clean
+
+
+def _font(size: int):
+    from PIL import ImageFont
+
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # very old Pillow
+        return ImageFont.load_default()
+
+
+def draw_floor_guide(photo: Image.Image, floor_quad: list, feet: tuple[float, float], pieces: list[dict], placed: dict):
+    """The guide image: the room photo with each placed piece as a see-through
+    box in the room's perspective. Returns (image, {piece number: "LEFT" |
+    "RIGHT"} — which side of the picture each L's lounge landed on)."""
     from PIL import ImageDraw
 
     base = photo.convert("RGBA")
     width, height = base.size
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    fill = ImageDraw.Draw(overlay)
-    lines = []
-    for shape in shapes:
-        rgb = SHAPE_COLOURS[shape["colour"]]
-        for part, corners in enumerate(shape_parts(shape["kind"], shape["points"])):
-            pixels = [(x * width, y * height) for x, y in corners]
-            fill.polygon(pixels, fill=(*rgb, GUIDE_FILL_ALPHA))
-            edge = shape["backrest"][part]
-            if edge is not None:
-                lines.append((pixels[edge], pixels[(edge + 1) % 4]))
-    guide = Image.alpha_composite(base, overlay)
-    draw = ImageDraw.Draw(guide)
-    radius = GUIDE_LINE_PX / 2
-    for start, end in lines:
-        draw.line([start, end], fill=(0, 0, 0, 255), width=GUIDE_LINE_PX)
-        for x, y in (start, end):  # round ends
-            draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
-    return guide.convert("RGB")
+    w_ft, h_ft = feet
+    dots = [(x * width, y * height) for x, y in floor_quad]
+    # plan corners (feet) -> photo pixels: back-left, back-right, front-right, front-left
+    hm = homography([(0, 0), (w_ft, 0), (w_ft, h_ft), (0, h_ft)], [dots[0], dots[1], dots[3], dots[2]])
 
+    def lift(u: float, v: float):
+        bottom = apply_homography(hm, u, v)
+        a, b = apply_homography(hm, u - 0.5, v), apply_homography(hm, u + 0.5, v)
+        px_per_ft = math.hypot(b[0] - a[0], b[1] - a[1])  # along the back wall, at this depth
+        return bottom, (bottom[0], bottom[1] - GUIDE_BOX_HEIGHT_FT * px_per_ft)
 
-def shape_piece_name(item: Item, label: str, kind: str) -> str:
-    if kind == "L":
-        return "L-shaped sofa"
-    if kind == "corner":
-        return "corner sofa"
-    seats = sofa_seat_count(item.category, label)
-    if seats is not None:
-        return sofa_seat_description(seats)
-    if item.category == "Chair":
-        return "armchair"
-    return f"{item.category.lower()} ({label})"
+    drawn, lounge_side, labels = [], {}, []
+    for piece in pieces:
+        geometry = placed.get((piece["item"].id, piece["sub_index"]))
+        if geometry is None:
+            continue
+        rgb = piece["colour"][1]
+        parts = []
+        for part in piece_parts(piece["shape"], geometry):
+            corners = _rect_corners(part["rect"], w_ft, h_ft)
+            lifted = [lift(u, v) for u, v in corners]
+            parts.append({**part, "bottom": [p[0] for p in lifted], "top": [p[1] for p in lifted], "depth": max(v for _u, v in corners)})
+        drawn.append({"piece": piece, "rgb": rgb, "parts": parts, "depth": max(p["depth"] for p in parts)})
+        if piece["shape"] == "L":
+            centre = lambda pts: sum(x for x, _y in pts) / len(pts)
+            lounge_side[piece["number"]] = "LEFT" if centre(parts[1]["top"]) < centre(parts[0]["top"]) else "RIGHT"
 
-
-def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
-    """{{SHAPES}}: one paragraph per shape, naming the piece, its product
-    photo's Image number and how to build it on its shape."""
-    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
-    section = finish_section_name(attempt.items)
-    paragraphs = []
-    for shape in shapes:
-        piece = pieces[(shape["item_id"], shape["sub_index"])]
-        item, number = piece["item"], piece["item_index"] + 2  # Image 1 is the guide; products follow in item order
-        colour = shape["colour"]
-        source = (
-            f"in the exact design of Image {number}, with the material and colour given in the {section} section"
-            if item_has_finish(item)
-            else f"in the exact design, material and colour of Image {number}"
-        )
-        text = (
-            f"{colour} shape: one {shape_piece_name(item, piece['label'], shape['kind'])} {source}. Build it exactly on "
-            f"the {colour.lower()} shape, covering the same floor area, at the same size, with its back along the thick "
-            "black line, flat against the wall."
-        )
-        if shape["kind"] == "L":
-            text += (
-                " The part of the shape with no black line is an open chaise lounge with no backrest and no arm at its "
-                "tip. The sofa has one arm only, at the end of the long run away from the lounge. If the photograph "
-                "shows a straight sofa, rebuild it as this L in the same design."
+    guide = base
+    dark = lambda rgb: tuple(int(c * 0.6) for c in rgb)
+    for item in sorted(drawn, key=lambda d: d["depth"]):  # the farthest box first, nearer ones over it
+        layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        paint = ImageDraw.Draw(layer)
+        rgb = item["rgb"]
+        for part in item["parts"]:
+            b, t = part["bottom"], part["top"]
+            for i in range(4):
+                j = (i + 1) % 4
+                paint.polygon([b[i], b[j], t[j], t[i]], fill=(*rgb, GUIDE_SIDE_ALPHA))
+        for part in item["parts"]:
+            paint.polygon(part["top"], fill=(*rgb, GUIDE_TOP_ALPHA))
+        outline = (*dark(rgb), 255)
+        for part in item["parts"]:
+            b, t = part["bottom"], part["top"]
+            paint.line(t + [t[0]], fill=outline, width=GUIDE_OUTLINE_PX)
+            paint.line(b + [b[0]], fill=outline, width=GUIDE_OUTLINE_PX)
+            for i in range(4):
+                paint.line([b[i], t[i]], fill=outline, width=GUIDE_OUTLINE_PX)
+        for part in item["parts"]:
+            if part["back"] is not None:
+                t = part["top"]
+                a, c = t[part["back"]], t[(part["back"] + 1) % 4]
+                paint.line([a, c], fill=(0, 0, 0, 255), width=GUIDE_BACK_LINE_PX)
+                for x, y in (a, c):
+                    r = GUIDE_BACK_LINE_PX / 2
+                    paint.ellipse([x - r, y - r, x + r, y + r], fill=(0, 0, 0, 255))
+        guide = Image.alpha_composite(guide, layer)
+        top_all = [p for part in item["parts"] for p in part["top"]]
+        labels.append(
+            (
+                f"{item['piece']['number']} · {piece_type_label(item['piece']['item'], item['piece']['label'], item['piece']['shape'])}",
+                (sum(x for x, _ in top_all) / len(top_all), min(y for _, y in top_all)),
+                [part for part in item["parts"] if part["lounge"]],
             )
-        elif shape["kind"] == "corner":
-            text += " Both parts have a backrest along their black lines; arms only at the two outer ends."
-        paragraphs.append(text)
-    return "\n\n".join(paragraphs)
+        )
+
+    draw = ImageDraw.Draw(guide)
+    scale = width / 1536
+    big, small = _font(max(int(24 * scale), 12)), _font(max(int(17 * scale), 10))
+
+    def tag(text: str, cx: float, cy: float, font, pad: float) -> None:
+        box = draw.textbbox((0, 0), text, font=font)
+        tw, th = box[2] - box[0], box[3] - box[1]
+        x0, y0 = cx - tw / 2 - pad, cy - th / 2 - pad
+        draw.rounded_rectangle([x0, y0, x0 + tw + 2 * pad, y0 + th + 2 * pad], radius=pad + 2, fill=(255, 255, 255, 235), outline=(0, 0, 0, 90))
+        draw.text((x0 + pad - box[0], y0 + pad - box[1]), text, font=font, fill=(17, 17, 17, 255))
+
+    for text, (cx, top_y), lounges in labels:
+        tag(text, cx, top_y - 26 * scale, big, 8 * scale)
+        for part in lounges:
+            t = part["top"]
+            tag("LOUNGE", sum(x for x, _ in t) / 4, sum(y for _, y in t) / 4, small, 5 * scale)
+    return guide.convert("RGB"), lounge_side
 
 
-def build_shapes_prompt(
-    template: str, attempt: Attempt, shapes: list[dict], room_padded: bool, feet: bool = False
-) -> str:
-    """The shapes pipeline's prompt: {{SHAPES}} filled here, everything else
-    (image list, fabric section, look, decor, lighting, the showroom's note)
-    exactly as the floor-plan pipeline fills it."""
-    filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes))
-    prompt = build_prompt(
-        filled, attempt.room, attempt.items, attempt.room_treatment, attempt.lighting, True, "", attempt.note, feet, room_padded
+def describe_piece(piece: dict, lounge_side: dict, section: str) -> str:
+    item, n, k = piece["item"], piece["number"], piece["image"]
+    type_label = piece_type_label(item, piece["label"], piece["shape"])
+    colour = piece["colour"][0]
+    noun = "sofa" if item.category == "Sofa" else "armchair" if type_label == "ARMCHAIR" else item.category.lower()
+    description = (item.short_description or "").strip().rstrip(".")
+    header = f"{n} · {type_label} ({colour} box) = the {noun} in Image {k}" + (f": {description}." if description else ".")
+    if item_has_finish(item):
+        header += f" Its material and colour come from the {section} section, not from the photograph."
+    if piece["shape"] == "L":
+        side = lounge_side.get(n, "RIGHT")
+        arm_end = "LEFT" if side == "RIGHT" else "RIGHT"
+        body = (
+            f"One L-shaped sofa built where box {n} stands, about the same size. Its long part has its back flat against "
+            f"the wall, with one arm at its {arm_end} end. The part marked LOUNGE is an open chaise coming toward the camera "
+            f"at its {side} end in the picture, with no backrest and no arm at its tip. If Image {k} shows a straight sofa, "
+            "rebuild it as this L in the same design."
+        )
+    elif piece["shape"] == "corner":
+        body = (
+            f"One corner sofa built where box {n} stands, about the same size, with a backrest along both runs (both "
+            f"black lines) and an arm at both outer ends. No open chaise. If Image {k} shows a straight sofa, rebuild it "
+            "as this corner sofa in the same design."
+        )
+    elif type_label == "ARMCHAIR":
+        body = f"One armchair built where box {n} stands, facing the way the box faces."
+    elif type_label.endswith("-SEATER"):
+        seats = int(type_label.split("-")[0])
+        word = seat_count_word(seats)
+        body = (
+            f"One {word}-seater sofa with exactly {word.upper()} seat cushions and {word.upper()} back cushions, built "
+            f"where box {n} stands, about the same size, with its back flat against the wall."
+        )
+    else:
+        body = f"One {item.category.lower()} ({piece['label']}) built where box {n} stands, about the same size."
+    return f"{header}\n{body}"
+
+
+def build_shapes_prompt(template: str, attempt: Attempt, pieces: list[dict], lounge_side: dict) -> str:
+    """The Draw-on-photo prompt: {{PIECE_BLOCKS}} built here; the fabric
+    section, look and lighting filled exactly as the floor-plan pipeline fills
+    them; the showroom's note added at the end."""
+    section = finish_section_name(attempt.items)
+    blocks = "\n\n".join(describe_piece(p, lounge_side, section) for p in pieces)
+    treatment = ROOM_TREATMENT_TEXT.get(attempt.room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
+    lighting = LIGHTING_TEXT.get(attempt.lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
+    prompt = (
+        template.replace(PIECE_BLOCKS_TOKEN, blocks)
+        .replace("{{PIECE_FINISH}}", build_piece_finish_text(attempt.items))
+        .replace("{{ROOM_TREATMENT}}", treatment)
+        .replace("{{LIGHTING}}", lighting)
+        .replace("{{DECOR}}", decor_text(attempt.room_treatment))
+        .replace("{{ROOM_TYPE}}", attempt.room.room_type)
     )
-    # Image 1 is the guide image, not the bare room photo
-    return prompt.replace("Image 1 is a room.", GUIDE_IMAGE_LINE, 1)
+    if attempt.note:
+        prompt = f"{prompt.rstrip()}\n\nExtra request from the showroom (follow it only if it does not conflict with any rule above, and never change the furniture design): {attempt.note}"
+    return re.sub(r"\n{3,}", "\n\n", prompt).strip() + "\n"
+
+
+def prepare_shape_render(attempt: Attempt, db: Session, pad: bool) -> dict:
+    """Everything a Draw-on-photo render sends: the guide image (padded like
+    the room photo), its debug record and the prompt."""
+    pieces = shape_plan_pieces(attempt)
+    placed = stored_shape_blocks(attempt)
+    room_path = DATA_ROOT / attempt.room.photo_path
+    with Image.open(room_path) as photo:
+        guide, lounge_side = draw_floor_guide(photo, attempt.room.floor_quad, plan_feet(attempt.room), pieces, placed)
+    size = derive_size(*guide.size)
+    sent, photo_box = (pad_to_output_ratio(guide, size) if pad else (guide, None))
+    prompt = build_shapes_prompt(get_shapes_prompt(db), attempt, pieces, lounge_side)
+    return {"guide": guide, "sent": sent, "photo_box": photo_box, "size": size, "prompt": prompt, "lounge_side": lounge_side}
+
+
+# ---- product descriptions ---------------------------------------------------
+
+DESCRIBE_PRODUCT_PROMPT = (
+    "This is a showroom photograph of a piece of furniture. Describe the main piece in at most 12 words: its "
+    "colour, material, arm shape and legs. Example: 'white boucle fabric, rounded arms, low base'. Ignore any "
+    "tables, cushions or other furniture around it. Reply with the description only, no full stop."
+)
+DESCRIPTION_MAX_CHARS = 120
+
+
+def describe_product_photo(path: Path, model: str) -> str:
+    """One vision call: a short description of the product in the photo.
+    Synchronous — callers offload it to a thread."""
+    data = path.read_bytes()
+    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    result = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": DESCRIBE_PRODUCT_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}},
+                ],
+            }
+        ],
+        timeout=60,
+    )
+    text = " ".join((result.choices[0].message.content or "").split()).strip(" .'\"")
+    return text[:DESCRIPTION_MAX_CHARS]
+
+
+def fill_missing_descriptions(db: Session, items: list[Item]) -> int:
+    """Gives every item without a short description one: copied from any item
+    with the same photo that has one, otherwise one vision call per photo.
+    Returns how many vision calls were made."""
+    calls = 0
+    for photo_path in dict.fromkeys(i.photo_path for i in items if not (i.short_description or "").strip()):
+        twin = (
+            db.query(Item)
+            .filter(Item.photo_path == photo_path, Item.short_description.isnot(None), Item.short_description != "")
+            .first()
+        )
+        text_value = twin.short_description if twin else None
+        if text_value is None:
+            try:
+                text_value = describe_product_photo(DATA_ROOT / photo_path, get_active_vision_model(db))
+                calls += 1
+            except Exception:
+                logger.exception("describing product photo failed photo=%s", photo_path)
+                continue
+        for item in items:
+            if item.photo_path == photo_path and not (item.short_description or "").strip():
+                item.short_description = text_value
+        db.commit()
+    return calls
+
+
+async def describe_attempt_items(attempt_id: int) -> None:
+    """Background: describe an attempt's newly added pieces."""
+
+    def work() -> None:
+        db = SessionLocal()
+        try:
+            attempt = db.query(Attempt).filter(Attempt.id == attempt_id).first()
+            if attempt is not None:
+                fill_missing_descriptions(db, attempt.items)
+        except Exception:
+            logger.exception("describe items failed attempt_id=%s", attempt_id)
+            db.rollback()
+        finally:
+            db.close()
+
+    await asyncio.to_thread(work)
+
+
+class FloorBody(BaseModel):
+    points: list
 
 
 class PlacementModeBody(BaseModel):
@@ -3494,6 +3730,24 @@ class PlacementModeBody(BaseModel):
 
 class ShapesBody(BaseModel):
     shapes: dict
+
+
+class DescriptionBody(BaseModel):
+    short_description: str
+
+
+@app.put("/api/rooms/{room_id}/floor")
+def api_set_room_floor(room_id: int, body: FloorBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    """The 4 floor corners for Draw on photo, kept on the room so every later
+    attempt on this photo reuses them."""
+    room = get_owned_room(room_id, user, db)
+    points = valid_floor_quad(body.points)
+    if points is None:
+        return error_response(400, "invalid_floor", "Those floor corners don't make a usable floor — please drag them again.")
+    room.floor_quad = points
+    db.commit()
+    db.refresh(room)
+    return JSONResponse(content={"room": room_detail(room)})
 
 
 @app.put("/api/attempts/{attempt_id}/placement-mode")
@@ -3518,10 +3772,28 @@ def api_save_shapes(
     attempt_id: int, body: ShapesBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    shapes, problem = validate_shapes(attempt, body.shapes)
+    plan, problem = validate_shape_plan(attempt, body.shapes)
     if problem:
         return error_response(400, "invalid_shapes", problem)
-    attempt.shapes = {"version": 1, "shapes": shapes}
+    attempt.shapes = plan
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
+@app.put("/api/attempts/{attempt_id}/items/{item_id}/description")
+def api_set_item_description(
+    attempt_id: int, item_id: int, body: DescriptionBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """The salesman corrects a piece's short description (used by Draw on photo)."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    text_value = " ".join(body.short_description.split())
+    if len(text_value) > DESCRIPTION_MAX_CHARS:
+        return error_response(400, "description_too_long", f"Please keep it to {DESCRIPTION_MAX_CHARS} characters.")
+    item.short_description = text_value or None
     db.commit()
     db.refresh(attempt)
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
@@ -3793,10 +4065,13 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         writer_placement, writer_info = (None, None)
         # "Draw on photo": the guide image replaces the room photo, and the
         # room reader / floor plan / placement writer are not used at all
-        shapes = stored_shapes(attempt) if attempt.placement_mode == "shapes" and not attempt.ignore_placement else []
-        if attempt.placement_mode == "shapes" and not attempt.ignore_placement and not shapes:
-            fail_job(db, job_id, "Draw the furniture on the photo first.")
+        shapes = attempt.placement_mode == "shapes" and not attempt.ignore_placement
+        if shapes and missing_shape_pieces(attempt):
+            fail_job(db, job_id, "Mark the floor and place every piece on the plan first.")
             return
+        if shapes:
+            # descriptions are filled when a piece is added; any still empty are filled now
+            await asyncio.to_thread(fill_missing_descriptions, db, attempt.items)
         if not attempt.ignore_placement and not shapes:
             # may wait for a writer still running; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
@@ -3810,13 +4085,11 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
         photo_box = None  # where the photo sits in a padded Image 1; None when it is sent as it is
         size = derive_size(room_debug["width"], room_debug["height"])
+        shape_render = None
         if shapes:
             # the guide image: drawn on the room photo, padded exactly as the photo would be
-            with Image.open(room_path) as room_image:
-                guide = draw_guide_image(room_image, shapes)
-            sent = guide
-            if pad_room_photo_enabled(db):
-                sent, photo_box = pad_to_output_ratio(guide, size)
+            shape_render = prepare_shape_render(attempt, db, pad_room_photo_enabled(db))
+            guide, sent, photo_box, size = shape_render["guide"], shape_render["sent"], shape_render["photo_box"], shape_render["size"]
             GUIDES_DIR.mkdir(parents=True, exist_ok=True)
             guide_name = f"{uuid.uuid4().hex}.jpg"
             buffer = io.BytesIO()
@@ -3853,8 +4126,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         image_files.append(room_file)
         debug_images.append(room_debug)
 
-        if shapes:
-            prompt = build_shapes_prompt(get_shapes_prompt(db), attempt, shapes, photo_box is not None, feet_in_prompt(db))
+        if shape_render:
+            prompt = shape_render["prompt"]
         else:
             prompt = build_prompt(
                 template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
@@ -4079,6 +4352,7 @@ def item_public(item: Item) -> dict:
         "colour_hex": item.colour_hex,
         "material": item.material,
         "fabric_url": f"/media/{item.fabric_path}" if item.fabric_path else None,
+        "short_description": item.short_description,
     }
 
 
@@ -4133,6 +4407,7 @@ def room_detail(room: Room) -> dict:
         "created_at": room.created_at.isoformat() if room.created_at else None,
         "layout_json": room.layout_json,
         "layout_status": room.layout_status,
+        "floor_quad": room.floor_quad,
     }
 
 
@@ -4210,6 +4485,7 @@ async def _add_item_to_attempt(
     discard_placement_writer(attempt)
     db.commit()
     db.refresh(attempt)
+    asyncio.create_task(describe_attempt_items(attempt.id))  # its short description, for Draw on photo
     return attempt
 
 
@@ -4382,7 +4658,7 @@ def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: 
         missing = missing_shape_pieces(attempt)
         if missing:
             return error_response(
-                400, "shapes_missing", f"Draw every piece on the photo first (still missing: {', '.join(missing)})."
+                400, "shapes_missing", f"Mark the floor and place every piece first (still missing: {', '.join(missing)})."
             )
     attempt.ignore_placement = ignore_placement
     db.commit()
@@ -4721,6 +4997,7 @@ async def api_create_attempt(
                 colour_hex=item.colour_hex,
                 material=item.material,
                 fabric_path=item.fabric_path,
+                short_description=item.short_description,
             )
         )
 
@@ -4730,14 +5007,14 @@ async def api_create_attempt(
         # a drawn-on-photo attempt keeps its mode and shapes; items are copied
         # in order, so each shape moves to the copy of its piece
         attempt.placement_mode = source.placement_mode
-        if source.shapes:
+        if source.shapes and source.shapes.get("version") == 2:
             new_ids = {old.id: new.id for old, new in zip(source_items, attempt.items)}
             attempt.shapes = {
                 **source.shapes,
-                "shapes": [
-                    {**s, "item_id": new_ids[s["item_id"]]}
-                    for s in (source.shapes.get("shapes") or [])
-                    if s.get("item_id") in new_ids
+                "blocks": [
+                    {**b, "item_id": new_ids[b["item_id"]]}
+                    for b in (source.shapes.get("blocks") or [])
+                    if b.get("item_id") in new_ids
                 ],
             }
         db.commit()
@@ -4833,6 +5110,7 @@ async def api_add_items_batch(
         )
     db.commit()
     db.refresh(attempt)
+    asyncio.create_task(describe_attempt_items(attempt.id))  # their short description, for Draw on photo
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 
@@ -6566,9 +6844,9 @@ def api_admin_save_prompt(
         return error_response(400, "empty_vision_prompt", "The vision prompt can't be empty.")
     if body.vision_model is not None and not body.vision_model.strip():
         return error_response(400, "empty_vision_model", "The vision model can't be empty.")
-    if body.shapes_prompt is not None and SHAPES_TOKEN not in body.shapes_prompt:
+    if body.shapes_prompt is not None and PIECE_BLOCKS_TOKEN not in body.shapes_prompt:
         return error_response(
-            400, "shapes_prompt_missing_shapes", f"The draw-on-photo prompt must contain {SHAPES_TOKEN} where the shapes go."
+            400, "shapes_prompt_missing_pieces", f"The draw-on-photo prompt must contain {PIECE_BLOCKS_TOKEN} where the pieces go."
         )
     if body.placement_writer_prompt is not None and WRITER_PIECES_TOKEN not in body.placement_writer_prompt:
         return error_response(

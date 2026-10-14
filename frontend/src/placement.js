@@ -36,7 +36,11 @@ const PLAN_MARGIN_BOTTOM = 64;
  * rectangle sits (roomX/roomY/roomW/roomH) inside the full plan canvas
  * (planW/planH). */
 export function planGeometry(depthVsWidth) {
-  const [aw, ah] = roomAspect(depthVsWidth);
+  return planGeometryForAspect(...roomAspect(depthVsWidth));
+}
+
+/** planGeometry for an explicit width : depth (e.g. a plan in feet). */
+export function planGeometryForAspect(aw, ah) {
   const scale = PLAN_BASE_SIZE / Math.max(aw, ah);
   const roomW = aw * scale;
   const roomH = ah * scale;

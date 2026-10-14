@@ -23,6 +23,7 @@ import {
   placementRects,
   planFeatures,
   planGeometry,
+  planGeometryForAspect,
   rectFrame,
   rectsOverlap,
   roomFeet,
@@ -95,6 +96,7 @@ export function FloorPlan({
   onTapObstruction = noop,
   readOnly = false,
   onSvg = null, // called with the <svg> node, for exporting the plan as an image
+  planFeet = null, // { wFt, hFt }: a plan of this size in feet instead of the room reader's shape (Draw on photo)
 }) {
   const svgRef = useRef(null);
   const dragRef = useRef(null); // { mode: "move"|"resize"|"rotate", key, pointerId, startX, startY, orig, moved, ... }
@@ -104,8 +106,8 @@ export function FloorPlan({
   const [featureDrag, setFeatureDrag] = useState(null);
 
   const layout = room.layout_json;
-  const geom = planGeometry(layout?.depth_vs_width);
-  const feet = roomFeet(layout?.depth_vs_width);
+  const geom = planFeet ? planGeometryForAspect(planFeet.wFt, planFeet.hFt) : planGeometry(layout?.depth_vs_width);
+  const feet = planFeet || roomFeet(layout?.depth_vs_width);
   const features = planFeatures(layout);
   if (featureDrag && features.walls[featureDrag.wall]?.[featureDrag.gi]) {
     features.walls[featureDrag.wall][featureDrag.gi].span = featureDrag.span; // drawn where it is being dragged

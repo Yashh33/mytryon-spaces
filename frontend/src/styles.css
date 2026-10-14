@@ -449,16 +449,20 @@ h2 { font-size: 19px; }
 .draw-photo img { display: block; width: 100%; height: auto; pointer-events: none; }
 .draw-svg { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 .draw-shape polygon { cursor: grab; }
-.draw-handle { fill: #fff; cursor: grab; }
-.draw-rotate circle { cursor: grab; }
-.draw-resize rect { cursor: nwse-resize; }
-.draw-handles text { font-family: var(--sans); font-weight: 700; user-select: none; }
-.draw-edge-hit { stroke: transparent; cursor: pointer; stroke-linecap: round; }
-.draw-label { font-weight: 800; fill: #111; paint-order: stroke; stroke: #fff; stroke-width: 3px; font-family: var(--sans); }
-.draw-selected { border: 1px solid var(--orange); border-radius: 12px; padding: 12px; margin-bottom: 14px; background: #fff; }
-.draw-selected-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; margin-bottom: 10px; }
-.draw-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.btn-danger-ghost { background: #fff; border: 1px solid #F3C7C3; color: #B42318; }
+.preview-svg { pointer-events: none; }
+.item-desc { display: block; background: none; border: 0; padding: 2px 0 0; text-align: left; font-size: 12px; color: var(--muted); cursor: pointer; }
+.item-desc-edit { color: var(--orange-d); font-weight: 700; margin-left: 4px; }
+.item-desc-form { display: flex; gap: 6px; margin-top: 4px; }
+.item-desc-form input { flex: 1; min-width: 0; font-size: 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
+.floor-stage { position: relative; background: #1d1b18; border-radius: 12px; user-select: none; }
+.floor-photo img { display: block; width: 100%; height: auto; pointer-events: none; }
+.floor-svg { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; overflow: visible; }
+.floor-dot { fill: #fff; stroke: var(--orange); cursor: grab; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5)); }
+.floor-dot-num { font-weight: 800; fill: #111; font-family: var(--sans); }
+.shapes-layout { display: grid; gap: 16px; }
+@media (min-width: 900px) { .shapes-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; } }
+.draw-piece { text-align: left; cursor: pointer; }
+.draw-piece-desc { font-weight: 500; font-size: 12px; color: var(--muted); }
 .draw-pieces { display: flex; flex-direction: column; gap: 8px; }
 .draw-piece { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; background: #fff; }
 .draw-piece.selected { border-color: var(--orange); }

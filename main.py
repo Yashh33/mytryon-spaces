@@ -1313,13 +1313,13 @@ def derive_size(width: int, height: int) -> str:
     return "1536x1024" if width >= height else "1024x1536"
 
 
-# The image model only returns these sizes. A photo of a clearly different
-# shape (16:9 into 3:2) sent as it is comes back re-framed to fit. So it is
-# padded to the output's shape with plain grey first, and the render is
-# cropped back to where the photo was. Ordinary phone shapes (4:3, 3:4) are
-# close enough and go exactly as they always did, unpadded.
+# The image model only returns these sizes. A photo of any other shape sent
+# as it is comes back re-framed to fit (a 3:4 phone photo squeezed into 2:3
+# is zoomed or shifted: the camera "moves"). So it is padded to the output's
+# shape with plain grey first, and the render is cropped back to where the
+# photo was: the final picture always has the photo's own width:height.
 PAD_COLOUR = (128, 128, 128)
-PAD_RATIO_TOLERANCE = 0.15  # pad only when the photo's shape is more than this far from the output's
+PAD_RATIO_TOLERANCE = 0.01  # only a photo already this close to the output's shape goes unpadded
 PADDED_ROOM_LINE = "The grey border is not part of the room — leave it unchanged."
 
 
@@ -1344,11 +1344,20 @@ def pad_to_output_ratio(image: Image.Image, size: str) -> tuple[Image.Image, tup
     return canvas, (left / canvas_w, top / canvas_h, (left + width) / canvas_w, (top + height) / canvas_h)
 
 
-def crop_to_photo(image: Image.Image, box: tuple[float, float, float, float]) -> Image.Image:
-    """Cuts a render of a padded photo back to the photo's own framing."""
+def crop_to_photo(
+    image: Image.Image, box: tuple[float, float, float, float], photo_size: tuple[int, int] | None = None
+) -> Image.Image:
+    """Cuts a render of a padded photo back to the photo's own framing. With
+    `photo_size` the result is also given exactly the photo's width:height
+    (the crop can be a pixel off from rounding)."""
     width, height = image.size
     left, top, right, bottom = box
-    return image.crop((round(left * width), round(top * height), round(right * width), round(bottom * height)))
+    cropped = image.crop((round(left * width), round(top * height), round(right * width), round(bottom * height)))
+    if photo_size:
+        exact = (cropped.width, max(1, round(cropped.width * photo_size[1] / photo_size[0])))
+        if exact != cropped.size:
+            cropped = cropped.resize(exact, Image.LANCZOS)
+    return cropped
 
 
 def extract_image_from_result(result) -> bytes | None:
@@ -3231,6 +3240,8 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "Each sofa stays the size of its shape: never larger than the shape, never move a sofa off its shape or turn "
         "it at an angle. The floor between shapes stays visible — keep every gap exactly as the shapes show. Each "
         "sofa keeps its own material and colour from its own photograph, unless the FABRIC section gives it another.",
+        "Shapes far from the camera look small. Keep each sofa exactly as small and as far away as its shape — never "
+        "move the camera closer, never zoom in, never re-frame the photo to make a sofa bigger or more central.",
         "After placing the furniture, remove all coloured guide shapes, labels and black lines completely. No colour "
         "tint, outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
         _prompt_section("CAMERA —", "ROOM LAYOUT"),
@@ -3239,7 +3250,8 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "{{ROOM_TREATMENT}}",
         "{{DECOR}}",
         "{{LIGHTING}}",
-        _prompt_section("The furniture being placed must be the visual focal point", None),
+        # no "visual focal point" paragraph here: it invites the model to re-frame toward the sofas
+        _prompt_section("Room: {{ROOM_TYPE}}", None),
         "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated "
         "number of seats; no shape, label or line remains.",
     ]
@@ -3252,6 +3264,7 @@ SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "b27cc5a4ded0a6a44baba5d1ecb0b43af586b2504893addb42ce2dd64727c346",  # floor dots + boxes version (reverted)
     "5959efbe198a487bc8b1c2c20284d93d51013f3b96f96d1c42c5541649b12aa1",  # before labels, one line per paragraph, no "Remove any people" line
     "31aabb1b08283b69bd41966a53c9285186d8e9c1d20d4fa3b196ff2823aee4db",  # before the final check line
+    "939373a17e0de655b78a215041db88cf4f4d0980cfb821607bf8cf1cdcc29de6",  # before the size rule, with the focal point paragraph
 }
 
 
@@ -3998,6 +4011,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         room_path = DATA_ROOT / room.photo_path
         room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
         photo_box = None  # where the photo sits in a padded Image 1; None when it is sent as it is
+        photo_size = (room_debug["width"], room_debug["height"])  # the final picture keeps this width:height
         size = derive_size(room_debug["width"], room_debug["height"])
         if shapes:
             # the guide image: drawn on the room photo, padded exactly as the photo would be
@@ -4088,7 +4102,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         filename = f"{uuid.uuid4().hex}.jpg"
         image = Image.open(io.BytesIO(result["image_bytes"])).convert("RGB")
         if photo_box is not None:
-            image = crop_to_photo(image, photo_box)  # back to the photo's own framing, borders gone
+            image = crop_to_photo(image, photo_box, photo_size)  # back to the photo's own framing, borders gone
         image.save(RENDERS_DIR / filename, format="JPEG", quality=92)
         relative_path = f"renders/{filename}"
 

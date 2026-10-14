@@ -124,10 +124,15 @@ Room: {{ROOM_TYPE}}
 Furniture:
 {{PIECES}}"""
 
-# The original fixed no-decor paragraph. The default prompt now carries
-# {{DECOR}} in its place; a saved prompt still holding this text verbatim is
-# migrated to the token at startup.
-NO_DECOR_TEXT = """\
+# The no-decor paragraph ({{DECOR}} for the keep and minimal looks). It was
+# once fixed text in the default prompt, wrapped as WRAPPED_NO_DECOR_TEXT; a
+# saved prompt still holding it verbatim is migrated to the token at startup.
+NO_DECOR_TEXT = (
+    "Add no decorative objects of any kind. No plants, no artwork, no vases, no books, no trays, no lamps, no "
+    "ornaments. A plain rug and a simple coffee table are permitted, nothing else. The room must otherwise contain "
+    "only the furniture pieces listed below."
+)
+WRAPPED_NO_DECOR_TEXT = """\
 Add no decorative objects of any kind. No plants, no artwork, no vases,
 no books, no trays, no lamps, no ornaments. A plain rug and a simple
 coffee table are permitted, nothing else. The room must otherwise contain
@@ -415,7 +420,7 @@ NO_EXTRA_FURNITURE_TEXT = (
 
 def decor_text(room_treatment: str) -> str:
     look_text = LOOK_DECOR_TEXT if room_treatment in ("warm", "luxury") else NO_DECOR_TEXT
-    return f"{look_text}\n{NO_EXTRA_FURNITURE_TEXT}"
+    return f"{look_text} {NO_EXTRA_FURNITURE_TEXT}"  # one paragraph, one line
 
 
 MATERIAL_CHOICES = {
@@ -1073,7 +1078,7 @@ async def lifespan(app: FastAPI):
         # depends on the chosen room look); other hand edits are kept.
         saved_prompt = db.query(Setting).filter(Setting.key == PROMPT_SETTING_KEY).first()
         if saved_prompt is not None:
-            for variant in (NO_DECOR_TEXT, NO_DECOR_TEXT.replace("\n", "\r\n")):
+            for variant in (WRAPPED_NO_DECOR_TEXT, WRAPPED_NO_DECOR_TEXT.replace("\n", "\r\n"), NO_DECOR_TEXT):
                 if variant in saved_prompt.value:
                     saved_prompt.value = saved_prompt.value.replace(variant, "{{DECOR}}")
                     logger.info("replaced the fixed no-decor paragraph in the saved generation prompt with {{DECOR}}")
@@ -3235,6 +3240,8 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "{{DECOR}}",
         "{{LIGHTING}}",
         _prompt_section("The furniture being placed must be the visual focal point", None),
+        "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated "
+        "number of seats; no shape, label or line remains.",
     ]
 ) + "\n"
 
@@ -3244,6 +3251,7 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
 SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "b27cc5a4ded0a6a44baba5d1ecb0b43af586b2504893addb42ce2dd64727c346",  # floor dots + boxes version (reverted)
     "5959efbe198a487bc8b1c2c20284d93d51013f3b96f96d1c42c5541649b12aa1",  # before labels, one line per paragraph, no "Remove any people" line
+    "31aabb1b08283b69bd41966a53c9285186d8e9c1d20d4fa3b196ff2823aee4db",  # before the final check line
 }
 
 
@@ -3474,7 +3482,51 @@ def shape_piece_name(item: Item, label: str, kind: str) -> str:
     return f"{item.category.lower()} ({label})"
 
 
-def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
+L_END_LEVEL = 0.02  # ends of a long run within this share of the photo's height count as level
+
+
+def l_lounge_sentence(shape: dict, aspect: float) -> str:
+    """Which end of an L's long run its lounge is on, read off the shape as
+    drawn (photo pixels: x scaled by the photo's width/height `aspect`):
+    LEFT or RIGHT end in the picture, whether that end is nearer the camera
+    (lower) or the back (higher), and which way the lounge sticks out. Always
+    computed from the current corners, so both Flips change it."""
+    parts = shape_parts(shape["kind"], shape["points"])
+    long_run = [(x * aspect, y) for x, y in parts[1 - shape["lounge"]]]
+    lounge = [(x * aspect, y) for x, y in parts[shape["lounge"]]]
+    mid = lambda a, b: ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    length = lambda a, b: math.hypot(a[0] - b[0], a[1] - b[1])
+    q0, q1, q2, q3 = long_run
+    # the long run's two ends are its two shorter edges
+    if length(q0, q1) + length(q2, q3) >= length(q1, q2) + length(q3, q0):
+        ends = [mid(q1, q2), mid(q3, q0)]
+    else:
+        ends = [mid(q0, q1), mid(q2, q3)]
+    lx = sum(p[0] for p in lounge) / 4
+    ly = sum(p[1] for p in lounge) / 4
+    attached, other = sorted(ends, key=lambda e: length(e, (lx, ly)))
+    side = "LEFT" if attached[0] < other[0] else "RIGHT"
+    # a long run lying level across the picture has neither end nearer: say nothing then
+    if abs(attached[1] - other[1]) < L_END_LEVEL:
+        nearer = ""
+    else:
+        nearer = ", the end nearer the camera" if attached[1] > other[1] else ", the end nearer the back"
+    # from the long run's centre line to the lounge's centre
+    ax, ay = other[0] - attached[0], other[1] - attached[1]
+    t = ((lx - attached[0]) * ax + (ly - attached[1]) * ay) / max(ax * ax + ay * ay, 1e-12)
+    dx, dy = lx - (attached[0] + t * ax), ly - (attached[1] + t * ay)
+    if abs(dx) > abs(dy):
+        toward = "toward the left" if dx < 0 else "toward the right"
+    else:
+        toward = "toward the camera" if dy > 0 else "toward the back"
+    return (
+        f"Its lounge is at the {side} end of the long run in the picture{nearer}, and it sticks out "
+        f"{toward}. Its single arm is at the other end, the {'RIGHT' if side == 'LEFT' else 'LEFT'} end. Do not "
+        "swap these ends."
+    )
+
+
+def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape."""
     pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
@@ -3497,6 +3549,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
             "with its back along the thick black line, flat against the wall."
         )
         if shape["kind"] == "L":
+            text += " " + l_lounge_sentence(shape, aspect)
             text += (
                 " The part of the shape marked LOUNGE, with no black line, is an open chaise lounge with no backrest and no arm at its "
                 "tip. The sofa has one arm only, at the end of the long run away from the lounge. If the photograph "
@@ -3509,12 +3562,13 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
 
 
 def build_shapes_prompt(
-    template: str, attempt: Attempt, shapes: list[dict], room_padded: bool, feet: bool = False
+    template: str, attempt: Attempt, shapes: list[dict], room_padded: bool, feet: bool = False, aspect: float = 1.0
 ) -> str:
     """The shapes pipeline's prompt: {{SHAPES}} filled here, everything else
     (image list, fabric section, look, decor, lighting, the showroom's note)
-    exactly as the floor-plan pipeline fills it."""
-    filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes))
+    exactly as the floor-plan pipeline fills it. `aspect` is the room photo's
+    width / height (the shapes' corners are fractions of it)."""
+    filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect))
     prompt = build_prompt(
         filled, attempt.room, attempt.items, attempt.room_treatment, attempt.lighting, True, "", attempt.note, feet, room_padded
     )
@@ -3990,7 +4044,9 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         debug_images.append(room_debug)
 
         if shapes:
-            prompt = build_shapes_prompt(get_shapes_prompt(db), attempt, shapes, photo_box is not None, feet_in_prompt(db))
+            prompt = build_shapes_prompt(
+                get_shapes_prompt(db), attempt, shapes, photo_box is not None, feet_in_prompt(db), guide.width / guide.height
+            )
         else:
             prompt = build_prompt(
                 template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,

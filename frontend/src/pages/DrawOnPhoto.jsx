@@ -11,8 +11,10 @@ import {
   COLOUR_HEX,
   backrestAllowed,
   centroid,
+  cornerDots,
   flipShape,
   moveCorner,
+  moveLCorner,
   moveShape,
   newShape,
   piecesOf,
@@ -20,6 +22,8 @@ import {
   shapeParts,
   snapAngle,
   swapLounge,
+  tiltFactor,
+  tiltPoints,
   transformPoints,
 } from "../shapes.js";
 
@@ -29,15 +33,21 @@ const TAP_SLOP_PX = 5; // a finger may wander this far and still count as a tap
 const CORNER_R = 8;
 const RESIZE_SIZE = 32;
 const ROTATE_R = 17;
+const TILT_W = 26;
+const TILT_H = 38;
 const HANDLE_GAP = 14; // handles sit this far outside the shape
 const ROTATE_STICK = 30;
+
+const keyOf = (s) => `${s.item_id}:${s.sub_index}`;
 
 /** "Draw on photo (Beta)": each piece is drawn as a coloured shape on the
  * room photo. Drag inside a shape to move it; the square handle resizes the
  * whole shape from its centre, the round handle turns it (snapping to quarter
- * turns); two fingers pinch to resize and twist to turn. Corner dots are for
- * fine-tuning; tapping an edge puts the backrest (black line) there. Shapes
- * never leave the photo. Saved on the attempt as corner points. */
+ * turns), the up/down handle tilts it (up lays it flatter on the floor, like
+ * a rug seen in perspective); two fingers pinch to resize and twist to turn.
+ * Corner dots are for fine-tuning (an L shows only its outer corners: the
+ * inner ones follow); tapping an edge puts the backrest (black line) there.
+ * Shapes never leave the photo. Saved on the attempt as corner points. */
 export default function DrawOnPhoto() {
   const { id } = useParams();
   const adjust = useAdjustMode(id);
@@ -64,7 +74,9 @@ export default function DrawOnPhoto() {
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
-      const saved = data.attempt.shapes?.shapes || [];
+      // a shape's colour follows its piece's place in the list
+      const colours = Object.fromEntries(piecesOf(data.attempt.items).map((p) => [p.key, p.colour]));
+      const saved = (data.attempt.shapes?.shapes || []).map((s) => ({ ...s, colour: colours[keyOf(s)] || s.colour }));
       setShapes(saved);
       latest.current = saved;
     } catch (err) {
@@ -107,7 +119,6 @@ export default function DrawOnPhoto() {
     save(next);
   }
 
-  const keyOf = (s) => `${s.item_id}:${s.sub_index}`;
   const aspect = size ? size.w / size.h : 1;
 
   /** Pointer position as fractions of the photo. */
@@ -193,7 +204,18 @@ export default function DrawOnPhoto() {
     if (d.role === "empty") return;
     const at = toPhoto(e.clientX, e.clientY);
     if (d.role === "corner") {
-      setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveCorner(s, d.index, at[0], at[1]) : s)));
+      const shape = shapesRef.current.find((s) => keyOf(s) === d.key);
+      if (shape?.kind === "L") {
+        // the L moves as one piece: its inner corners follow the outer dot
+        const points = moveLCorner(d.orig, d.index, at[0], at[1], aspect);
+        if (points) setShapePoints(d.key, points);
+      } else {
+        setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveCorner(s, d.index, at[0], at[1]) : s)));
+      }
+    } else if (d.role === "tilt") {
+      // up lays the shape flatter, down stands it back up toward the view from above
+      const points = tiltPoints(d.orig, tiltFactor(at[1] - d.start[1]), aspect);
+      if (points) setShapePoints(d.key, points); // a tilt that won't fit stops at the last one that did
     } else if (d.role === "resize") {
       const now = polar(d.centre, at);
       const points = transformPoints(d.orig, now.dist / Math.max(d.from.dist, 1e-6), 0, aspect, true);
@@ -283,8 +305,9 @@ export default function DrawOnPhoto() {
           : "All pieces drawn";
   const selectedShape = selected ? byKey[selected] : null;
 
-  /** Resize (bottom-right) and rotate (above) handles, outside the shape's
-   * bounding box but always kept on the photo so they can be reached. */
+  /** Resize (bottom-right), rotate (above) and tilt (left side) handles,
+   * outside the shape's bounding box but always kept on the photo so they
+   * can be reached. */
   function handlesFor(s) {
     const pts = s.points.map(px);
     const xs = pts.map((p) => p[0]);
@@ -296,7 +319,9 @@ export default function DrawOnPhoto() {
     const resize = [keep(maxX + HANDLE_GAP * scale + rs / 2, rs / 2, W), keep(maxY + HANDLE_GAP * scale + rs / 2, rs / 2, H)];
     const midX = (minX + maxX) / 2;
     const rotate = [keep(midX, rr, W), keep(minY - (ROTATE_STICK + HANDLE_GAP) * scale - rr, rr, H)];
-    return { resize, rotate, stickFrom: [midX, minY], rs, rr };
+    const [tw, th] = [TILT_W * scale, TILT_H * scale];
+    const tilt = [keep(minX - HANDLE_GAP * scale - tw / 2, tw / 2, W), keep((minY + maxY) / 2, th / 2, H)];
+    return { resize, rotate, tilt, stickFrom: [midX, minY], rs, rr, tw, th };
   }
 
   return (
@@ -316,7 +341,8 @@ export default function DrawOnPhoto() {
       </h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
         Add each piece, then drag it onto the floor. Square handle: resize. Round handle: turn (or pinch and twist with two
-        fingers). Tap an edge to put the backrest (black line) there.
+        fingers). Up/down handle: tilt — drag up to lay the shape flatter on the floor. Tap an edge to put the backrest
+        (black line) there.
       </div>
 
       <div className="draw-layout">
@@ -429,8 +455,18 @@ export default function DrawOnPhoto() {
                             ⤡
                           </text>
                         </g>
-                        {selectedShape.points.map((p, index) => {
-                          const [cx, cy] = px(p);
+                        <g className="draw-tilt">
+                          <rect
+                            data-role="tilt" data-key={key}
+                            x={h.tilt[0] - h.tw / 2} y={h.tilt[1] - h.th / 2} width={h.tw} height={h.th} rx={h.tw / 2}
+                            fill="#fff" stroke={hex} strokeWidth={3 * scale}
+                          />
+                          <text x={h.tilt[0]} y={h.tilt[1]} fontSize={19 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                            ↕
+                          </text>
+                        </g>
+                        {cornerDots(selectedShape).map((index) => {
+                          const [cx, cy] = px(selectedShape.points[index]);
                           return (
                             <circle
                               key={`c${index}`}

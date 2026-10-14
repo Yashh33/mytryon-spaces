@@ -611,6 +611,10 @@ class Item(Base):
     colour_hex = Column(String, nullable=True)
     material = Column(String, nullable=True)
     fabric_path = Column(String, nullable=True)
+    # A few words on the product photo ("white boucle fabric, rounded arms,
+    # low base") for the Draw-on-photo prompt; filled by one vision call when
+    # the piece is added, editable on the Furniture step.
+    short_description = Column(Text, nullable=True)
 
 
 class Render(Base):
@@ -951,6 +955,7 @@ async def lifespan(app: FastAPI):
         add_column(conn, "attempts", "note", "TEXT")
         add_column(conn, "attempts", "placement_mode", "TEXT NOT NULL DEFAULT 'plan'")
         add_column(conn, "attempts", "shapes", "JSONB")
+        add_column(conn, "items", "short_description", "TEXT")
         # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
         add_column(conn, "studio_images", "look", "TEXT")
         # product-photo studio: which camera view (front/angled) each image used.
@@ -1060,9 +1065,13 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first() is None:
             db.add(Setting(key=PLACEMENT_WRITER_PROMPT_KEY, value=DEFAULT_PLACEMENT_WRITER_PROMPT))
             logger.info("seeded default placement writer prompt")
-        if db.query(Setting).filter(Setting.key == SHAPES_PROMPT_KEY).first() is None:
+        saved_shapes_prompt = db.query(Setting).filter(Setting.key == SHAPES_PROMPT_KEY).first()
+        if saved_shapes_prompt is None:
             db.add(Setting(key=SHAPES_PROMPT_KEY, value=DEFAULT_SHAPES_GENERATION_PROMPT))
             logger.info("seeded default shapes generation prompt")
+        elif hashlib.sha256(saved_shapes_prompt.value.encode("utf-8")).hexdigest() in SUPERSEDED_SHAPES_PROMPT_HASHES:
+            saved_shapes_prompt.value = DEFAULT_SHAPES_GENERATION_PROMPT
+            logger.info("updated the saved shapes generation prompt to the current default")
         if db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first() is None:
             db.add(Setting(key=STUDIO_PROMPT_KEY, value=DEFAULT_STUDIO_PROMPT))
             logger.info("seeded default studio prompt")
@@ -3207,23 +3216,26 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
 # attempt.shapes = {"version": 1, "shapes": [shape, ...]}, one shape per piece
 # (sub_index splits a 3+2 set), points as fractions of the photo's width and
 # height:
-#   {"item_id", "sub_index", "kind": "rect" | "L" | "corner", "colour": "RED",
+#   {"item_id", "sub_index", "kind": "rect" | "L" | "corner", "colour": "BLUE",
 #    "points": [[x, y], ...],   # 4 for rect; 6 for L / corner (see shape_parts)
 #    "backrest": [edge | null per part],   # edge i runs from corner i to i+1
 #    "lounge": part index | null}          # L only: the part with no backrest
 # Mirrors frontend/src/shapes.js.
 # ---------------------------------------------------------------------------
 
+# A piece's colour comes from its place in the piece list. Never red, orange,
+# brown, beige, grey or white: the image model would read those as a sofa's
+# material.
 SHAPE_COLOURS = {
-    "RED": (229, 57, 53),
     "BLUE": (30, 91, 255),
+    "MAGENTA": (232, 32, 160),
     "GREEN": (18, 161, 80),
-    "YELLOW": (255, 208, 0),
     "PURPLE": (142, 59, 217),
     "CYAN": (0, 184, 212),
-    "ORANGE": (255, 122, 0),
-    "PINK": (255, 79, 163),
 }
+SHAPE_COLOUR_NAMES = list(SHAPE_COLOURS)
+# colours shapes were saved with before; such a shape takes its piece's colour
+OLD_SHAPE_COLOURS = {"RED", "YELLOW", "ORANGE", "PINK"}
 GUIDE_FILL_ALPHA = 115  # about 45% opacity
 GUIDE_LINE_PX = 12
 GUIDES_DIR = DATA_ROOT / "guides"  # the guide image sent for each shapes render, for the debug page
@@ -3266,6 +3278,13 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         _prompt_section("The furniture being placed must be the visual focal point", None),
     ]
 ) + "\n"
+
+
+# sha256 of other built-in Draw-on-photo prompts: a saved prompt still equal
+# to one was never edited, so startup moves it to the current default.
+SUPERSEDED_SHAPES_PROMPT_HASHES = {
+    "b27cc5a4ded0a6a44baba5d1ecb0b43af586b2504893addb42ce2dd64727c346",  # floor dots + boxes version (reverted)
+}
 
 
 def get_shapes_prompt(db: Session) -> str:
@@ -3329,7 +3348,9 @@ def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | No
     None) or (None, what is wrong)."""
     if not isinstance(data, dict) or not isinstance(data.get("shapes"), list):
         return None, "The shapes could not be read."
-    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
+    order = attempt_pieces(attempt)
+    pieces = {(p["item"].id, p["sub_index"]): p for p in order}
+    colour_of = {(p["item"].id, p["sub_index"]): SHAPE_COLOUR_NAMES[i % len(SHAPE_COLOUR_NAMES)] for i, p in enumerate(order)}
     clean, seen = [], set()
     for shape in data["shapes"]:
         if not isinstance(shape, dict):
@@ -3344,7 +3365,7 @@ def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | No
             return None, "Curved sofas can't be drawn on the photo yet — please use the floor plan."
         if kind != piece["kind"]:
             return None, "A shape doesn't match its piece."
-        if shape.get("colour") not in SHAPE_COLOURS:
+        if shape.get("colour") not in SHAPE_COLOURS and shape.get("colour") not in OLD_SHAPE_COLOURS:
             return None, "A shape has an unknown colour."
         raw = shape.get("points")
         want = 4 if kind == "rect" else 6
@@ -3373,7 +3394,7 @@ def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | No
                 "item_id": key[0],
                 "sub_index": key[1],
                 "kind": kind,
-                "colour": shape["colour"],
+                "colour": colour_of[key],
                 "points": points,
                 "backrest": list(backrest),
                 "lounge": lounge,
@@ -3452,10 +3473,12 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
         piece = pieces[(shape["item_id"], shape["sub_index"])]
         item, number = piece["item"], piece["item_index"] + 2  # Image 1 is the guide; products follow in item order
         colour = shape["colour"]
+        description = (item.short_description or "").strip().rstrip(".")
+        described = f"Image {number} ({description})" if description else f"Image {number}"
         source = (
-            f"in the exact design of Image {number}, with the material and colour given in the {section} section"
+            f"in the exact design of {described}, with the material and colour given in the {section} section"
             if item_has_finish(item)
-            else f"in the exact design, material and colour of Image {number}"
+            else f"in the exact design, material and colour of {described}"
         )
         text = (
             f"{colour} shape: one {shape_piece_name(item, piece['label'], shape['kind'])} {source}. Build it exactly on "
@@ -3488,12 +3511,110 @@ def build_shapes_prompt(
     return prompt.replace("Image 1 is a room.", GUIDE_IMAGE_LINE, 1)
 
 
+# ---- product descriptions ---------------------------------------------------
+
+DESCRIBE_PRODUCT_PROMPT = (
+    "This is a showroom photograph of a piece of furniture. Describe the main piece in at most 12 words: its "
+    "colour, material, arm shape and legs. Example: 'white boucle fabric, rounded arms, low base'. Ignore any "
+    "tables, cushions or other furniture around it. Reply with the description only, no full stop."
+)
+DESCRIPTION_MAX_CHARS = 120
+
+
+def describe_product_photo(path: Path, model: str) -> str:
+    """One vision call: a short description of the product in the photo.
+    Synchronous — callers offload it to a thread."""
+    data = path.read_bytes()
+    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    result = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": DESCRIBE_PRODUCT_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}},
+                ],
+            }
+        ],
+        timeout=60,
+    )
+    text = " ".join((result.choices[0].message.content or "").split()).strip(" .'\"")
+    return text[:DESCRIPTION_MAX_CHARS]
+
+
+def fill_missing_descriptions(db: Session, items: list[Item]) -> int:
+    """Gives every item without a short description one: copied from any item
+    with the same photo that has one, otherwise one vision call per photo.
+    Returns how many vision calls were made."""
+    calls = 0
+    for photo_path in dict.fromkeys(i.photo_path for i in items if not (i.short_description or "").strip()):
+        twin = (
+            db.query(Item)
+            .filter(Item.photo_path == photo_path, Item.short_description.isnot(None), Item.short_description != "")
+            .first()
+        )
+        text_value = twin.short_description if twin else None
+        if text_value is None:
+            try:
+                text_value = describe_product_photo(DATA_ROOT / photo_path, get_active_vision_model(db))
+                calls += 1
+            except Exception:
+                logger.exception("describing product photo failed photo=%s", photo_path)
+                continue
+        for item in items:
+            if item.photo_path == photo_path and not (item.short_description or "").strip():
+                item.short_description = text_value
+        db.commit()
+    return calls
+
+
+async def describe_attempt_items(attempt_id: int) -> None:
+    """Background: describe an attempt's newly added pieces."""
+
+    def work() -> None:
+        db = SessionLocal()
+        try:
+            attempt = db.query(Attempt).filter(Attempt.id == attempt_id).first()
+            if attempt is not None:
+                fill_missing_descriptions(db, attempt.items)
+        except Exception:
+            logger.exception("describe items failed attempt_id=%s", attempt_id)
+            db.rollback()
+        finally:
+            db.close()
+
+    await asyncio.to_thread(work)
+
+
 class PlacementModeBody(BaseModel):
     mode: str
 
 
 class ShapesBody(BaseModel):
     shapes: dict
+
+
+class DescriptionBody(BaseModel):
+    short_description: str
+
+
+@app.put("/api/attempts/{attempt_id}/items/{item_id}/description")
+def api_set_item_description(
+    attempt_id: int, item_id: int, body: DescriptionBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """The salesman corrects a piece's short description (used by Draw on photo)."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    text_value = " ".join(body.short_description.split())
+    if len(text_value) > DESCRIPTION_MAX_CHARS:
+        return error_response(400, "description_too_long", f"Please keep it to {DESCRIPTION_MAX_CHARS} characters.")
+    item.short_description = text_value or None
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 
 @app.put("/api/attempts/{attempt_id}/placement-mode")
@@ -3797,6 +3918,9 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         if attempt.placement_mode == "shapes" and not attempt.ignore_placement and not shapes:
             fail_job(db, job_id, "Draw the furniture on the photo first.")
             return
+        if shapes:
+            # descriptions are filled when a piece is added; any still empty are filled now
+            await asyncio.to_thread(fill_missing_descriptions, db, attempt.items)
         if not attempt.ignore_placement and not shapes:
             # may wait for a writer still running; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
@@ -4079,6 +4203,7 @@ def item_public(item: Item) -> dict:
         "colour_hex": item.colour_hex,
         "material": item.material,
         "fabric_url": f"/media/{item.fabric_path}" if item.fabric_path else None,
+        "short_description": item.short_description,
     }
 
 
@@ -4210,6 +4335,7 @@ async def _add_item_to_attempt(
     discard_placement_writer(attempt)
     db.commit()
     db.refresh(attempt)
+    asyncio.create_task(describe_attempt_items(attempt.id))  # its short description, for Draw on photo
     return attempt
 
 
@@ -4721,6 +4847,7 @@ async def api_create_attempt(
                 colour_hex=item.colour_hex,
                 material=item.material,
                 fabric_path=item.fabric_path,
+                short_description=item.short_description,
             )
         )
 
@@ -4833,6 +4960,7 @@ async def api_add_items_batch(
         )
     db.commit()
     db.refresh(attempt)
+    asyncio.create_task(describe_attempt_items(attempt.id))  # their short description, for Draw on photo
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 

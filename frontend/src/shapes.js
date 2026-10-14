@@ -7,16 +7,15 @@
 //   backrest: [edge | null per part], lounge: part index | null (L only) }.
 // Edge i of a part runs from its corner i to corner i + 1.
 
-// Colour names go into the prompt ("RED shape: ..."), so they are plain words.
+// Colour names go into the prompt ("BLUE shape: ..."), so they are plain words.
+// Never red, orange, brown, beige, grey or white: those read as sofa materials.
+// A piece's colour comes from its place in the list (the server does the same).
 export const SHAPE_COLOURS = [
-  { name: "RED", hex: "#E53935" },
   { name: "BLUE", hex: "#1E5BFF" },
+  { name: "MAGENTA", hex: "#E820A0" },
   { name: "GREEN", hex: "#12A150" },
-  { name: "YELLOW", hex: "#FFD000" },
   { name: "PURPLE", hex: "#8E3BD9" },
   { name: "CYAN", hex: "#00B8D4" },
-  { name: "ORANGE", hex: "#FF7A00" },
-  { name: "PINK", hex: "#FF4FA3" },
 ];
 export const COLOUR_HEX = Object.fromEntries(SHAPE_COLOURS.map((c) => [c.name, c.hex]));
 
@@ -113,6 +112,46 @@ export function moveCorner(shape, index, x, y) {
   return { ...shape, points: shape.points.map((p, i) => (i === index ? [round5(clamp01(x)), round5(clamp01(y))] : p)) };
 }
 
+// ---- an L-shape's corners ---------------------------------------------------
+// An L shows dots only on its outer corners: p0, p1 (the back edge), p5 (the
+// front corner of the long run) and p2 (the outer corner of the lounge tip).
+// The inner corner p4 and the tip's inner corner p3 follow: the tip keeps its
+// width along the back edge's direction, the lounge's inner side heads for
+// the same vanishing point as the shape's two sides, and the long run's front
+// edge runs alongside its back edge.
+
+const L_OUTER_DOTS = [0, 1, 2, 5];
+
+/** The corner indexes that get a dot when the shape is selected. */
+export function cornerDots(shape) {
+  return shape.kind === "L" ? L_OUTER_DOTS : shape.points.map((_, i) => i);
+}
+
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1]];
+const add = (a, b) => [a[0] + b[0], a[1] + b[1]];
+
+/** `origPoints` (an L) with outer corner `index` moved to (x, y) and the two
+ * inner corners following; null when that gives no sensible L, so the caller
+ * keeps the last one that did. Worked in photo pixels (`aspect` = w / h). */
+export function moveLCorner(origPoints, index, x, y, aspect) {
+  const pix = ([px, py]) => [px * aspect, py];
+  const P = origPoints.map(pix);
+  P[index] = pix([clamp01(x), clamp01(y)]);
+  const [p0, p1, p2, , , p5] = P;
+  const tipWidth = Math.hypot(...sub(pix(origPoints[3]), pix(origPoints[2])));
+  const back = sub(p0, p1);
+  const backLen = Math.hypot(...back);
+  if (backLen < 1e-6) return null;
+  const p3 = add(p2, [(back[0] / backLen) * tipWidth, (back[1] / backLen) * tipWidth]);
+  const vanish = intersect(p0, p5, p1, p2);
+  const toward = vanish && Math.hypot(...sub(vanish, p3)) > 1e-6 ? vanish : add(p3, sub(p1, p2));
+  const p4 = intersect(p5, add(p5, sub(p1, p0)), p3, toward);
+  if (!p4) return null;
+  const out = [p0, p1, p2, p3, p4, p5].map(([px, py]) => [px / aspect, py]);
+  if (out.some(([px, py]) => px < -1e-6 || px > 1 + 1e-6 || py < -1e-6 || py > 1 + 1e-6)) return null;
+  return out.map(([px, py]) => [round5(clamp01(px)), round5(clamp01(py))]);
+}
+
 /** An L's lounge moves to the other part; the long run gets its default backrest. */
 export function swapLounge(shape) {
   const lounge = shape.lounge === 0 ? 1 : 0;
@@ -206,6 +245,76 @@ export function transformPoints(origPoints, scale, deg, aspect, fixedCentre = fa
   };
   const [sx, sy] = [shift(0), shift(1)];
   return offs.map(([dx, dy]) => [round5(clamp01(centre[0] + sx + dx * s)), round5(clamp01(centre[1] + sy + dy * s))]);
+}
+
+// ---- tilt (up / down) ---------------------------------------------------------
+// Laying a shape flatter on the floor, like a rug seen in perspective: its
+// height shrinks and its far (top) edge gets a little narrower than its near
+// edge. Done with a perspective transform of the shape's bounding box about
+// its centre, so straight edges stay straight and every edge keeps its number.
+
+export const TILT_HALVING = 0.15; // dragging up this share of the photo's height halves the shape's height
+const TILT_TAPER = 0.3; // how much narrower the far edge gets as the shape flattens
+const TILT_MIN = 0.2;
+const TILT_MAX = 4;
+
+/** Height factor for a tilt drag of `dy` (photo-height fractions, down positive). */
+export function tiltFactor(dy) {
+  return Math.min(TILT_MAX, Math.max(TILT_MIN, 2 ** (dy / TILT_HALVING)));
+}
+
+/** The 8 numbers of the perspective transform taking 4 src points to 4 dst points. */
+function homography(src, dst) {
+  const m = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i];
+    const [u, v] = dst[i];
+    m.push([x, y, 1, 0, 0, 0, -u * x, -u * y, u]);
+    m.push([0, 0, 0, x, y, 1, -v * x, -v * y, v]);
+  }
+  for (let col = 0; col < 8; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < 8; r++) if (Math.abs(m[r][col]) > Math.abs(m[pivot][col])) pivot = r;
+    if (Math.abs(m[pivot][col]) < 1e-12) return null;
+    [m[col], m[pivot]] = [m[pivot], m[col]];
+    for (let r = 0; r < 8; r++) {
+      if (r === col) continue;
+      const f = m[r][col] / m[col][col];
+      for (let c = col; c < 9; c++) m[r][c] -= f * m[col][c];
+    }
+  }
+  return m.map((row, i) => row[8] / row[i]);
+}
+
+/** `origPoints` tilted: height times `k` about the centre of their bounding
+ * box, the top edge narrower than the bottom when k < 1 (wider when k > 1).
+ * Null when the result would be too small or leave the photo. */
+export function tiltPoints(origPoints, k, aspect) {
+  const P = origPoints.map(([x, y]) => [x * aspect, y]);
+  const xs = P.map((p) => p[0]);
+  const ys = P.map((p) => p[1]);
+  const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const [w, h] = [maxX - minX, maxY - minY];
+  if (w < 1e-6 || h < 1e-6 || h * k < MIN_SIZE) return null;
+  const [cx, cy] = [(minX + maxX) / 2, (minY + maxY) / 2];
+  const s = TILT_TAPER * (1 - k);
+  const half = (h * k) / 2;
+  const t = homography(
+    [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]],
+    [
+      [cx - (w * (1 - s)) / 2, cy - half],
+      [cx + (w * (1 - s)) / 2, cy - half],
+      [cx + (w * (1 + s)) / 2, cy + half],
+      [cx - (w * (1 + s)) / 2, cy + half],
+    ]
+  );
+  if (!t) return null;
+  const out = P.map(([x, y]) => {
+    const d = t[6] * x + t[7] * y + 1;
+    return [(t[0] * x + t[1] * y + t[2]) / d / aspect, (t[3] * x + t[4] * y + t[5]) / d];
+  });
+  if (out.some(([x, y]) => x < -1e-6 || x > 1 + 1e-6 || y < -1e-6 || y > 1 + 1e-6)) return null;
+  return out.map(([x, y]) => [round5(clamp01(x)), round5(clamp01(y))]);
 }
 
 export function centroid(corners) {

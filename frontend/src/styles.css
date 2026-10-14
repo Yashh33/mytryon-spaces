@@ -459,7 +459,7 @@ h2 { font-size: 19px; }
 .item-desc-form input { flex: 1; min-width: 0; font-size: 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
 .draw-handles text { font-family: var(--sans); font-weight: 700; user-select: none; }
 .draw-edge-hit { stroke: transparent; cursor: pointer; stroke-linecap: round; }
-.draw-label { font-weight: 800; fill: #111; paint-order: stroke; stroke: #fff; stroke-width: 3px; font-family: var(--sans); }
+.draw-tag { fill: #111; font-family: var(--sans); font-weight: 600; user-select: none; }
 .draw-selected { border: 1px solid var(--orange); border-radius: 12px; padding: 12px; margin-bottom: 14px; background: #fff; }
 .draw-selected-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; margin-bottom: 10px; }
 .draw-actions { display: flex; flex-wrap: wrap; gap: 8px; }

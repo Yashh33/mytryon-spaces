@@ -13,6 +13,7 @@ import {
   centroid,
   cornerDots,
   flipShape,
+  flipShapeVertical,
   moveCorner,
   moveLCorner,
   moveShape,
@@ -39,6 +40,24 @@ const HANDLE_GAP = 14; // handles sit this far outside the shape
 const ROTATE_STICK = 30;
 
 const keyOf = (s) => `${s.item_id}:${s.sub_index}`;
+
+/** A white rounded label with dark text centred on `at` (photo pixels), kept
+ * fully on the photo — as main.py draws it on the guide image. */
+function GuideLabel({ text, at, font, W, H }) {
+  const pad = font / 3;
+  const w = text.length * font * 0.6 + 2 * pad;
+  const h = font + 2 * pad;
+  const x = Math.min(Math.max(at[0] - w / 2, 0), W - w);
+  const y = Math.min(Math.max(at[1] - h / 2, 0), H - h);
+  return (
+    <g>
+      <rect x={x} y={y} width={w} height={h} rx={h / 2} fill="#fff" stroke="#000" strokeWidth={font / 24} />
+      <text x={x + w / 2} y={y + h / 2} className="draw-tag" fontSize={font} textAnchor="middle" dominantBaseline="central">
+        {text}
+      </text>
+    </g>
+  );
+}
 
 /** "Draw on photo (Beta)": each piece is drawn as a coloured shape on the
  * room photo. Drag inside a shape to move it; the square handle resizes the
@@ -304,6 +323,11 @@ export default function DrawOnPhoto() {
           ? "Not saved — check the connection"
           : "All pieces drawn";
   const selectedShape = selected ? byKey[selected] : null;
+  const tagByKey = Object.fromEntries(pieces.map((p) => [p.key, p.tag]));
+  // label sizes as on the guide image (relative to a 1536 px wide photo), but never too small to read here
+  const unit = W / 1536;
+  const labelBig = Math.max(24 * unit, 12 * scale);
+  const labelSmall = Math.max(16 * unit, 9 * scale);
 
   /** Resize (bottom-right), rotate (above) and tilt (left side) handles,
    * outside the shape's bounding box but always kept on the photo so they
@@ -392,16 +416,6 @@ export default function DrawOnPhoto() {
                         <line key={`b${part}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="#000" strokeWidth={9 * scale} strokeLinecap="round" pointerEvents="none" />
                       );
                     })}
-                    {s.kind === "L"
-                      ? (() => {
-                          const [cx, cy] = px(centroid(parts[s.lounge]));
-                          return (
-                            <text x={cx} y={cy} className="draw-label" fontSize={13 * scale} textAnchor="middle" dominantBaseline="central" pointerEvents="none">
-                              LOUNGE
-                            </text>
-                          );
-                        })()
-                      : null}
                     {isSelected
                       ? parts.flatMap((corners, part) =>
                           [0, 1, 2, 3]
@@ -423,6 +437,22 @@ export default function DrawOnPhoto() {
                             })
                         )
                       : null}
+                  </g>
+                );
+              })}
+
+              {/* the labels the guide image carries (main.py draw_guide_image), above every shape */}
+              {shapes.map((s) => {
+                const tag = tagByKey[keyOf(s)];
+                const xs = s.points.map((p) => p[0]);
+                const top = Math.min(...s.points.map((p) => p[1]));
+                const lounge = s.kind === "L" && s.lounge != null ? centroid(shapeParts(s.kind, s.points)[s.lounge]) : null;
+                return (
+                  <g key={`tag-${keyOf(s)}`} pointerEvents="none">
+                    {lounge ? <GuideLabel text="LOUNGE" at={px(lounge)} font={labelSmall} W={W} H={H} /> : null}
+                    {tag ? (
+                      <GuideLabel text={tag} at={[((Math.min(...xs) + Math.max(...xs)) / 2) * W, top * H - 26 * unit]} font={labelBig} W={W} H={H} />
+                    ) : null}
                   </g>
                 );
               })}
@@ -502,6 +532,11 @@ export default function DrawOnPhoto() {
                 {selectedShape.kind !== "rect" ? (
                   <button type="button" className="btn btn-ghost btn-small" onClick={() => changeShape(selected, flipShape)}>
                     Flip left ↔ right
+                  </button>
+                ) : null}
+                {selectedShape.kind === "L" ? (
+                  <button type="button" className="btn btn-ghost btn-small" onClick={() => changeShape(selected, flipShapeVertical)}>
+                    Flip up ↕ down
                   </button>
                 ) : null}
                 <button type="button" className="btn btn-small btn-danger-ghost" onClick={() => removeShape(selected)}>

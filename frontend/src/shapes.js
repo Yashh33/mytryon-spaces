@@ -30,21 +30,39 @@ export function pieceKind(subShape) {
   return "rect";
 }
 
+/** The type in a shape's label: L-SHAPE, CORNER SOFA, 3-SEATER, ARMCHAIR,
+ * DINING TABLE ... Mirrors shape_type_label in main.py. */
+export function typeLabel(category, label, kind) {
+  if (kind === "L") return "L-SHAPE";
+  if (kind === "corner") return "CORNER SOFA";
+  const m = category === "Sofa" ? /^(\d+)-seater$/.exec(label || "") : null;
+  const seats = m ? Number(m[1]) : null;
+  if (category === "Chair" || seats === 1) return "ARMCHAIR";
+  if (seats) return `${seats}-SEATER`;
+  return String(category || "").toUpperCase();
+}
+
 /** One row per piece that gets its own shape ("3+2" is two), in item order,
- * each with its own colour. */
+ * each with its own colour and the label drawn above its shape ("1 · L-SHAPE"),
+ * as on the guide image the image model gets. */
 export function piecesOf(items) {
   const pieces = items.flatMap((item) => {
     const subs = item.sub_pieces && item.sub_pieces.length ? item.sub_pieces : [{ sub_index: 0, label: item.type, shape: item.shape }];
-    return subs.map((sub) => ({
-      key: `${item.id}:${sub.sub_index}`,
-      item_id: item.id,
-      sub_index: sub.sub_index,
-      name: `${item.category} · ${subs.length > 1 ? sub.label : item.type}`,
-      photo_url: item.photo_url,
-      kind: pieceKind(subs.length > 1 ? sub.shape : item.shape),
-    }));
+    return subs.map((sub) => {
+      const label = subs.length > 1 ? sub.label : item.type;
+      const kind = pieceKind(subs.length > 1 ? sub.shape : item.shape);
+      return {
+        key: `${item.id}:${sub.sub_index}`,
+        item_id: item.id,
+        sub_index: sub.sub_index,
+        name: `${item.category} · ${label}`,
+        photo_url: item.photo_url,
+        kind,
+        type: typeLabel(item.category, label, kind),
+      };
+    });
   });
-  return pieces.map((p, i) => ({ ...p, colour: SHAPE_COLOURS[i % SHAPE_COLOURS.length].name }));
+  return pieces.map((p, i) => ({ ...p, colour: SHAPE_COLOURS[i % SHAPE_COLOURS.length].name, tag: `${i + 1} · ${p.type}` }));
 }
 
 function intersect(a, b, c, d) {
@@ -80,7 +98,10 @@ export function backrestAllowed(shape, part, edge) {
   return true;
 }
 
-const clamp01 = (v) => Math.min(1, Math.max(0, v));
+// Every corner of every shape stays at least EDGE (2% of the photo) inside its edges.
+export const EDGE = 0.02;
+const clampIn = (v) => Math.min(1 - EDGE, Math.max(EDGE, v));
+const outside = (v) => v < EDGE - 1e-6 || v > 1 - EDGE + 1e-6;
 const round5 = (v) => Math.round(v * 100000) / 100000;
 
 /** A new shape for a piece, dropped in the lower middle of the photo (the
@@ -89,7 +110,7 @@ const round5 = (v) => Math.round(v * 100000) / 100000;
 export function newShape(piece, index) {
   const dx = ((index % 3) - 1) * 0.12;
   const dy = (index % 2) * 0.05;
-  const at = (x, y) => [round5(clamp01(x + dx)), round5(clamp01(y + dy))];
+  const at = (x, y) => [round5(clampIn(x + dx)), round5(clampIn(y + dy))];
   const base = { item_id: piece.item_id, sub_index: piece.sub_index, kind: piece.kind, colour: piece.colour };
   if (piece.kind === "rect") {
     return { ...base, points: [at(0.37, 0.58), at(0.63, 0.58), at(0.63, 0.72), at(0.37, 0.72)], backrest: [0], lounge: null };
@@ -103,13 +124,13 @@ export function newShape(piece, index) {
 export function moveShape(shape, origPoints, dx, dy) {
   const xs = origPoints.map((p) => p[0]);
   const ys = origPoints.map((p) => p[1]);
-  const mx = Math.min(Math.max(dx, -Math.min(...xs)), 1 - Math.max(...xs));
-  const my = Math.min(Math.max(dy, -Math.min(...ys)), 1 - Math.max(...ys));
+  const mx = Math.min(Math.max(dx, EDGE - Math.min(...xs)), 1 - EDGE - Math.max(...xs));
+  const my = Math.min(Math.max(dy, EDGE - Math.min(...ys)), 1 - EDGE - Math.max(...ys));
   return { ...shape, points: origPoints.map(([x, y]) => [round5(x + mx), round5(y + my)]) };
 }
 
 export function moveCorner(shape, index, x, y) {
-  return { ...shape, points: shape.points.map((p, i) => (i === index ? [round5(clamp01(x)), round5(clamp01(y))] : p)) };
+  return { ...shape, points: shape.points.map((p, i) => (i === index ? [round5(clampIn(x)), round5(clampIn(y))] : p)) };
 }
 
 // ---- an L-shape's corners ---------------------------------------------------
@@ -136,7 +157,7 @@ const add = (a, b) => [a[0] + b[0], a[1] + b[1]];
 export function moveLCorner(origPoints, index, x, y, aspect) {
   const pix = ([px, py]) => [px * aspect, py];
   const P = origPoints.map(pix);
-  P[index] = pix([clamp01(x), clamp01(y)]);
+  P[index] = pix([clampIn(x), clampIn(y)]);
   const [p0, p1, p2, , , p5] = P;
   const tipWidth = Math.hypot(...sub(pix(origPoints[3]), pix(origPoints[2])));
   const back = sub(p0, p1);
@@ -148,8 +169,8 @@ export function moveLCorner(origPoints, index, x, y, aspect) {
   const p4 = intersect(p5, add(p5, sub(p1, p0)), p3, toward);
   if (!p4) return null;
   const out = [p0, p1, p2, p3, p4, p5].map(([px, py]) => [px / aspect, py]);
-  if (out.some(([px, py]) => px < -1e-6 || px > 1 + 1e-6 || py < -1e-6 || py > 1 + 1e-6)) return null;
-  return out.map(([px, py]) => [round5(clamp01(px)), round5(clamp01(py))]);
+  if (out.some(([px, py]) => outside(px) || outside(py))) return null;
+  return out.map(([px, py]) => [round5(clampIn(px)), round5(clampIn(py))]);
 }
 
 /** An L's lounge moves to the other part; the long run gets its default backrest. */
@@ -164,7 +185,16 @@ export function swapLounge(shape) {
 export function flipShape(shape) {
   const xs = shape.points.map((p) => p[0]);
   const axis = Math.min(...xs) + Math.max(...xs);
-  return { ...shape, points: shape.points.map(([x, y]) => [round5(clamp01(axis - x)), y]) };
+  return { ...shape, points: shape.points.map(([x, y]) => [round5(clampIn(axis - x)), y]) };
+}
+
+/** Mirrored top to bottom about its centre (an L's lounge goes from the
+ * camera side to the back-wall side, or back); edges keep their numbers, so
+ * the backrest line and LOUNGE move with them. */
+export function flipShapeVertical(shape) {
+  const ys = shape.points.map((p) => p[1]);
+  const axis = Math.min(...ys) + Math.max(...ys);
+  return { ...shape, points: shape.points.map(([x, y]) => [x, round5(clampIn(axis - y))]) };
 }
 
 // ---- whole-shape resize / rotate ------------------------------------------
@@ -202,10 +232,10 @@ function offsets(points, centre, aspect, deg) {
 function maxScale(offs, centre) {
   let limit = Infinity;
   for (const [dx, dy] of offs) {
-    if (dx > 1e-9) limit = Math.min(limit, (1 - centre[0]) / dx);
-    if (dx < -1e-9) limit = Math.min(limit, centre[0] / -dx);
-    if (dy > 1e-9) limit = Math.min(limit, (1 - centre[1]) / dy);
-    if (dy < -1e-9) limit = Math.min(limit, centre[1] / -dy);
+    if (dx > 1e-9) limit = Math.min(limit, (1 - EDGE - centre[0]) / dx);
+    if (dx < -1e-9) limit = Math.min(limit, (centre[0] - EDGE) / -dx);
+    if (dy > 1e-9) limit = Math.min(limit, (1 - EDGE - centre[1]) / dy);
+    if (dy < -1e-9) limit = Math.min(limit, (centre[1] - EDGE) / -dy);
   }
   return limit;
 }
@@ -229,7 +259,7 @@ export function transformPoints(origPoints, scale, deg, aspect, fixedCentre = fa
     s = Math.min(s, maxScale(offs, centre));
     if (s < 1e-6) return null;
   } else {
-    const fit = Math.min(1 / Math.max(hi(0) - lo(0), 1e-9), 1 / Math.max(hi(1) - lo(1), 1e-9));
+    const fit = Math.min((1 - 2 * EDGE) / Math.max(hi(0) - lo(0), 1e-9), (1 - 2 * EDGE) / Math.max(hi(1) - lo(1), 1e-9));
     if (s > fit) {
       // a turn alone (scale 1) never changes the size: it stops instead;
       // a pinch stops growing at the photo's size
@@ -241,10 +271,10 @@ export function transformPoints(origPoints, scale, deg, aspect, fixedCentre = fa
   const shift = (i) => {
     const min = centre[i] + lo(i) * s;
     const max = centre[i] + hi(i) * s;
-    return min < 0 ? -min : max > 1 ? 1 - max : 0;
+    return min < EDGE ? EDGE - min : max > 1 - EDGE ? 1 - EDGE - max : 0;
   };
   const [sx, sy] = [shift(0), shift(1)];
-  return offs.map(([dx, dy]) => [round5(clamp01(centre[0] + sx + dx * s)), round5(clamp01(centre[1] + sy + dy * s))]);
+  return offs.map(([dx, dy]) => [round5(clampIn(centre[0] + sx + dx * s)), round5(clampIn(centre[1] + sy + dy * s))]);
 }
 
 // ---- tilt (up / down) ---------------------------------------------------------
@@ -313,8 +343,8 @@ export function tiltPoints(origPoints, k, aspect) {
     const d = t[6] * x + t[7] * y + 1;
     return [(t[0] * x + t[1] * y + t[2]) / d / aspect, (t[3] * x + t[4] * y + t[5]) / d];
   });
-  if (out.some(([x, y]) => x < -1e-6 || x > 1 + 1e-6 || y < -1e-6 || y > 1 + 1e-6)) return null;
-  return out.map(([x, y]) => [round5(clamp01(x)), round5(clamp01(y))]);
+  if (out.some(([x, y]) => outside(x) || outside(y))) return null;
+  return out.map(([x, y]) => [round5(clampIn(x)), round5(clampIn(y))]);
 }
 
 export function centroid(corners) {

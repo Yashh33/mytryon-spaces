@@ -86,18 +86,9 @@ DEFAULT_GENERATION_PROMPT = """\
 Add the furniture into the room photograph (Image 1).
 
 CAMERA — this requirement overrides every other instruction
-The output must be the same photograph as Image 1, taken from the
-identical camera position, height, angle, tilt, rotation and focal
-length. Do not re-frame, re-crop, zoom, pan, straighten or centre the
-view. Every wall, edge, corner and ceiling line must appear at exactly
-the same angle and in exactly the same place in the frame as in Image 1.
-If a wall is seen obliquely in Image 1, it must still be seen obliquely
-at the same angle. The result must look like Image 1 with furniture added
-to it, never like a new photograph of the same room.
+The output must be the same photograph as Image 1, taken from the identical camera position, height, angle, tilt, rotation and focal length. Do not re-frame, re-crop, zoom, pan, straighten or centre the view. Every wall, edge, corner and ceiling line must appear at exactly the same angle and in exactly the same place in the frame as in Image 1. If a wall is seen obliquely in Image 1, it must still be seen obliquely at the same angle. The result must look like Image 1 with furniture added to it, never like a new photograph of the same room.
 
-Any description below of where the camera stands is given only to help
-you work out where the furniture goes. It must never change the camera
-position, angle or framing of your output. Match Image 1 exactly.
+Any description below of where the camera stands is given only to help you work out where the furniture goes. It must never change the camera position, angle or framing of your output. Match Image 1 exactly.
 
 ROOM LAYOUT, as seen in Image 1
 {{ROOM_LAYOUT}}
@@ -107,49 +98,19 @@ Read these as strict requirements.
 
 {{PLACEMENT}}
 
-Keep everything else exactly the same. Preserve the walls, doorways,
-windows, floor, ceiling and room proportions precisely as they appear.
-Change nothing except adding the furniture.
+Keep everything else exactly the same. Preserve the walls, doorways, windows, floor, ceiling and room proportions precisely as they appear. Change nothing except adding the furniture.
 
-Never change the room to make furniture fit: never widen, lengthen or
-reshape any wall, never remove wall panels or features. The room in the
-result has exactly the size and shape of Image 1.
+Never change the room to make furniture fit: never widen, lengthen or reshape any wall, never remove wall panels or features. The room in the result has exactly the size and shape of Image 1.
 
-A sofa whose back is against a wall stays flat against that wall and
-parallel to it — never pulled forward or turned at an angle. If the sofas
-on one wall do not fit at full size, make each a little shorter (narrower
-seats for straight sofas, fewer seats for L, corner or curved), keeping
-all of them flat against the wall, side by side, in the order PLACEMENT
-gives.
+A sofa whose back is against a wall stays flat against that wall and parallel to it — never pulled forward or turned at an angle. If the sofas on one wall do not fit at full size, make each a little shorter (narrower seats for straight sofas, fewer seats for L, corner or curved), keeping all of them flat against the wall, side by side, in the order PLACEMENT gives.
 
-Remove any people from the photograph.
-
-{{PIECE_SOURCES}} For a straight sofa, the NUMBER of
-seats and cushions is never taken from the photograph — it comes only
-from the configuration stated above. Where a photograph shows fewer or
-more seats than the stated configuration, rebuild that piece longer or
-shorter in the same design, adding or removing matching seat and back
-cushions. An L-shaped, corner or curved sofa has no stated seat count:
-build it to the shape and size stated in its placement, with as many
-whole seats as fit that length. Do not apply one piece's material or
-colour to another.
+{{PIECE_SOURCES}} For a straight sofa, the NUMBER of seats and cushions is never taken from the photograph — it comes only from the configuration stated above. Where a photograph shows fewer or more seats than the stated configuration, rebuild that piece longer or shorter in the same design, adding or removing matching seat and back cushions. An L-shaped, corner or curved sofa has no stated seat count: build it to the shape and size stated in its placement, with as many whole seats as fit that length. Do not apply one piece's material or colour to another.
 
 {{CONFIG_NOTES}}
 
-Clear away people, tools, ladders, cement bags, rubble and loose building
-material, and finish all bare surfaces — plaster becomes painted wall,
-screed becomes finished flooring. Finish off exposed wires, conduit ends
-and unfinished electrical points as well: the wires are gone, with a neat
-ceiling light or plain finished ceiling in their place.
+Clear away people, tools, ladders, cement bags, rubble and loose building material, and finish all bare surfaces — plaster becomes painted wall, screed becomes finished flooring. Finish off exposed wires, conduit ends and unfinished electrical points as well: the wires are gone, with a neat ceiling light or plain finished ceiling in their place.
 
-Surfaces are often covered with newspaper, plastic sheeting, masking tape
-or protective film during painting and finishing work. Remove the
-covering, but never remove what lies underneath it. Where the covering
-follows the outline of panelling, moulding, recesses, niches, a built-in
-unit, cladding or similar permanent joinery, render that feature complete
-and finished — as it will look once the work is done. A wall with five
-recessed panels must still have five recessed panels. Never replace a
-covered feature with a flat blank wall.
+Surfaces are often covered with newspaper, plastic sheeting, masking tape or protective film during painting and finishing work. Remove the covering, but never remove what lies underneath it. Where the covering follows the outline of panelling, moulding, recesses, niches, a built-in unit, cladding or similar permanent joinery, render that feature complete and finished — as it will look once the work is done. A wall with five recessed panels must still have five recessed panels. Never replace a covered feature with a flat blank wall.
 
 {{ROOM_TREATMENT}}
 
@@ -157,10 +118,7 @@ covered feature with a flat blank wall.
 
 {{LIGHTING}}
 
-The furniture being placed must be the visual focal point of the image.
-Compose, light and stage the room so the eye goes to it first. Anything
-else added to the space must stay secondary and must never compete with
-it for attention.
+The furniture being placed must be the visual focal point of the image. Compose, light and stage the room so the eye goes to it first. Anything else added to the space must stay secondary and must never compete with it for attention.
 
 Room: {{ROOM_TYPE}}
 Furniture:
@@ -185,6 +143,7 @@ SUPERSEDED_GENERATION_PROMPT_HASHES = {
     "285a3a6a8d0755d6dd3dd8836fb90856cb2cee99b5ad12f854d341819c75c176",  # before the fabric section moved under the image list
     "1a212a95d2f1caf48eb4a00e99aed0121067696584908cf52cb94ca7ec97d78b",  # before {{PIECE_SOURCES}}
     "36d7c4b73686f438e67d29746d52dcd93a95e470bbbcc26c310f116941b84ece",  # before "never change the room to make furniture fit" and "flat against its wall"
+    "9999cf4e1f1354ce6ff2266624b84052a5aaf539e7b9f0295fb33a48454ba4ac",  # before one line per paragraph and no "Remove any people" line
 }
 # "true": lengths in feet are written into the prompts, as they always were.
 # "false" (the default): no feet reach either model — the floor plan is not to
@@ -382,19 +341,20 @@ def derive_item_shape(category: str, type_: str) -> str:
 
 DEFAULT_ROOM_TREATMENT = "luxury"
 ROOM_TREATMENT_CHOICES = ["keep", "warm", "luxury", "minimal"]
+# The clean-up (people, tools, rubble ...) is said once, in the prompt's own
+# "Clear away people, tools, ladders ..." paragraph, not again in each look.
 _ROOM_TREATMENT_BASE = (
-    "Clear away any people, tools, ladders, cement bags, rubble or building "
-    "material, and finish all bare surfaces. Keep the walls, windows, doors, "
-    "flooring, ceiling and room proportions exactly as photographed. "
+    "Keeping the walls, windows, doors, flooring, ceiling and room proportions "
+    "exactly as photographed, "
 )
 ROOM_TREATMENT_TEXT = {
-    "keep": _ROOM_TREATMENT_BASE + (
+    "keep": (
         "Do not restyle anything: keep the wall colours, floor, ceiling, "
         "curtains and any existing decor exactly as photographed. The only "
         "additions are the furniture listed below."
     ),
     "warm": _ROOM_TREATMENT_BASE + (
-        "Within those unchanged boundaries, style the room as a warm, "
+        "style the room as a warm, "
         "aesthetic, lived-in home: warm white or soft beige wall paint, warm "
         "wood tones and warm ceiling lighting (cove or a pendant). The room "
         "may include a few of these, only where they fit naturally: a "
@@ -404,7 +364,7 @@ ROOM_TREATMENT_TEXT = {
         "Cosy, inviting, magazine-quality."
     ),
     "luxury": _ROOM_TREATMENT_BASE + (
-        "Within those unchanged boundaries, style the room as a high-end "
+        "style the room as a high-end "
         "luxury interior: deep rich tones, brass or gold accents, cove "
         "lighting with hidden warm LED strips, a plush large rug and elegant "
         "floor-length drapes. The room may also include a few of these, only "
@@ -416,7 +376,7 @@ ROOM_TREATMENT_TEXT = {
         "premium, hotel-like."
     ),
     "minimal": _ROOM_TREATMENT_BASE + (
-        "Within those unchanged boundaries, style the room as calm and "
+        "style the room as calm and "
         "minimal: off-white walls, light oak or pale stone floor, bright soft "
         "light, bare windows or sheer white blinds, at most one plain rug and "
         "one simple low coffee table, no artwork, no plants and no ornaments. "
@@ -3266,11 +3226,10 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "Each sofa stays the size of its shape: never larger than the shape, never move a sofa off its shape or turn "
         "it at an angle. The floor between shapes stays visible — keep every gap exactly as the shapes show. Each "
         "sofa keeps its own material and colour from its own photograph, unless the FABRIC section gives it another.",
-        "After placing the furniture, remove all coloured guide shapes and black lines completely. No colour tint, "
-        "outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
+        "After placing the furniture, remove all coloured guide shapes, labels and black lines completely. No colour "
+        "tint, outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
         _prompt_section("CAMERA —", "ROOM LAYOUT"),
         _prompt_section("Keep everything else exactly the same.", "A sofa whose back is against a wall"),
-        "Remove any people from the photograph.",
         _prompt_section("Clear away people, tools, ladders", "{{ROOM_TREATMENT}}"),
         "{{ROOM_TREATMENT}}",
         "{{DECOR}}",
@@ -3284,6 +3243,7 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
 # to one was never edited, so startup moves it to the current default.
 SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "b27cc5a4ded0a6a44baba5d1ecb0b43af586b2504893addb42ce2dd64727c346",  # floor dots + boxes version (reverted)
+    "5959efbe198a487bc8b1c2c20284d93d51013f3b96f96d1c42c5541649b12aa1",  # before labels, one line per paragraph, no "Remove any people" line
 }
 
 
@@ -3326,21 +3286,40 @@ def piece_shape_kind(sub_shape: str) -> str | None:
 
 def attempt_pieces(attempt: Attempt) -> list[dict]:
     """One entry per piece that gets its own shape (a "3+2" set is two), in
-    the order the draw screen lists them."""
+    the order the draw screen lists them. "tag" is the label drawn above its
+    shape and starting its paragraph: "1 · L-SHAPE", "2 · 3-SEATER" ..."""
     pieces = []
     for index, item in enumerate(attempt.items):
         subs = compute_sub_pieces(item)
         for sub in subs:
+            label = sub["label"] if len(subs) > 1 else item.type
+            kind = piece_shape_kind(sub["shape"])
             pieces.append(
                 {
                     "item": item,
                     "item_index": index,
                     "sub_index": sub["sub_index"],
-                    "label": sub["label"] if len(subs) > 1 else item.type,
-                    "kind": piece_shape_kind(sub["shape"]),
+                    "label": label,
+                    "kind": kind,
+                    "tag": f"{len(pieces) + 1} · {shape_type_label(item, label, kind)}",
                 }
             )
     return pieces
+
+
+def shape_type_label(item: Item, label: str, kind: str | None) -> str:
+    """The type in a shape's tag: L-SHAPE, CORNER SOFA, 3-SEATER, ARMCHAIR,
+    DINING TABLE ... Mirrors typeLabel in frontend/src/shapes.js."""
+    if kind == "L":
+        return "L-SHAPE"
+    if kind == "corner":
+        return "CORNER SOFA"
+    seats = sofa_seat_count(item.category, label)
+    if item.category == "Chair" or seats == 1:
+        return "ARMCHAIR"
+    if seats:
+        return f"{seats}-SEATER"
+    return item.category.upper()
 
 
 def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | None]:
@@ -3422,9 +3401,18 @@ def missing_shape_pieces(attempt: Attempt) -> list[str]:
     return [p["label"] for p in attempt_pieces(attempt) if (p["item"].id, p["sub_index"]) not in drawn]
 
 
-def draw_guide_image(photo: Image.Image, shapes: list[dict]) -> Image.Image:
+def _guide_font(size: int):
+    from PIL import ImageFont
+
+    return ImageFont.load_default(size=size)
+
+
+def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None = None) -> Image.Image:
     """The room photo with every shape filled in its colour at about 45%
-    opacity and a GUIDE_LINE_PX black line on each backrest edge."""
+    opacity, a GUIDE_LINE_PX black line on each backrest edge, a white
+    label above each shape ("1 · L-SHAPE", from `tags` by (item_id,
+    sub_index)) and a small LOUNGE label on an L's lounge. The draw screen
+    shows the same labels (frontend/src/pages/DrawOnPhoto.jsx)."""
     from PIL import ImageDraw
 
     base = photo.convert("RGBA")
@@ -3447,6 +3435,29 @@ def draw_guide_image(photo: Image.Image, shapes: list[dict]) -> Image.Image:
         draw.line([start, end], fill=(0, 0, 0, 255), width=GUIDE_LINE_PX)
         for x, y in (start, end):  # round ends
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+
+    # labels: sizes relative to a 1536 px wide photo
+    unit = width / 1536
+    big, small = _guide_font(max(round(24 * unit), 12)), _guide_font(max(round(16 * unit), 10))
+
+    def label(text: str, cx: float, cy: float, font, pad: float) -> None:
+        box = draw.textbbox((0, 0), text, font=font)
+        w, h = box[2] - box[0] + 2 * pad, box[3] - box[1] + 2 * pad
+        x0 = min(max(cx - w / 2, 0), width - w)  # always fully on the photo
+        y0 = min(max(cy - h / 2, 0), height - h)
+        draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=h / 2, fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=max(round(unit), 1))
+        draw.text((x0 + pad - box[0], y0 + pad - box[1]), text, font=font, fill=(17, 17, 17, 255))
+
+    for shape in shapes:
+        parts = shape_parts(shape["kind"], shape["points"])
+        if shape["kind"] == "L" and shape["lounge"] is not None:
+            lounge = parts[shape["lounge"]]
+            label("LOUNGE", sum(x for x, _ in lounge) / 4 * width, sum(y for _, y in lounge) / 4 * height, small, 5 * unit)
+        tag = (tags or {}).get((shape["item_id"], shape["sub_index"]))
+        if tag:
+            xs = [x for x, _ in shape["points"]]
+            top = min(y for _, y in shape["points"]) * height
+            label(tag, (min(xs) + max(xs)) / 2 * width, top - 26 * unit, big, 8 * unit)
     return guide.convert("RGB")
 
 
@@ -3481,13 +3492,13 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
             else f"in the exact design, material and colour of {described}"
         )
         text = (
-            f"{colour} shape: one {shape_piece_name(item, piece['label'], shape['kind'])} {source}. Build it exactly on "
-            f"the {colour.lower()} shape, covering the same floor area, at the same size, with its back along the thick "
-            "black line, flat against the wall."
+            f"{piece['tag']} ({colour.lower()} shape): one {shape_piece_name(item, piece['label'], shape['kind'])} "
+            f"{source}. Build it exactly on the {colour.lower()} shape, covering the same floor area, at the same size, "
+            "with its back along the thick black line, flat against the wall."
         )
         if shape["kind"] == "L":
             text += (
-                " The part of the shape with no black line is an open chaise lounge with no backrest and no arm at its "
+                " The part of the shape marked LOUNGE, with no black line, is an open chaise lounge with no backrest and no arm at its "
                 "tip. The sofa has one arm only, at the end of the long run away from the lounge. If the photograph "
                 "shows a straight sofa, rebuild it as this L in the same design."
             )
@@ -3937,7 +3948,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         if shapes:
             # the guide image: drawn on the room photo, padded exactly as the photo would be
             with Image.open(room_path) as room_image:
-                guide = draw_guide_image(room_image, shapes)
+                tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
+                guide = draw_guide_image(room_image, shapes, tags)
             sent = guide
             if pad_room_photo_enabled(db):
                 sent, photo_box = pad_to_output_ratio(guide, size)

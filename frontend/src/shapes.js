@@ -128,6 +128,86 @@ export function flipShape(shape) {
   return { ...shape, points: shape.points.map(([x, y]) => [round5(clamp01(axis - x)), y]) };
 }
 
+// ---- whole-shape resize / rotate ------------------------------------------
+// Done in photo pixels (x scaled by the photo's width/height `aspect`), so a
+// shape keeps its true form on a photo of any shape. Only the corner points
+// change: every edge keeps its number, so the backrest and the lounge stay
+// on the same edges.
+
+const MIN_SIZE = 0.03; // a shape never shrinks below this share of the photo
+export const ROTATE_SNAP_DEG = 5; // within this of a quarter turn, it snaps to it
+
+/** The point a shape resizes and turns about: the middle of its corners. */
+export function shapeCentre(points) {
+  return [points.reduce((s, p) => s + p[0], 0) / points.length, points.reduce((s, p) => s + p[1], 0) / points.length];
+}
+
+/** Turn of `deg` degrees snapped to 0, 90, 180 or 270 when within ROTATE_SNAP_DEG. */
+export function snapAngle(deg) {
+  const quarter = Math.round(deg / 90) * 90;
+  return Math.abs(deg - quarter) <= ROTATE_SNAP_DEG ? quarter : deg;
+}
+
+function offsets(points, centre, aspect, deg) {
+  const a = (deg * Math.PI) / 180;
+  const [cos, sin] = [Math.cos(a), Math.sin(a)];
+  return points.map(([x, y]) => {
+    const dx = (x - centre[0]) * aspect;
+    const dy = y - centre[1];
+    return [(dx * cos - dy * sin) / aspect, dx * sin + dy * cos];
+  });
+}
+
+/** The largest scale the turned shape can take about `centre` and still
+ * stay inside the photo — the shape stops at the edge. */
+function maxScale(offs, centre) {
+  let limit = Infinity;
+  for (const [dx, dy] of offs) {
+    if (dx > 1e-9) limit = Math.min(limit, (1 - centre[0]) / dx);
+    if (dx < -1e-9) limit = Math.min(limit, centre[0] / -dx);
+    if (dy > 1e-9) limit = Math.min(limit, (1 - centre[1]) / dy);
+    if (dy < -1e-9) limit = Math.min(limit, centre[1] / -dy);
+  }
+  return limit;
+}
+
+/** `origPoints` scaled by `scale` and turned by `deg` (clockwise on screen)
+ * about their centre, never smaller than MIN_SIZE and never outside the
+ * photo. With `fixedCentre` (the resize handle) growth stops where the
+ * shape meets the photo's edge. Without it (a turn, or a pinch) the shape
+ * is nudged back onto the photo; a pinch stops growing at the photo's size,
+ * and a turn that can't fit at its size returns null, so the caller keeps
+ * the last shape that did. */
+export function transformPoints(origPoints, scale, deg, aspect, fixedCentre = false) {
+  const centre = shapeCentre(origPoints);
+  const offs = offsets(origPoints, centre, aspect, deg);
+  const lo = (i) => Math.min(...offs.map((o) => o[i]));
+  const hi = (i) => Math.max(...offs.map((o) => o[i]));
+  const smallest = Math.min(hi(0) - lo(0), hi(1) - lo(1));
+  const minScale = smallest > 0 ? MIN_SIZE / smallest : 0;
+  let s = Math.max(scale, minScale);
+  if (fixedCentre) {
+    s = Math.min(s, maxScale(offs, centre));
+    if (s < 1e-6) return null;
+  } else {
+    const fit = Math.min(1 / Math.max(hi(0) - lo(0), 1e-9), 1 / Math.max(hi(1) - lo(1), 1e-9));
+    if (s > fit) {
+      // a turn alone (scale 1) never changes the size: it stops instead;
+      // a pinch stops growing at the photo's size
+      if (scale === 1) return null;
+      s = fit;
+    }
+  }
+  // nudge back onto the photo
+  const shift = (i) => {
+    const min = centre[i] + lo(i) * s;
+    const max = centre[i] + hi(i) * s;
+    return min < 0 ? -min : max > 1 ? 1 - max : 0;
+  };
+  const [sx, sy] = [shift(0), shift(1)];
+  return offs.map(([dx, dy]) => [round5(clamp01(centre[0] + sx + dx * s)), round5(clamp01(centre[1] + sy + dy * s))]);
+}
+
 export function centroid(corners) {
   return [corners.reduce((s, p) => s + p[0], 0) / corners.length, corners.reduce((s, p) => s + p[1], 0) / corners.length];
 }

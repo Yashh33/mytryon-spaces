@@ -16,15 +16,28 @@ import {
   moveShape,
   newShape,
   piecesOf,
+  shapeCentre,
   shapeParts,
+  snapAngle,
   swapLounge,
+  transformPoints,
 } from "../shapes.js";
 
 const SAVE_DELAY_MS = 400;
+const TAP_SLOP_PX = 5; // a finger may wander this far and still count as a tap
+// on-screen sizes (CSS px), turned into photo pixels with `scale`
+const CORNER_R = 8;
+const RESIZE_SIZE = 32;
+const ROTATE_R = 17;
+const HANDLE_GAP = 14; // handles sit this far outside the shape
+const ROTATE_STICK = 30;
 
 /** "Draw on photo (Beta)": each piece is drawn as a coloured shape on the
- * room photo. Corners and whole shapes drag; tapping an edge puts the
- * backrest (thick black line) there. Saved on the attempt as it changes. */
+ * room photo. Drag inside a shape to move it; the square handle resizes the
+ * whole shape from its centre, the round handle turns it (snapping to quarter
+ * turns); two fingers pinch to resize and twist to turn. Corner dots are for
+ * fine-tuning; tapping an edge puts the backrest (black line) there. Shapes
+ * never leave the photo. Saved on the attempt as corner points. */
 export default function DrawOnPhoto() {
   const { id } = useParams();
   const adjust = useAdjustMode(id);
@@ -38,9 +51,13 @@ export default function DrawOnPhoto() {
   const [scale, setScale] = useState(1); // photo pixels per screen pixel
   const [saveState, setSaveState] = useState("saved"); // "saved" | "saving" | "error"
   const svgRef = useRef(null);
-  const drag = useRef(null);
+  const drag = useRef(null); // one-finger action in progress
+  const pointers = useRef(new Map()); // pointerId -> [clientX, clientY]
+  const gesture = useRef(null); // two-finger pinch / twist in progress
   const saveTimer = useRef(null);
   const latest = useRef([]);
+  const shapesRef = useRef([]);
+  shapesRef.current = shapes;
 
   async function load() {
     setError(null);
@@ -85,64 +102,139 @@ export default function DrawOnPhoto() {
     }, SAVE_DELAY_MS);
   }
 
-  function update(next, persist = true) {
+  function update(next) {
     setShapes(next);
-    if (persist) save(next);
+    save(next);
   }
 
   const keyOf = (s) => `${s.item_id}:${s.sub_index}`;
+  const aspect = size ? size.w / size.h : 1;
 
-  function toPhoto(e) {
+  /** Pointer position as fractions of the photo. */
+  function toPhoto(clientX, clientY) {
     const rect = svgRef.current.getBoundingClientRect();
-    return [(e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height];
+    return [(clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height];
   }
 
-  function startDrag(e, key, mode, extra = {}) {
-    e.stopPropagation();
-    e.currentTarget.setPointerCapture(e.pointerId);
-    const shape = shapes.find((s) => keyOf(s) === key);
-    drag.current = { key, mode, pointerId: e.pointerId, start: toPhoto(e), orig: shape.points, clientX: e.clientX, clientY: e.clientY, moved: false, ...extra };
-    setSelected(key);
+  /** Angle (degrees, clockwise on screen) and distance (photo-height units)
+   * from `centre` to a point, measured in true photo proportions. */
+  function polar(centre, p) {
+    const dx = (p[0] - centre[0]) * aspect;
+    const dy = p[1] - centre[1];
+    return { deg: (Math.atan2(dy, dx) * 180) / Math.PI, dist: Math.hypot(dx, dy) };
   }
 
-  function moveDrag(e) {
-    const d = drag.current;
-    if (!d || d.pointerId !== e.pointerId) return;
-    if (!d.moved && Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY) < 5) return; // a tap, not a drag yet
-    d.moved = true;
-    const [x, y] = toPhoto(e);
-    setShapes((prev) =>
-      prev.map((s) => {
-        if (keyOf(s) !== d.key) return s;
-        if (d.mode === "corner") return moveCorner(s, d.index, x, y);
-        return moveShape(s, d.orig, x - d.start[0], y - d.start[1]);
-      })
-    );
+  function setShapePoints(key, points) {
+    setShapes((prev) => prev.map((s) => (keyOf(s) === key ? { ...s, points } : s)));
   }
 
-  function endDrag(e) {
-    const d = drag.current;
-    if (!d || d.pointerId !== e.pointerId) return;
-    e.stopPropagation();
+  function startGesture() {
+    const shape = shapesRef.current.find((s) => keyOf(s) === selected);
+    const [a, b] = [...pointers.current.values()];
+    if (!shape || !a || !b) return;
     drag.current = null;
-    if (d.moved) {
-      setShapes((prev) => {
-        save(prev);
-        return prev;
-      });
-    } else if (d.mode === "edge") {
-      setBackrest(d.key, d.part, d.edge);
+    const pa = toPhoto(...a);
+    const pb = toPhoto(...b);
+    const v = polar(pa, pb);
+    gesture.current = { key: selected, orig: shape.points, deg: v.deg, dist: Math.max(v.dist, 1e-6) };
+  }
+
+  function onPointerDown(e) {
+    e.preventDefault();
+    svgRef.current.setPointerCapture(e.pointerId);
+    pointers.current.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pointers.current.size === 2) {
+      startGesture(); // second finger: pinch / twist the selected shape
+      return;
+    }
+    if (pointers.current.size > 2) return;
+    const t = e.target.dataset || {};
+    const key = t.key || null;
+    const shape = key ? shapesRef.current.find((s) => keyOf(s) === key) : null;
+    const at = toPhoto(e.clientX, e.clientY);
+    drag.current = {
+      role: shape ? t.role : "empty",
+      key,
+      pointerId: e.pointerId,
+      start: at,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      moved: false,
+      orig: shape?.points,
+      index: t.index != null ? Number(t.index) : null,
+      part: t.part != null ? Number(t.part) : null,
+      edge: t.edge != null ? Number(t.edge) : null,
+    };
+    if (shape) {
+      setSelected(key);
+      if (t.role === "resize" || t.role === "rotate") {
+        const centre = shapeCentre(shape.points);
+        Object.assign(drag.current, { centre, from: polar(centre, at) });
+      }
     }
   }
 
+  function onPointerMove(e) {
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, [e.clientX, e.clientY]);
+    const g = gesture.current;
+    if (g) {
+      const [a, b] = [...pointers.current.values()];
+      if (!a || !b) return;
+      const v = polar(toPhoto(...a), toPhoto(...b));
+      const points = transformPoints(g.orig, v.dist / g.dist, snapAngle(v.deg - g.deg), aspect);
+      if (points) setShapePoints(g.key, points);
+      return;
+    }
+    const d = drag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    if (!d.moved && Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY) < TAP_SLOP_PX) return;
+    d.moved = true;
+    if (d.role === "empty") return;
+    const at = toPhoto(e.clientX, e.clientY);
+    if (d.role === "corner") {
+      setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveCorner(s, d.index, at[0], at[1]) : s)));
+    } else if (d.role === "resize") {
+      const now = polar(d.centre, at);
+      const points = transformPoints(d.orig, now.dist / Math.max(d.from.dist, 1e-6), 0, aspect, true);
+      if (points) setShapePoints(d.key, points);
+    } else if (d.role === "rotate") {
+      const now = polar(d.centre, at);
+      const points = transformPoints(d.orig, 1, snapAngle(now.deg - d.from.deg), aspect);
+      if (points) setShapePoints(d.key, points); // a turn that won't fit stops at the last one that did
+    } else {
+      // "move" or a drag that began on an edge: the whole shape follows
+      setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveShape(s, d.orig, at[0] - d.start[0], at[1] - d.start[1]) : s)));
+    }
+  }
+
+  function onPointerUp(e) {
+    pointers.current.delete(e.pointerId);
+    if (gesture.current) {
+      if (pointers.current.size < 2) {
+        gesture.current = null;
+        save(shapesRef.current);
+      }
+      return;
+    }
+    const d = drag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    drag.current = null;
+    if (e.type === "pointercancel") return;
+    if (d.moved && d.role !== "empty") save(shapesRef.current);
+    else if (!d.moved && d.role === "empty") setSelected(null); // tap on the photo: deselect
+    else if (!d.moved && d.role === "edge") setBackrest(d.key, d.part, d.edge);
+  }
+
   function setBackrest(key, part, edge) {
-    const next = shapes.map((s) => {
-      if (keyOf(s) !== key || !backrestAllowed(s, part, edge)) return s;
-      const backrest = [...s.backrest];
-      backrest[part] = edge;
-      return { ...s, backrest };
-    });
-    update(next);
+    update(
+      shapesRef.current.map((s) => {
+        if (keyOf(s) !== key || !backrestAllowed(s, part, edge)) return s;
+        const backrest = [...s.backrest];
+        backrest[part] = edge;
+        return { ...s, backrest };
+      })
+    );
   }
 
   function addShape(piece, index) {
@@ -180,7 +272,6 @@ export default function DrawOnPhoto() {
   const W = size?.w || 1;
   const H = size?.h || 1;
   const px = ([x, y]) => [x * W, y * H];
-  const handleR = 11 * scale;
   const status = curved.length
     ? "Curved sofas: please use Floor plan"
     : missing.length
@@ -191,6 +282,22 @@ export default function DrawOnPhoto() {
           ? "Not saved — check the connection"
           : "All pieces drawn";
   const selectedShape = selected ? byKey[selected] : null;
+
+  /** Resize (bottom-right) and rotate (above) handles, outside the shape's
+   * bounding box but always kept on the photo so they can be reached. */
+  function handlesFor(s) {
+    const pts = s.points.map(px);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const keep = (v, r, limit) => Math.min(Math.max(v, r), limit - r);
+    const rs = RESIZE_SIZE * scale;
+    const rr = ROTATE_R * scale;
+    const resize = [keep(maxX + HANDLE_GAP * scale + rs / 2, rs / 2, W), keep(maxY + HANDLE_GAP * scale + rs / 2, rs / 2, H)];
+    const midX = (minX + maxX) / 2;
+    const rotate = [keep(midX, rr, W), keep(minY - (ROTATE_STICK + HANDLE_GAP) * scale - rr, rr, H)];
+    return { resize, rotate, stickFrom: [midX, minY], rs, rr };
+  }
 
   return (
     <div className="screen has-step-footer">
@@ -208,7 +315,8 @@ export default function DrawOnPhoto() {
         Draw on photo <span className="beta-tag">Beta</span>
       </h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
-        Add each piece, then drag its corners to the floor where it should stand. Tap an edge to put the backrest (black line) there.
+        Add each piece, then drag it onto the floor. Square handle: resize. Round handle: turn (or pinch and twist with two
+        fingers). Tap an edge to put the backrest (black line) there.
       </div>
 
       <div className="draw-layout">
@@ -225,10 +333,10 @@ export default function DrawOnPhoto() {
               className="draw-svg"
               viewBox={`0 0 ${W} ${H}`}
               preserveAspectRatio="none"
-              onPointerMove={moveDrag}
-              onPointerUp={endDrag}
-              onPointerCancel={endDrag}
-              onPointerDown={() => setSelected(null)}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
             >
               {shapes.map((s) => {
                 const key = keyOf(s);
@@ -240,13 +348,14 @@ export default function DrawOnPhoto() {
                     {parts.map((corners, part) => (
                       <polygon
                         key={part}
+                        data-role="move"
+                        data-key={key}
                         points={corners.map((p) => px(p).join(",")).join(" ")}
                         fill={hex}
                         fillOpacity={0.45}
                         stroke={hex}
                         strokeWidth={(isSelected ? 3 : 1.5) * scale}
                         strokeLinejoin="round"
-                        onPointerDown={(e) => startDrag(e, key, "move")}
                       />
                     ))}
                     {parts.map((corners, part) => {
@@ -276,33 +385,67 @@ export default function DrawOnPhoto() {
                               return (
                                 <line
                                   key={`e${part}-${edge}`}
+                                  data-role="edge"
+                                  data-key={key}
+                                  data-part={part}
+                                  data-edge={edge}
                                   x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]}
                                   className="draw-edge-hit"
                                   strokeWidth={22 * scale}
-                                  onPointerDown={(e) => startDrag(e, key, "edge", { part, edge })}
                                 />
                               );
                             })
                         )
                       : null}
-                    {isSelected
-                      ? s.points.map((p, index) => {
+                  </g>
+                );
+              })}
+
+              {/* the selected shape's handles go on top of every shape */}
+              {selectedShape
+                ? (() => {
+                    const key = selected;
+                    const hex = COLOUR_HEX[selectedShape.colour];
+                    const h = handlesFor(selectedShape);
+                    return (
+                      <g className="draw-handles">
+                        <line
+                          x1={h.stickFrom[0]} y1={h.stickFrom[1]} x2={h.rotate[0]} y2={h.rotate[1] + h.rr}
+                          stroke="#fff" strokeWidth={3 * scale} strokeDasharray={`${4 * scale} ${3 * scale}`} pointerEvents="none"
+                        />
+                        <g className="draw-rotate">
+                          <circle data-role="rotate" data-key={key} cx={h.rotate[0]} cy={h.rotate[1]} r={h.rr} fill="#fff" stroke={hex} strokeWidth={3 * scale} />
+                          <text x={h.rotate[0]} y={h.rotate[1]} fontSize={20 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                            ↻
+                          </text>
+                        </g>
+                        <g className="draw-resize">
+                          <rect
+                            data-role="resize" data-key={key}
+                            x={h.resize[0] - h.rs / 2} y={h.resize[1] - h.rs / 2} width={h.rs} height={h.rs} rx={5 * scale}
+                            fill="#fff" stroke={hex} strokeWidth={3 * scale}
+                          />
+                          <text x={h.resize[0]} y={h.resize[1]} fontSize={19 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                            ⤡
+                          </text>
+                        </g>
+                        {selectedShape.points.map((p, index) => {
                           const [cx, cy] = px(p);
                           return (
                             <circle
                               key={`c${index}`}
-                              cx={cx} cy={cy} r={handleR}
+                              data-role="corner" data-key={key} data-index={index}
+                              cx={cx} cy={cy} r={CORNER_R * scale}
                               className="draw-handle"
                               stroke={hex}
-                              strokeWidth={3 * scale}
-                              onPointerDown={(e) => startDrag(e, key, "corner", { index })}
+                              strokeWidth={2.5 * scale}
                             />
                           );
-                        })
-                      : null}
-                  </g>
-                );
-              })}
+                        })}
+                      </g>
+                    );
+                  })()
+                : null}
             </svg>
           ) : null}
         </div>

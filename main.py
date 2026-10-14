@@ -1037,6 +1037,12 @@ async def lifespan(app: FastAPI):
         elif hashlib.sha256(saved_shapes_prompt.value.encode("utf-8")).hexdigest() in SUPERSEDED_SHAPES_PROMPT_HASHES:
             saved_shapes_prompt.value = DEFAULT_SHAPES_GENERATION_PROMPT
             logger.info("updated the saved shapes generation prompt to the current default")
+        else:
+            # an edited prompt keeps its edits; only an earlier final check line is brought up to date
+            for old_check in PREVIOUS_SHAPES_FINAL_CHECKS:
+                if old_check in saved_shapes_prompt.value:
+                    saved_shapes_prompt.value = saved_shapes_prompt.value.replace(old_check, SHAPES_FINAL_CHECK)
+                    logger.info("updated the final check line in the edited shapes generation prompt")
         if db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first() is None:
             db.add(Setting(key=STUDIO_PROMPT_KEY, value=DEFAULT_STUDIO_PROMPT))
             logger.info("seeded default studio prompt")
@@ -3218,6 +3224,17 @@ SHAPES_TOKEN = "{{SHAPES}}"
 # the gap writer's section (see GAP WRITER); empty when it failed or timed out
 OPEN_FLOOR_TOKEN = "{{OPEN_FLOOR}}"
 OPEN_FLOOR_HEADING = "OPEN FLOOR AROUND EACH SOFA:"
+SHAPES_FINAL_CHECK = (
+    "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
+    "both parts and no chaise; every sofa has the stated number of seats; no shape, label or line remains."
+)
+# Final check lines the Draw-on-photo prompt had before; in a saved prompt
+# that was edited (so not moved to the new default), startup replaces just
+# that line with SHAPES_FINAL_CHECK and leaves the rest as it is.
+PREVIOUS_SHAPES_FINAL_CHECKS = [
+    "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated number "
+    "of seats; no shape, label or line remains.",
+]
 # the edge of each part of a two-part shape that is shared with the other part
 SHARED_EDGE = {0: 2, 1: 3}
 GUIDE_IMAGE_LINE = (
@@ -3256,8 +3273,7 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "{{LIGHTING}}",
         # no "visual focal point" paragraph here: it invites the model to re-frame toward the sofas
         _prompt_section("Room: {{ROOM_TYPE}}", None),
-        "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated "
-        "number of seats; no shape, label or line remains.",
+        SHAPES_FINAL_CHECK,
     ]
 ) + "\n"
 
@@ -3270,6 +3286,7 @@ SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "31aabb1b08283b69bd41966a53c9285186d8e9c1d20d4fa3b196ff2823aee4db",  # before the final check line
     "939373a17e0de655b78a215041db88cf4f4d0980cfb821607bf8cf1cdcc29de6",  # before the size rule, with the focal point paragraph
     "4c64965fad27c36bff7d05dd0b220f1696f3de221d7084fd466d00ef9362dd2f",  # before {{OPEN_FLOOR}} (the gap writer's section)
+    "fd3e79f4c610ad58d5ac5e933a54534ae3399b75ef1489039b60f61e55577009",  # before the corner sofa in the final check
 }
 
 
@@ -3503,44 +3520,78 @@ def shape_piece_name(item: Item, label: str, kind: str) -> str:
 L_END_LEVEL = 0.02  # ends of a long run within this share of the photo's height count as level
 
 
-def l_lounge_sentence(shape: dict, aspect: float) -> str:
-    """Which end of an L's long run its lounge is on, read off the shape as
-    drawn (photo pixels: x scaled by the photo's width/height `aspect`):
-    LEFT or RIGHT end in the picture, whether that end is nearer the camera
-    (lower) or the back (higher), and which way the lounge sticks out. Always
-    computed from the current corners, so both Flips change it."""
-    parts = shape_parts(shape["kind"], shape["points"])
-    long_run = [(x * aspect, y) for x, y in parts[1 - shape["lounge"]]]
-    lounge = [(x * aspect, y) for x, y in parts[shape["lounge"]]]
+def _second_part_geometry(main_part: list, second_part: list, aspect: float) -> tuple[str, str, str]:
+    """Where a two-part shape's second part sits on its main (long) part,
+    read off the corners as drawn (photo pixels: x scaled by the photo's
+    width/height `aspect`): ("LEFT" | "RIGHT" — the end of the main part it
+    is attached to, in the picture; ", the end nearer the camera" | ", the
+    end nearer the back" | "" when the main part lies level; "toward the
+    camera" | "toward the back" | "toward the left" | "toward the right" —
+    the way it runs from the main part)."""
+    main_px = [(x * aspect, y) for x, y in main_part]
+    second_px = [(x * aspect, y) for x, y in second_part]
     mid = lambda a, b: ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
     length = lambda a, b: math.hypot(a[0] - b[0], a[1] - b[1])
-    q0, q1, q2, q3 = long_run
-    # the long run's two ends are its two shorter edges
+    q0, q1, q2, q3 = main_px
+    # the main part's two ends are its two shorter edges
     if length(q0, q1) + length(q2, q3) >= length(q1, q2) + length(q3, q0):
         ends = [mid(q1, q2), mid(q3, q0)]
     else:
         ends = [mid(q0, q1), mid(q2, q3)]
-    lx = sum(p[0] for p in lounge) / 4
-    ly = sum(p[1] for p in lounge) / 4
-    attached, other = sorted(ends, key=lambda e: length(e, (lx, ly)))
+    sx = sum(p[0] for p in second_px) / 4
+    sy = sum(p[1] for p in second_px) / 4
+    attached, other = sorted(ends, key=lambda e: length(e, (sx, sy)))
     side = "LEFT" if attached[0] < other[0] else "RIGHT"
-    # a long run lying level across the picture has neither end nearer: say nothing then
+    # a main part lying level across the picture has neither end nearer: say nothing then
     if abs(attached[1] - other[1]) < L_END_LEVEL:
         nearer = ""
     else:
         nearer = ", the end nearer the camera" if attached[1] > other[1] else ", the end nearer the back"
-    # from the long run's centre line to the lounge's centre
+    # from the main part's centre line to the second part's centre
     ax, ay = other[0] - attached[0], other[1] - attached[1]
-    t = ((lx - attached[0]) * ax + (ly - attached[1]) * ay) / max(ax * ax + ay * ay, 1e-12)
-    dx, dy = lx - (attached[0] + t * ax), ly - (attached[1] + t * ay)
+    t = ((sx - attached[0]) * ax + (sy - attached[1]) * ay) / max(ax * ax + ay * ay, 1e-12)
+    dx, dy = sx - (attached[0] + t * ax), sy - (attached[1] + t * ay)
     if abs(dx) > abs(dy):
         toward = "toward the left" if dx < 0 else "toward the right"
     else:
         toward = "toward the camera" if dy > 0 else "toward the back"
+    return side, nearer, toward
+
+
+def l_lounge_sentence(shape: dict, aspect: float) -> str:
+    """Which end of an L's long run its lounge is on: LEFT or RIGHT end in
+    the picture, whether that end is nearer the camera (lower) or the back
+    (higher), and which way the lounge sticks out. Always computed from the
+    current corners, so both Flips change it."""
+    parts = shape_parts(shape["kind"], shape["points"])
+    side, nearer, toward = _second_part_geometry(parts[1 - shape["lounge"]], parts[shape["lounge"]], aspect)
     return (
         f"Its lounge is at the {side} end of the long run in the picture{nearer}, and it sticks out "
         f"{toward}. Its single arm is at the other end, the {'RIGHT' if side == 'LEFT' else 'LEFT'} end. Do not "
         "swap these ends."
+    )
+
+
+def corner_sofa_sentence(shape: dict, aspect: float) -> str:
+    """A corner sofa: which side its shorter part is on (LEFT / RIGHT in the
+    picture) and which way it runs from the corner, both parts with a
+    backrest. The longer part is the one with the longer longest edge.
+    Always computed from the current corners, so both Flips change it."""
+    parts = shape_parts(shape["kind"], shape["points"])
+
+    def longest_edge(corners: list) -> float:
+        px = [(x * aspect, y) for x, y in corners]
+        return max(math.hypot(px[i][0] - px[(i + 1) % 4][0], px[i][1] - px[(i + 1) % 4][1]) for i in range(4))
+
+    long_index = 0 if longest_edge(parts[0]) >= longest_edge(parts[1]) else 1
+    side, _nearer, toward = _second_part_geometry(parts[long_index], parts[1 - long_index], aspect)
+    return (
+        "It is a corner sofa with two seating parts that meet at the corner, BOTH with a full backrest: the long part "
+        "has its back against the wall along its black line, and the shorter part is on the "
+        f"{side}, running {toward}, with its own backrest against the wall along its black line. There is no open "
+        "chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the photograph shows a "
+        "straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, legs, material and "
+        "colour."
     )
 
 
@@ -3574,7 +3625,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
                 "shows a straight sofa, rebuild it as this L in the same design."
             )
         elif shape["kind"] == "corner":
-            text += " Both parts have a backrest along their black lines; arms only at the two outer ends."
+            text += " " + corner_sofa_sentence(shape, aspect)
         paragraphs.append(text)
     return "\n\n".join(paragraphs)
 

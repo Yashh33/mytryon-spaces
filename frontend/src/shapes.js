@@ -133,27 +133,34 @@ export function moveCorner(shape, index, x, y) {
   return { ...shape, points: shape.points.map((p, i) => (i === index ? [round5(clampIn(x)), round5(clampIn(y))] : p)) };
 }
 
-// ---- an L-shape's corners ---------------------------------------------------
-// An L shows dots only on its outer corners: p0, p1 (the back edge), p5 (the
-// front corner of the long run) and p2 (the outer corner of the lounge tip).
-// The inner corner p4 and the tip's inner corner p3 follow: the tip keeps its
-// width along the back edge's direction, the lounge's inner side heads for
-// the same vanishing point as the shape's two sides, and the long run's front
-// edge runs alongside its back edge.
+// ---- an L-shape's (or corner sofa's) corners -------------------------------
+// A two-part shape (L or corner sofa) shows dots only on its outer corners:
+// p0, p1 (the back edge), p5 (the front corner of the long run) and p2 (the
+// outer corner of the second part's tip). The inner corner p4 and the tip's
+// inner corner p3 follow: the tip keeps its width along the back edge's
+// direction, the second part's inner side heads for the same vanishing point
+// as the shape's two sides, and the long run's front edge runs alongside its
+// back edge.
 
-const L_OUTER_DOTS = [0, 1, 2, 5];
+const OUTER_DOTS = [0, 1, 2, 5];
+
+/** Is this a two-part shape that moves as one piece (L or corner sofa)? */
+export function isTwoPart(shape) {
+  return shape.kind === "L" || shape.kind === "corner";
+}
 
 /** The corner indexes that get a dot when the shape is selected. */
 export function cornerDots(shape) {
-  return shape.kind === "L" ? L_OUTER_DOTS : shape.points.map((_, i) => i);
+  return isTwoPart(shape) ? OUTER_DOTS : shape.points.map((_, i) => i);
 }
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1]];
 const add = (a, b) => [a[0] + b[0], a[1] + b[1]];
 
-/** `origPoints` (an L) with outer corner `index` moved to (x, y) and the two
- * inner corners following; null when that gives no sensible L, so the caller
- * keeps the last one that did. Worked in photo pixels (`aspect` = w / h). */
+/** `origPoints` (an L or corner sofa) with outer corner `index` moved to
+ * (x, y) and the two inner corners following; null when that gives no
+ * sensible shape, so the caller keeps the last one that did. Worked in photo
+ * pixels (`aspect` = w / h). */
 export function moveLCorner(origPoints, index, x, y, aspect) {
   const pix = ([px, py]) => [px * aspect, py];
   const P = origPoints.map(pix);

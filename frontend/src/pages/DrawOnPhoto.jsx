@@ -14,6 +14,7 @@ import {
   cornerDots,
   flipShape,
   flipShapeVertical,
+  isTwoPart,
   moveCorner,
   moveLCorner,
   moveShape,
@@ -224,8 +225,8 @@ export default function DrawOnPhoto() {
     const at = toPhoto(e.clientX, e.clientY);
     if (d.role === "corner") {
       const shape = shapesRef.current.find((s) => keyOf(s) === d.key);
-      if (shape?.kind === "L") {
-        // the L moves as one piece: its inner corners follow the outer dot
+      if (shape && isTwoPart(shape)) {
+        // an L or corner sofa moves as one piece: its inner corners follow the outer dot
         const points = moveLCorner(d.orig, d.index, at[0], at[1], aspect);
         if (points) setShapePoints(d.key, points);
       } else {
@@ -534,7 +535,7 @@ export default function DrawOnPhoto() {
                     Flip left ↔ right
                   </button>
                 ) : null}
-                {selectedShape.kind === "L" ? (
+                {isTwoPart(selectedShape) ? (
                   <button type="button" className="btn btn-ghost btn-small" onClick={() => changeShape(selected, flipShapeVertical)}>
                     Flip up ↕ down
                   </button>

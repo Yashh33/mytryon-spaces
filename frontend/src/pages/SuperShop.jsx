@@ -10,6 +10,19 @@ export default function SuperShop() {
   const [shop, setShop] = useState(null);
   const [error, setError] = useState(null);
   const [showEdit, setShowEdit] = useState(false);
+  const [savingFeature, setSavingFeature] = useState(false);
+
+  async function setFeature(name, on) {
+    setSavingFeature(true);
+    try {
+      const data = await api.patch(`/api/super/shops/${id}`, { json: { features: { [name]: on } } });
+      setShop(data.shop);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingFeature(false);
+    }
+  }
 
   async function load() {
     setError(null);
@@ -43,11 +56,32 @@ export default function SuperShop() {
         Edit allowance / adjust credits
       </button>
 
+      <div className="section-label" style={{ marginTop: 22 }}>Features</div>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, minHeight: 44 }}>
+        <input
+          type="checkbox"
+          checked={Boolean(shop.features?.fix_this)}
+          disabled={savingFeature}
+          onChange={(e) => setFeature("fix_this", e.target.checked)}
+          style={{ width: 20, height: 20 }}
+        />
+        Fix this — small edits of a finished picture
+      </label>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 4 }}>
+        Off: the Fix this button is hidden for this shop&apos;s salesmen.
+      </div>
+
       <div className="section-label" style={{ marginTop: 22 }}>Manage</div>
       <div className="row-list">
         <Link to={`/admin?shop_id=${id}`} className="row-item">
           <div className="info">
             <div className="name">Salesmen</div>
+          </div>
+          <div className="chevron">&#8250;</div>
+        </Link>
+        <Link to={`/admin/activity?shop_id=${id}`} className="row-item">
+          <div className="info">
+            <div className="name">Live activity</div>
           </div>
           <div className="chevron">&#8250;</div>
         </Link>

@@ -432,6 +432,21 @@ h2 { font-size: 19px; }
 .result-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
 .result-actions .row2 { display: flex; gap: 10px; }
 .result-actions .row2 .btn { flex: 1; }
+/* Live activity */
+.activity-list { border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.activity-row { display: flex; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--line); align-items: flex-start; }
+.activity-row:first-child { border-top: 0; }
+.activity-main { flex: 1; min-width: 0; }
+.activity-what { font-weight: 700; font-size: 13.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.activity-link { font-weight: 600; font-size: 12.5px; color: var(--orange-d); }
+.activity-who { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.activity-reason { font-size: 12.5px; color: #B42318; margin-top: 3px; }
+.activity-status { font-size: 12px; font-weight: 700; text-align: right; display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
+.activity-status span { font-weight: 500; color: var(--muted); font-family: var(--mono); }
+.activity-status.s-running { color: var(--orange-d); }
+.activity-status.s-done { color: #15803D; }
+.activity-status.s-error, .activity-status.s-interrupted { color: #B42318; }
+.activity-empty { font-size: 13px; padding: 4px 0 2px; }
 /* Fix this */
 .fix-hint { font-size: 12.5px; color: var(--orange-d); background: #FFF4E8; border-radius: 8px; padding: 8px 10px; }
 .fix-sheet { max-height: 72vh; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }

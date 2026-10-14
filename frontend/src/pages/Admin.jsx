@@ -70,6 +70,9 @@ export default function Admin() {
         crumbs={[{ label: "Admin" }]}
         right={
           <div style={{ display: "flex", gap: 14 }}>
+            <Link to={withShop("/admin/activity")} className="link-btn">
+              Live activity &#8250;
+            </Link>
             <Link to={withShop("/admin/usage")} className="link-btn">
               Usage &#8250;
             </Link>

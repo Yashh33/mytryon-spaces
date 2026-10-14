@@ -19,6 +19,7 @@ import Adjust from "./pages/Adjust.jsx";
 import Admin from "./pages/Admin.jsx";
 import AdminUser from "./pages/AdminUser.jsx";
 import AdminPrompt from "./pages/AdminPrompt.jsx";
+import AdminActivity from "./pages/AdminActivity.jsx";
 import DebugGeneration from "./pages/DebugGeneration.jsx";
 import AdminUsage from "./pages/AdminUsage.jsx";
 import Account from "./pages/Account.jsx";
@@ -190,6 +191,16 @@ export default function App() {
               <RequireAuth roles={OWNER_ROLES}>
                 <AuthedLayout>
                   <DebugGeneration />
+                </AuthedLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/activity"
+            element={
+              <RequireAuth roles={OWNER_ROLES}>
+                <AuthedLayout>
+                  <AdminActivity />
                 </AuthedLayout>
               </RequireAuth>
             }

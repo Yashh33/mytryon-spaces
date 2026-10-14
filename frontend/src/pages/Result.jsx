@@ -20,12 +20,14 @@ export default function Result() {
   const [shownId, setShownId] = useState(null); // which of the attempt's pictures is on screen; null = the latest
   const [showFix, setShowFix] = useState(false);
   const [fixing, setFixing] = useState(false);
+  const [fixThis, setFixThis] = useState(false); // the shop's "fix_this" switch
 
   async function load() {
     setError(null);
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
+      setFixThis(Boolean(data.features?.fix_this));
       setShowingAfter(true);
       setShownId(null);
       const roomData = await api.get(`/api/rooms/${data.attempt.room.id}`);
@@ -55,7 +57,9 @@ export default function Result() {
     setFixing(true);
     try {
       const data = await api.post(`/api/renders/${render.id}/fix`, { json: choices });
-      navigate(`/attempt/${id}/generating`, { state: { jobId: data.job_id, startedAt: Date.now(), fix: true } });
+      navigate(`/attempt/${id}/generating`, {
+        state: { jobId: data.job_id, startedAt: Date.now(), fix: { renderId: render.id, choices } },
+      });
     } catch (err) {
       toast(err.message);
       setFixing(false);
@@ -223,14 +227,16 @@ export default function Result() {
           Save to phone
         </button>
         <div className="row2">
-          <button type="button" className="btn btn-ghost" disabled={!renderUrl} onClick={() => setShowFix(true)}>
-            Fix this
-          </button>
+          {fixThis ? (
+            <button type="button" className="btn btn-ghost" disabled={!renderUrl} onClick={() => setShowFix(true)}>
+              Fix this
+            </button>
+          ) : null}
           <button type="button" className="btn btn-ghost" onClick={() => navigate(`/attempt/${id}/adjust`)}>
             Adjust &amp; try again
           </button>
         </div>
-        {deepFix ? <div className="fix-hint">For bigger changes, use Adjust &amp; try again.</div> : null}
+        {fixThis && deepFix ? <div className="fix-hint">For bigger changes, use Adjust &amp; try again.</div> : null}
         <button
           type="button"
           className="btn btn-ghost btn-star"

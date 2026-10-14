@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import bcrypt
@@ -522,6 +522,9 @@ class Shop(Base):
     monthly_credits = Column(Integer, nullable=False, default=15000, server_default="15000")
     cycle_start_day = Column(Integer, nullable=False, default=1, server_default="1")
     active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    # per-shop feature switches set by the superadmin, e.g. {"fix_this": true};
+    # a missing key means the feature's default (see SHOP_FEATURE_DEFAULTS)
+    features = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -668,6 +671,30 @@ class CreditLedger(Base):
     usd_cost = Column(Float, nullable=True)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class Job(Base):
+    """One generation, "Fix this" or studio job, from the credit hold to the
+    end, so its state outlives the process running it (see begin_job). No
+    foreign keys: a job row must never block deleting what it points at."""
+
+    __tablename__ = "jobs"
+    id = Column(String, primary_key=True)  # the job id the client polls
+    kind = Column(String, nullable=False)  # 'generation' | 'fix' | 'studio'
+    status = Column(String, nullable=False)  # 'running' | 'done' | 'error' | 'interrupted'
+    shop_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=True)
+    attempt_id = Column(Integer, nullable=True)
+    source_render_id = Column(Integer, nullable=True)  # a fix: the render it edits
+    render_id = Column(Integer, nullable=True)  # the render it made
+    studio_image_id = Column(Integer, nullable=True)
+    credits = Column(Integer, nullable=False, default=0)  # held at the start; refunded once if it fails
+    message = Column(Text, nullable=True)  # what the salesman is shown when it fails
+    reason = Column(Text, nullable=True)  # why it failed, for the admin's Live activity page
+    instance_id = Column(String, nullable=True)  # the process running it
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class StudioImage(Base):
@@ -840,53 +867,93 @@ def migrate_item_shapes(db: Session) -> None:
         logger.info("re-derived shape for %d items", migrated)
 
 
+def column_info(conn, table: str, column: str):
+    return conn.execute(
+        text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :t AND column_name = :c"
+        ),
+        {"t": table, "c": column},
+    ).first()
+
+
+def add_column(conn, table: str, column: str, definition: str) -> None:
+    """ALTER TABLE … ADD COLUMN, only when the column is missing (see lifespan)."""
+    if column_info(conn, table, column) is None:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"))
+        logger.info("startup migration: added %s.%s", table, column)
+
+
+def drop_column(conn, table: str, column: str) -> None:
+    if column_info(conn, table, column) is not None:
+        conn.execute(text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}"))
+        logger.info("startup migration: dropped %s.%s", table, column)
+
+
+def column_nullable(conn, table: str, column: str) -> bool:
+    info = column_info(conn, table, column)
+    return info is not None and info[0] == "YES"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
+        # Each change below runs only when it is still needed (the checks read
+        # the catalogue and take no table lock). An ALTER TABLE, even an
+        # "IF NOT EXISTS" one that ends up doing nothing, waits for every open
+        # transaction on that table — on Render the new instance starts while
+        # the old one is still serving and running jobs — and while it waits,
+        # every other query on the table queues behind it, stalling the live
+        # app. A change that is really needed gives up after lock_timeout
+        # rather than stall: the startup then fails and the deploy can be
+        # retried at a quieter moment.
+        conn.execute(text("SET LOCAL lock_timeout = '15s'"))
         # migrate DBs created before free-hand placement drawing existed.
-        conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_x"))
-        conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS pin_y"))
+        drop_column(conn, "items", "pin_x")
+        drop_column(conn, "items", "pin_y")
         # migrate DBs created before vision-generated layouts and structured
         # furniture blocks existed: drop the old free-hand strokes column
         # (existing items lose their strokes — attempts keep their renders),
         # add shape (backfilled from category/type, same rule as
         # derive_item_shape) and placement.
-        conn.execute(text("ALTER TABLE items DROP COLUMN IF EXISTS strokes"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS shape TEXT"))
+        drop_column(conn, "items", "strokes")
+        add_column(conn, "items", "shape", "TEXT")
         conn.execute(
             text(
                 "UPDATE items SET shape = CASE WHEN type = 'L-shape' THEN 'L' WHEN type = 'Curved' THEN 'curved' WHEN type = 'Corner' THEN 'corner' ELSE 'rect' END "
                 "WHERE shape IS NULL"
             )
         )
-        conn.execute(text("ALTER TABLE items ALTER COLUMN shape SET NOT NULL"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS placement JSONB"))
+        if column_nullable(conn, "items", "shape"):
+            conn.execute(text("ALTER TABLE items ALTER COLUMN shape SET NOT NULL"))
+        add_column(conn, "items", "placement", "JSONB")
         # rooms get a vision-generated layout, pending until the background
         # job (or a manual edit) fills it in.
-        conn.execute(text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS layout_json JSONB"))
-        conn.execute(text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS layout_status TEXT NOT NULL DEFAULT 'pending'"))
+        add_column(conn, "rooms", "layout_json", "JSONB")
+        add_column(conn, "rooms", "layout_status", "TEXT NOT NULL DEFAULT 'pending'")
         # placement writer: the plan image + cached result per attempt, and
         # what it did for each render.
-        conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS plan_path TEXT"))
-        conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS placement_writer JSONB"))
-        conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS placement_writer JSON"))
-        conn.execute(text("ALTER TABLE renders ADD COLUMN IF NOT EXISTS parent_render_id INTEGER"))
-        conn.execute(text("ALTER TABLE generation_debug ADD COLUMN IF NOT EXISTS fix JSON"))
+        add_column(conn, "attempts", "plan_path", "TEXT")
+        add_column(conn, "attempts", "placement_writer", "JSONB")
+        add_column(conn, "generation_debug", "placement_writer", "JSON")
+        add_column(conn, "renders", "parent_render_id", "INTEGER")
+        add_column(conn, "generation_debug", "fix", "JSON")
         # Finishing step: per-piece colour/material/fabric and a free-text note.
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS colour_name TEXT"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS colour_hex TEXT"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS material TEXT"))
-        conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS fabric_path TEXT"))
-        conn.execute(text("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS note TEXT"))
+        add_column(conn, "items", "colour_name", "TEXT")
+        add_column(conn, "items", "colour_hex", "TEXT")
+        add_column(conn, "items", "material", "TEXT")
+        add_column(conn, "items", "fabric_path", "TEXT")
+        add_column(conn, "attempts", "note", "TEXT")
         # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
-        conn.execute(text("ALTER TABLE studio_images ADD COLUMN IF NOT EXISTS look TEXT"))
+        add_column(conn, "studio_images", "look", "TEXT")
         # product-photo studio: which camera view (front/angled) each image used.
-        conn.execute(text("ALTER TABLE studio_images ADD COLUMN IF NOT EXISTS view TEXT"))
+        add_column(conn, "studio_images", "view", "TEXT")
         # migrate DBs created before multi-tenant shops existed: add the
         # column additively (users predates shops; create_all only creates
         # brand-new tables, it won't alter this existing one).
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS shop_id INTEGER"))
+        add_column(conn, "users", "shop_id", "INTEGER")
+        add_column(conn, "shops", "features", "JSONB NOT NULL DEFAULT '{}'::jsonb")
         conn.execute(
             text(
                 """
@@ -902,7 +969,8 @@ async def lifespan(app: FastAPI):
         # the superadmin has no mobile number (no identifier — /super/login
         # takes a password only); mobile predates this, so relax it and
         # backfill in one guarded, idempotent block.
-        conn.execute(text("ALTER TABLE users ALTER COLUMN mobile DROP NOT NULL"))
+        if not column_nullable(conn, "users", "mobile"):
+            conn.execute(text("ALTER TABLE users ALTER COLUMN mobile DROP NOT NULL"))
         conn.execute(
             text(
                 """
@@ -1049,12 +1117,23 @@ async def lifespan(app: FastAPI):
         )
 
         db.commit()
+
+        # jobs a previous process left running (it was stopped or crashed):
+        # failed and refunded once — unless still running elsewhere
+        interrupted = recover_interrupted_jobs(db)
+        legacy = recover_legacy_studio_images(db)
+        if interrupted or legacy:
+            logger.info("startup: %d interrupted job(s) and %d stuck studio image(s) refunded", interrupted, legacy)
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+    heartbeat = asyncio.create_task(job_heartbeat_loop())
     yield
+    # SIGTERM (a deploy or restart): let running jobs finish before exiting
+    await wait_for_running_jobs()
+    heartbeat.cancel()
 
 
 class PrivateAwareStaticFiles(StaticFiles):
@@ -3115,10 +3194,241 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
 
 JOBS: dict[str, dict] = {}
 
+# ---------------------------------------------------------------------------
+# Job tracking, so a restart is safe for live use. Every generation, fix and
+# studio job has a row in `jobs`, written with its credit hold. The process
+# running it stamps heartbeat_at every JOB_HEARTBEAT_SECONDS; any process
+# (this one or the next one after a deploy) marks a running job whose
+# heartbeat has gone stale as interrupted and refunds its credits. A fresh
+# heartbeat means another instance is still finishing it — Render starts the
+# new instance before it stops the old one — so it is left alone. On SIGTERM
+# the lifespan stops new jobs and waits up to SHUTDOWN_WAIT_SECONDS for
+# running ones (Render's shutdown delay must allow that).
+# ---------------------------------------------------------------------------
 
-def refund_generation_credits(db: Session, shop_id: int, user_id: int, attempt_id: int | None) -> None:
-    db.add(CreditLedger(shop_id=shop_id, user_id=user_id, attempt_id=attempt_id, delta=CREDITS_PER_GENERATION, reason="refund"))
+INSTANCE_ID = uuid.uuid4().hex[:12]  # this process
+JOB_HEARTBEAT_SECONDS = 20
+JOB_STALE_SECONDS = 120  # no heartbeat for this long: the process running it is gone
+SHUTDOWN_WAIT_SECONDS = 240
+LEGACY_STUDIO_STALE_MINUTES = 15  # studio images left pending by code that had no jobs table
+INTERRUPTED_REASON = "interrupted by an update"
+INTERRUPTED_MESSAGE = "The app was just updated — please tap Try again."
+RESTARTING_MESSAGE = "The app is restarting for an update — please try again in a minute."
+SHUTTING_DOWN = False  # set once SIGTERM has arrived: no new jobs are started
+JOB_TASKS: set[asyncio.Task] = set()
+
+
+def begin_job(
+    db: Session,
+    kind: str,
+    shop_id: int,
+    user_id: int | None,
+    attempt_id: int | None = None,
+    source_render_id: int | None = None,
+    studio_image_id: int | None = None,
+    note: str | None = None,
+) -> str:
+    """Holds the credits and records the job, in one commit. Returns the job
+    id the client polls."""
+    job_id = uuid.uuid4().hex
+    db.add(
+        CreditLedger(
+            shop_id=shop_id, user_id=user_id, attempt_id=attempt_id, delta=-CREDITS_PER_GENERATION, reason="generation", note=note
+        )
+    )
+    now = datetime.now(timezone.utc)
+    db.add(
+        Job(
+            id=job_id,
+            kind=kind,
+            status="running",
+            shop_id=shop_id,
+            user_id=user_id,
+            attempt_id=attempt_id,
+            source_render_id=source_render_id,
+            studio_image_id=studio_image_id,
+            credits=CREDITS_PER_GENERATION,
+            instance_id=INSTANCE_ID,
+            started_at=now,
+            heartbeat_at=now,
+        )
+    )
     db.commit()
+    JOBS[job_id] = {"status": "processing", "stage": "generating"} if kind != "studio" else {
+        "status": "processing", "image_id": studio_image_id, "message": None
+    }
+    return job_id
+
+
+def run_job_task(coro) -> None:
+    """Starts a job in the background and keeps hold of it, so a shutdown can
+    wait for it to finish."""
+    task = asyncio.create_task(coro)
+    JOB_TASKS.add(task)
+    task.add_done_callback(JOB_TASKS.discard)
+
+
+def fail_job(
+    db: Session, job_id: str, message: str, reason: str | None = None, status: str = "error", refund: bool = True
+) -> bool:
+    """Marks a running job failed and refunds its credits (one ledger row),
+    unless something else already finished or failed it. Returns whether it
+    did. A studio job's image row is marked failed with it."""
+    job = db.query(Job).filter(Job.id == job_id, Job.status == "running").with_for_update().first()
+    if job is None:
+        db.commit()
+        return False
+    job.status = status
+    job.message = message
+    job.reason = reason or message
+    job.finished_at = datetime.now(timezone.utc)
+    if refund and job.credits:
+        db.add(
+            CreditLedger(
+                shop_id=job.shop_id, user_id=job.user_id, attempt_id=job.attempt_id, delta=job.credits, reason="refund",
+                note=f"{job.kind} job {job.id[:8]}: {job.reason}"[:300],
+            )
+        )
+    if job.studio_image_id:
+        row = db.query(StudioImage).filter(StudioImage.id == job.studio_image_id).first()
+        if row is not None and row.status == "pending":
+            row.status = "error"
+            row.error = message
+    db.commit()
+    if job.kind == "studio":
+        JOBS[job_id] = {"status": "error", "image_id": job.studio_image_id, "message": message}
+    else:
+        JOBS[job_id] = {"status": "error", "message": message}
+    return True
+
+
+def finish_job(db: Session, job_id: str, render_id: int | None = None) -> None:
+    """Marks a job done. If it had been marked interrupted (and refunded)
+    while it was in fact still running, it is charged again, so the books
+    match the picture that was made."""
+    job = db.query(Job).filter(Job.id == job_id).with_for_update().first()
+    if job is None:
+        db.commit()
+        return
+    if job.status in ("interrupted", "error") and job.credits:
+        db.add(
+            CreditLedger(
+                shop_id=job.shop_id, user_id=job.user_id, attempt_id=job.attempt_id, delta=-job.credits, reason="generation",
+                note=f"{job.kind} job {job.id[:8]} finished after it was marked {job.status}: charged again",
+            )
+        )
+    job.status = "done"
+    job.render_id = render_id
+    job.message = None
+    job.finished_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+def recover_interrupted_jobs(db: Session, stale_seconds: int = JOB_STALE_SECONDS) -> int:
+    """Marks every running job whose process has stopped updating it as
+    interrupted, refunding its credits. Safe to run on every instance at any
+    time: a job another live instance is still running keeps a fresh
+    heartbeat and is left alone."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
+    stale = [
+        row.id
+        for row in db.query(Job.id).filter(Job.status == "running", Job.heartbeat_at < cutoff).all()
+    ]
+    count = 0
+    for job_id in stale:
+        if fail_job(db, job_id, INTERRUPTED_MESSAGE, INTERRUPTED_REASON, status="interrupted"):
+            count += 1
+            logger.info("job %s marked interrupted (no heartbeat for %ss)", job_id, stale_seconds)
+    return count
+
+
+def recover_legacy_studio_images(db: Session) -> int:
+    """Studio images left pending by a process from before the jobs table
+    existed: they were never refunded. Each is marked failed and refunded once
+    (one ledger row each)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LEGACY_STUDIO_STALE_MINUTES)
+    tracked = {row.studio_image_id for row in db.query(Job.studio_image_id).filter(Job.studio_image_id.isnot(None)).all()}
+    count = 0
+    for row in db.query(StudioImage).filter(StudioImage.status == "pending", StudioImage.created_at < cutoff).all():
+        if row.id in tracked:
+            continue
+        row.status = "error"
+        row.error = INTERRUPTED_MESSAGE
+        db.add(
+            CreditLedger(
+                shop_id=row.shop_id, user_id=row.user_id, attempt_id=None, delta=CREDITS_PER_GENERATION, reason="refund",
+                note=f"studio image {row.id}: {INTERRUPTED_REASON}",
+            )
+        )
+        count += 1
+    db.commit()
+    return count
+
+
+def _job_heartbeat_once() -> None:
+    db = SessionLocal()
+    try:
+        db.query(Job).filter(Job.instance_id == INSTANCE_ID, Job.status == "running").update(
+            {Job.heartbeat_at: datetime.now(timezone.utc)}, synchronize_session=False
+        )
+        db.commit()
+        recover_interrupted_jobs(db)
+    except Exception:
+        logger.exception("job heartbeat failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+async def job_heartbeat_loop() -> None:
+    while True:
+        await asyncio.to_thread(_job_heartbeat_once)
+        await asyncio.sleep(JOB_HEARTBEAT_SECONDS)
+
+
+async def wait_for_running_jobs() -> None:
+    """On shutdown: no new jobs, then up to SHUTDOWN_WAIT_SECONDS for the
+    running ones (and any placement writer still writing) to finish. Jobs
+    still running after that are failed and refunded before the process
+    exits, so nobody is left waiting on them."""
+    global SHUTTING_DOWN
+    SHUTTING_DOWN = True
+    running = [task for task in (*JOB_TASKS, *WRITER_TASKS.values()) if not task.done()]
+    if running:
+        logger.info("shutdown: waiting up to %ss for %d running job(s)", SHUTDOWN_WAIT_SECONDS, len(running))
+        _done, pending = await asyncio.wait(running, timeout=SHUTDOWN_WAIT_SECONDS)
+        logger.info("shutdown: %d job(s) finished, %d still running", len(running) - len(pending), len(pending))
+    db = SessionLocal()
+    try:
+        for row in db.query(Job.id).filter(Job.instance_id == INSTANCE_ID, Job.status == "running").all():
+            fail_job(db, row.id, INTERRUPTED_MESSAGE, INTERRUPTED_REASON, status="interrupted")
+    except Exception:
+        logger.exception("shutdown: could not mark unfinished jobs")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def job_status_response(db: Session, job_id: str) -> dict | None:
+    """What /api/jobs/{job_id} returns: this process's live state, or — for a
+    job started or finished by another process (before a restart) — its row."""
+    if job_id in JOBS:
+        return JOBS[job_id]
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        return None
+    if job.status == "running":
+        return {"status": "processing", "stage": "generating"}
+    if job.status == "done":
+        render = db.query(Render).filter(Render.id == job.render_id).first() if job.render_id else None
+        return {
+            "status": "done",
+            "render_id": job.render_id,
+            "attempt_id": job.attempt_id,
+            "image_url": f"/media/{render.image_path}" if render else None,
+            "image_id": job.studio_image_id,
+        }
+    return {"status": "error", "message": job.message or "That didn't work. Your credits were returned.", "image_id": job.studio_image_id}
 
 
 async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id: int) -> None:
@@ -3132,12 +3442,10 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             .first()
         )
         if attempt is None:
-            JOBS[job_id] = {"status": "error", "message": "That attempt could not be found."}
-            refund_generation_credits(db, shop_id, user_id, None)
+            fail_job(db, job_id, "That attempt could not be found.")
             return
         if not attempt.items:
-            JOBS[job_id] = {"status": "error", "message": "Add at least one piece of furniture first."}
-            refund_generation_credits(db, shop_id, user_id, attempt.id)
+            fail_job(db, job_id, "Add at least one piece of furniture first.")
             return
 
         room = attempt.room
@@ -3209,8 +3517,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 call_image_api, prompt, image_files, size, IMAGE_QUALITY, f"attempt:{attempt_id}"
             )
         except GenerationError as exc:
-            JOBS[job_id] = {"status": "error", "message": exc.message}
-            refund_generation_credits(db, shop_id, user_id, attempt.id)
+            fail_job(db, job_id, exc.message)
             return
 
         filename = f"{uuid.uuid4().hex}.jpg"
@@ -3272,6 +3579,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             )
         )
         db.commit()
+        finish_job(db, job_id, render.id)
 
         JOBS[job_id] = {
             "status": "done",
@@ -3279,11 +3587,10 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             "attempt_id": attempt.id,
             "image_url": f"/media/{relative_path}",
         }
-    except Exception:
+    except Exception as exc:
         logger.exception("generation job failed job_id=%s attempt_id=%s", job_id, attempt_id)
-        JOBS[job_id] = {"status": "error", "message": "Something went wrong generating your image. Please try again."}
         db.rollback()
-        refund_generation_credits(db, shop_id, user_id, attempt_id)
+        fail_job(db, job_id, "Something went wrong generating your image. Please try again.", f"crashed: {exc.__class__.__name__}")
     finally:
         db.close()
 
@@ -3694,13 +4001,12 @@ def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: 
             "insufficient_credits",
             "This month's credit pool is finished. Please contact the showroom owner to top up.",
         )
+    if SHUTTING_DOWN:
+        return error_response(503, "restarting", RESTARTING_MESSAGE)
     attempt.ignore_placement = ignore_placement
     db.commit()
-    db.add(CreditLedger(shop_id=shop.id, user_id=user.id, attempt_id=attempt.id, delta=-CREDITS_PER_GENERATION, reason="generation"))
-    db.commit()
-    job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "processing"}
-    asyncio.create_task(run_generation_job(job_id, attempt.id, user.id, shop.id))
+    job_id = begin_job(db, "generation", shop.id, user.id, attempt_id=attempt.id)
+    run_job_task(run_generation_job(job_id, attempt.id, user.id, shop.id))
     return JSONResponse(content={"job_id": job_id})
 
 
@@ -3711,8 +4017,8 @@ class FinishBody(BaseModel):
 
 
 @app.get("/api/jobs/{job_id}")
-def api_job_status(job_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
-    job = JOBS.get(job_id)
+def api_job_status(job_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    job = job_status_response(db, job_id)
     if job is None:
         return error_response(404, "job_not_found", "That job could not be found.")
     return JSONResponse(content=job)
@@ -4062,7 +4368,8 @@ def api_get_attempt(
     attempt_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
-    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+    shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
+    return JSONResponse(content={"attempt": attempt_detail(attempt), "features": shop_features(shop)})
 
 
 @app.post("/api/attempts/{attempt_id}/items")
@@ -4443,8 +4750,7 @@ async def run_fix_job(job_id: str, render_id: int, user_id: int, shop_id: int, c
         attempt = parent.attempt if parent is not None else None
         parent_path = DATA_ROOT / parent.image_path if parent is not None else None
         if attempt is None or parent_path is None or not parent_path.is_file():
-            JOBS[job_id] = {"status": "error", "message": "That picture could not be found."}
-            refund_generation_credits(db, shop_id, user_id, attempt.id if attempt else None)
+            fail_job(db, job_id, "That picture could not be found.")
             return
         attempt_id = attempt.id
         product_paths, pieces = fix_pieces(attempt)
@@ -4500,8 +4806,7 @@ async def run_fix_job(job_id: str, render_id: int, user_id: int, shop_id: int, c
         try:
             result = await asyncio.to_thread(call_image_api, prompt, image_files, size, IMAGE_QUALITY, f"fix:{render_id}")
         except GenerationError as exc:
-            JOBS[job_id] = {"status": "error", "message": exc.message}
-            refund_generation_credits(db, shop_id, user_id, attempt.id)
+            fail_job(db, job_id, exc.message)
             return
 
         filename = f"{uuid.uuid4().hex}.jpg"
@@ -4567,12 +4872,15 @@ async def run_fix_job(job_id: str, render_id: int, user_id: int, shop_id: int, c
             )
         )
         db.commit()
+        finish_job(db, job_id, render.id)
         JOBS[job_id] = {"status": "done", "render_id": render.id, "attempt_id": attempt.id, "image_url": f"/media/{relative_path}"}
-    except Exception:
+    except Exception as exc:
         logger.exception("fix job failed job_id=%s render_id=%s", job_id, render_id)
         db.rollback()
-        JOBS[job_id] = {"status": "error", "message": "Something went wrong fixing the picture. Your credits were returned – please try again."}
-        refund_generation_credits(db, shop_id, user_id, attempt_id)
+        fail_job(
+            db, job_id, "Something went wrong fixing the picture. Your credits were returned – please try again.",
+            f"crashed: {exc.__class__.__name__}",
+        )
     finally:
         db.close()
 
@@ -4593,6 +4901,9 @@ async def api_fix_render(
     )
     if render is None or not (DATA_ROOT / render.image_path).is_file():
         return error_response(404, "render_not_found", "That picture could not be found.")
+    shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
+    if shop is None or not shop_feature(shop, "fix_this"):
+        return error_response(403, "feature_off", "Fix this isn't switched on for this showroom.")
     attempt = render.attempt
     _paths, pieces = fix_pieces(attempt)
     known = {(piece["item_id"], piece["sub_index"]) for piece in pieces}
@@ -4618,26 +4929,17 @@ async def api_fix_render(
     if not piece_choices and not room_choices and not text_request:
         return error_response(400, "nothing_to_fix", "Pick at least one thing to fix, or type what to change.")
 
-    shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
-    if shop is None:
-        return error_response(400, "no_shop", "Your account isn't assigned to a shop.")
     if shop_balance(db, shop) < CREDITS_PER_GENERATION:
         return error_response(
             402,
             "insufficient_credits",
             "This month's credit pool is finished. Please contact the showroom owner to top up.",
         )
-    db.add(
-        CreditLedger(
-            shop_id=shop.id, user_id=user.id, attempt_id=attempt.id, delta=-CREDITS_PER_GENERATION, reason="generation",
-            note=f"fix of render {render.id}",
-        )
-    )
-    db.commit()
-    job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "processing", "stage": "generating"}
+    if SHUTTING_DOWN:
+        return error_response(503, "restarting", RESTARTING_MESSAGE)
+    job_id = begin_job(db, "fix", shop.id, user.id, attempt_id=attempt.id, source_render_id=render.id, note=f"fix of render {render.id}")
     choices = {"pieces": piece_choices, "room": room_choices, "text": text_request or None}
-    asyncio.create_task(run_fix_job(job_id, render.id, user.id, shop.id, choices))
+    run_job_task(run_fix_job(job_id, render.id, user.id, shop.id, choices))
     return JSONResponse(content={"job_id": job_id, "attempt_id": attempt.id})
 
 
@@ -4757,10 +5059,26 @@ def api_admin_shop_usage(
 # ---------------------------------------------------------------------------
 
 
+# Per-shop feature switches (shops.features), set by the superadmin on the
+# shop's page. A shop without a key gets the default here.
+SHOP_FEATURE_DEFAULTS = {"fix_this": False}
+
+
+def shop_feature(shop: Shop | None, name: str) -> bool:
+    if shop is None:
+        return False
+    return bool((shop.features or {}).get(name, SHOP_FEATURE_DEFAULTS[name]))
+
+
+def shop_features(shop: Shop | None) -> dict:
+    return {name: shop_feature(shop, name) for name in SHOP_FEATURE_DEFAULTS}
+
+
 def shop_public(db: Session, shop: Shop) -> dict:
     return {
         "id": shop.id,
         "name": shop.name,
+        "features": shop_features(shop),
         "monthly_credits": shop.monthly_credits,
         "cycle_start_day": shop.cycle_start_day,
         "active": shop.active,
@@ -4817,6 +5135,7 @@ class UpdateShopBody(BaseModel):
     name: str | None = None
     monthly_credits: int | None = None
     active: bool | None = None
+    features: dict[str, bool] | None = None  # only keys in SHOP_FEATURE_DEFAULTS
 
 
 @app.patch("/api/super/shops/{shop_id}")
@@ -4836,6 +5155,11 @@ def api_super_update_shop(
         shop.monthly_credits = body.monthly_credits
     if body.active is not None:
         shop.active = body.active
+    if body.features is not None:
+        unknown = set(body.features) - set(SHOP_FEATURE_DEFAULTS)
+        if unknown:
+            return error_response(400, "unknown_feature", f"Unknown feature: {', '.join(sorted(unknown))}.")
+        shop.features = {**(shop.features or {}), **{k: bool(v) for k, v in body.features.items()}}
     db.commit()
     db.refresh(shop)
     return JSONResponse(content={"shop": shop_public(db, shop)})
@@ -5320,11 +5644,8 @@ def _start_studio_job(
     event loop, which a plain `def` route (run in a worker thread) doesn't
     have. `started` gets the new row's id once the credit hold is committed,
     so studio_start_failed knows to refund it."""
-    db.add(
-        CreditLedger(
-            shop_id=shop.id, user_id=user.id, attempt_id=None, delta=-CREDITS_PER_GENERATION, reason="generation", note=note
-        )
-    )
+    if SHUTTING_DOWN:
+        return error_response(503, "restarting", RESTARTING_MESSAGE)
     row = StudioImage(
         shop_id=shop.id,
         user_id=user.id,
@@ -5336,29 +5657,21 @@ def _start_studio_job(
         status="pending",
     )
     db.add(row)
-    db.commit()
+    db.flush()
+    job_id = begin_job(db, "studio", shop.id, user.id, studio_image_id=row.id, note=note)  # commits the row with the hold
     if started is not None:
         started["image_id"] = row.id
+        started["job_id"] = job_id
     db.refresh(row)
-    job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "processing", "image_id": row.id, "message": None}
-    asyncio.create_task(run_studio_job(job_id, row.id, prompt, user.id, shop.id, note))
+    run_job_task(run_studio_job(job_id, row.id, prompt, user.id, shop.id, note))
     return JSONResponse(content={"id": row.id, "job_id": job_id})
 
 
 async def run_studio_job(job_id: str, image_id: int, prompt: str, user_id: int, shop_id: int, note: str) -> None:
     db = SessionLocal()
 
-    def fail(message: str) -> None:
-        JOBS[job_id] = {"status": "error", "image_id": image_id, "message": message}
-        row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
-        if row is not None:
-            row.status = "error"
-            row.error = message
-        db.add(
-            CreditLedger(shop_id=shop_id, user_id=user_id, attempt_id=None, delta=CREDITS_PER_GENERATION, reason="refund", note="studio")
-        )
-        db.commit()
+    def fail(message: str, reason: str | None = None) -> None:
+        fail_job(db, job_id, message, reason)  # marks the image row failed and refunds once
 
     try:
         row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
@@ -5382,9 +5695,9 @@ async def run_studio_job(job_id: str, image_id: int, prompt: str, user_id: int, 
         image.save(dest_dir / filename, format="JPEG", quality=92)
 
         row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
-        if row is None:  # deleted while the job ran
+        if row is None:  # deleted while the job ran: the image was made, so no refund
             (dest_dir / filename).unlink(missing_ok=True)
-            JOBS[job_id] = {"status": "error", "image_id": image_id, "message": "That image was deleted."}
+            fail_job(db, job_id, "That image was deleted.", refund=False)
             return
         row.result_path = str((dest_dir / filename).relative_to(DATA_ROOT)).replace("\\", "/")
         row.status = "done"
@@ -5406,11 +5719,12 @@ async def run_studio_job(job_id: str, image_id: int, prompt: str, user_id: int, 
             )
         )
         db.commit()
+        finish_job(db, job_id)
         JOBS[job_id] = {"status": "done", "image_id": image_id, "message": None}
-    except Exception:
+    except Exception as exc:
         logger.exception("studio job failed job_id=%s image_id=%s", job_id, image_id)
         db.rollback()
-        fail("Something went wrong making the image. Your credits were returned – please try again.")
+        fail("Something went wrong making the image. Your credits were returned – please try again.", f"crashed: {exc.__class__.__name__}")
     finally:
         db.close()
 
@@ -5422,18 +5736,9 @@ def studio_start_failed(db: Session, shop: Shop | None, user: User, started: dic
     logger.exception("studio start failed user_id=%s started=%s", user.id, started)
     db.rollback()
     image_id = started.get("image_id")
-    if shop is not None and image_id is not None:
+    if shop is not None and started.get("job_id"):
         try:
-            row = db.query(StudioImage).filter(StudioImage.id == image_id).first()
-            if row is not None:
-                row.status = "error"
-                row.error = "Couldn't start that image."
-            db.add(
-                CreditLedger(
-                    shop_id=shop.id, user_id=user.id, attempt_id=None, delta=CREDITS_PER_GENERATION, reason="refund", note="studio"
-                )
-            )
-            db.commit()
+            fail_job(db, started["job_id"], "Couldn't start that image.")  # refunds the hold once
         except Exception:
             logger.exception("studio start refund failed image_id=%s", image_id)
             db.rollback()
@@ -5620,8 +5925,8 @@ def api_studio_job(
     user: User = Depends(require_owner_or_superadmin),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    job = JOBS.get(job_id)
-    if job is None or "image_id" not in job:
+    job = job_status_response(db, job_id)
+    if job is None or not job.get("image_id"):
         return error_response(404, "job_not_found", "That job could not be found.")
     shop = resolve_studio_shop(user, shop_id, db)
     if isinstance(shop, JSONResponse):
@@ -5759,6 +6064,65 @@ def prompt_setting_response(db: Session) -> dict:
         **{studio_view_key(view): value(studio_view_key(view), DEFAULT_STUDIO_VIEW_TEXTS[view]) for view in STUDIO_VIEWS},
         **{f"default_{studio_view_key(view)}": DEFAULT_STUDIO_VIEW_TEXTS[view] for view in STUDIO_VIEWS},
     }
+
+
+@app.get("/api/admin/activity")
+def api_admin_activity(
+    shop_id: int | None = None, viewer: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """Live activity: jobs running now, every job of the last 24 hours with
+    its status, and failures with reasons. An owner sees his own shop; the
+    superadmin sees one shop (shop_id) or all of them."""
+    scope = resolve_admin_shop_id(viewer, shop_id)
+    now = datetime.now(timezone.utc)
+    query = db.query(Job)
+    if scope is not None:
+        query = query.filter(Job.shop_id == scope)
+    running = query.filter(Job.status == "running").order_by(Job.started_at).all()
+    recent = query.filter(Job.started_at >= now - timedelta(hours=24)).order_by(Job.started_at.desc()).limit(300).all()
+    failures = (
+        query.filter(Job.status.in_(("error", "interrupted")), Job.started_at >= now - timedelta(days=7))
+        .order_by(Job.started_at.desc())
+        .limit(100)
+        .all()
+    )
+    shops = {s.id: s.name for s in db.query(Shop).all()}
+    user_ids = {j.user_id for j in (*running, *recent, *failures) if j.user_id}
+    users = {u.id: u.name for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+    render_ids = {j.render_id for j in recent if j.render_id}
+    render_urls = (
+        {r.id: f"/media/{r.image_path}" for r in db.query(Render).filter(Render.id.in_(render_ids)).all()} if render_ids else {}
+    )
+
+    def row(job: Job) -> dict:
+        end = job.finished_at or now
+        return {
+            "id": job.id,
+            "kind": job.kind,
+            "status": job.status,
+            "shop": shops.get(job.shop_id),
+            "user": users.get(job.user_id),
+            "attempt_id": job.attempt_id,
+            "render_id": job.render_id,
+            "render_url": render_urls.get(job.render_id),
+            "source_render_id": job.source_render_id,
+            "studio_image_id": job.studio_image_id,
+            "started_at": job.started_at.isoformat(),
+            "seconds": round((end - job.started_at).total_seconds()),
+            "reason": job.reason,
+            "instance": job.instance_id,
+        }
+
+    return JSONResponse(
+        content={
+            "shop": shops.get(scope) if scope is not None else None,
+            "now": now.isoformat(),
+            "this_instance": INSTANCE_ID,
+            "running": [row(j) for j in running],
+            "recent": [row(j) for j in recent],
+            "failures": [row(j) for j in failures],
+        }
+    )
 
 
 @app.get("/api/admin/prompt")

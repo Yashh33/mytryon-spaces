@@ -41,6 +41,10 @@ export function MenuDrawer({ open, onClose }) {
       : []),
     { key: "account", icon: "account", label: "Account & credits", to: "/account" },
     ...(isOwnerRole ? [{ key: "admin", icon: "admin", label: "Admin", to: "/admin" }] : []),
+    // an owner sees his own shop; the superadmin all shops (or the one he is viewing)
+    ...(isOwnerRole || isSuperadmin
+      ? [{ key: "activity", icon: "admin", label: "Live activity", to: withQuery("/admin/activity", { shop_id: shopId }) }]
+      : []),
     ...(isSuperadmin ? [{ key: "shops", icon: "shops", label: "Shops", to: "/super" }] : []),
   ];
 

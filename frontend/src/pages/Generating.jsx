@@ -81,6 +81,13 @@ export default function Generating() {
   async function handleRetry() {
     setRetrying(true);
     try {
+      if (isFix && location.state.fix.renderId) {
+        // the same fix again, on the same picture
+        const { renderId, choices } = location.state.fix;
+        const data = await api.post(`/api/renders/${renderId}/fix`, { json: choices });
+        navigate(`/attempt/${id}/generating`, { replace: true, state: { jobId: data.job_id, startedAt: Date.now(), fix: location.state.fix } });
+        return;
+      }
       const data = await api.post(`/api/attempts/${id}/generate`);
       navigate(`/attempt/${id}/generating`, { replace: true, state: { jobId: data.job_id, startedAt: Date.now() } });
     } catch (err) {
@@ -108,10 +115,22 @@ export default function Generating() {
         <div className="msg">{errorState}</div>
         <div style={{ width: "100%", maxWidth: 280, display: "flex", flexDirection: "column", gap: 10 }}>
           {isFix ? (
-            // the fix was not made and its credits were returned: back to the picture, where it can be asked again
-            <button type="button" className="btn btn-primary" onClick={() => navigate(`/attempt/${id}/result`, { replace: true })}>
-              Back to the picture
-            </button>
+            // the fix was not made and its credits were returned: ask for the same fix again, or go back to the picture
+            <>
+              {location.state.fix.renderId ? (
+                <button type="button" className="btn btn-primary" disabled={retrying} onClick={handleRetry}>
+                  {retrying ? "Starting…" : "Try again"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={location.state.fix.renderId ? "btn btn-ghost" : "btn btn-primary"}
+                style={location.state.fix.renderId ? { color: "#fff", borderColor: "rgba(255,255,255,0.3)" } : undefined}
+                onClick={() => navigate(`/attempt/${id}/result`, { replace: true })}
+              >
+                Back to the picture
+              </button>
+            </>
           ) : (
             <>
               <button type="button" className="btn btn-primary" disabled={retrying} onClick={handleRetry}>

@@ -70,6 +70,19 @@ export default function SuperShop() {
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 4 }}>
         Off: the Fix this button is hidden for this shop&apos;s salesmen.
       </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, minHeight: 44, marginTop: 8 }}>
+        <input
+          type="checkbox"
+          checked={Boolean(shop.features?.shape_placement)}
+          disabled={savingFeature}
+          onChange={(e) => setFeature("shape_placement", e.target.checked)}
+          style={{ width: 20, height: 20 }}
+        />
+        Draw on photo (Beta) — a second way to place furniture
+      </label>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 4 }}>
+        Off: salesmen go straight to the floor plan, without the choice.
+      </div>
 
       <div className="section-label" style={{ marginTop: 22 }}>Manage</div>
       <div className="row-list">

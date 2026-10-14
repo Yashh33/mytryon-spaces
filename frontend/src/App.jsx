@@ -20,6 +20,8 @@ import Admin from "./pages/Admin.jsx";
 import AdminUser from "./pages/AdminUser.jsx";
 import AdminPrompt from "./pages/AdminPrompt.jsx";
 import AdminActivity from "./pages/AdminActivity.jsx";
+import PlacementChoice from "./pages/PlacementChoice.jsx";
+import DrawOnPhoto from "./pages/DrawOnPhoto.jsx";
 import DebugGeneration from "./pages/DebugGeneration.jsx";
 import AdminUsage from "./pages/AdminUsage.jsx";
 import Account from "./pages/Account.jsx";
@@ -101,6 +103,26 @@ export default function App() {
               <RequireAuth>
                 <AuthedLayout>
                   <Furniture />
+                </AuthedLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/attempt/:id/placement"
+            element={
+              <RequireAuth>
+                <AuthedLayout>
+                  <PlacementChoice />
+                </AuthedLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/attempt/:id/draw"
+            element={
+              <RequireAuth>
+                <AuthedLayout>
+                  <DrawOnPhoto />
                 </AuthedLayout>
               </RequireAuth>
             }

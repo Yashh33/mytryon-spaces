@@ -580,6 +580,10 @@ class Attempt(Base):
     placement_writer = Column(JSONB, nullable=True)
     # optional free-text request from the Finishing step
     note = Column(Text, nullable=True)
+    # how the pieces are placed: "plan" (floor plan + placement writer) or
+    # "shapes" (drawn on the room photo — see DRAW ON PHOTO)
+    placement_mode = Column(String, nullable=False, default="plan", server_default="plan")
+    shapes = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     items = relationship("Item", backref="attempt", cascade="all, delete-orphan", order_by="Item.id")
@@ -945,6 +949,8 @@ async def lifespan(app: FastAPI):
         add_column(conn, "items", "material", "TEXT")
         add_column(conn, "items", "fabric_path", "TEXT")
         add_column(conn, "attempts", "note", "TEXT")
+        add_column(conn, "attempts", "placement_mode", "TEXT NOT NULL DEFAULT 'plan'")
+        add_column(conn, "attempts", "shapes", "JSONB")
         # product-photo studio: which look (warm/luxury/minimal/studio) each image used.
         add_column(conn, "studio_images", "look", "TEXT")
         # product-photo studio: which camera view (front/angled) each image used.
@@ -1054,6 +1060,9 @@ async def lifespan(app: FastAPI):
         if db.query(Setting).filter(Setting.key == PLACEMENT_WRITER_PROMPT_KEY).first() is None:
             db.add(Setting(key=PLACEMENT_WRITER_PROMPT_KEY, value=DEFAULT_PLACEMENT_WRITER_PROMPT))
             logger.info("seeded default placement writer prompt")
+        if db.query(Setting).filter(Setting.key == SHAPES_PROMPT_KEY).first() is None:
+            db.add(Setting(key=SHAPES_PROMPT_KEY, value=DEFAULT_SHAPES_GENERATION_PROMPT))
+            logger.info("seeded default shapes generation prompt")
         if db.query(Setting).filter(Setting.key == STUDIO_PROMPT_KEY).first() is None:
             db.add(Setting(key=STUDIO_PROMPT_KEY, value=DEFAULT_STUDIO_PROMPT))
             logger.info("seeded default studio prompt")
@@ -3188,6 +3197,337 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
 
 
 # ---------------------------------------------------------------------------
+# DRAW ON PHOTO — a second placement pipeline, beside the floor plan. The
+# salesman draws each piece as a coloured shape straight onto the room photo
+# (attempt.placement_mode = "shapes", attempt.shapes). For generation, code
+# draws those shapes onto the photo (the guide image) and the image model is
+# told to build each piece on its shape and then remove the shapes. The room
+# reader, the floor plan and the placement writer are not used at all.
+#
+# attempt.shapes = {"version": 1, "shapes": [shape, ...]}, one shape per piece
+# (sub_index splits a 3+2 set), points as fractions of the photo's width and
+# height:
+#   {"item_id", "sub_index", "kind": "rect" | "L" | "corner", "colour": "RED",
+#    "points": [[x, y], ...],   # 4 for rect; 6 for L / corner (see shape_parts)
+#    "backrest": [edge | null per part],   # edge i runs from corner i to i+1
+#    "lounge": part index | null}          # L only: the part with no backrest
+# Mirrors frontend/src/shapes.js.
+# ---------------------------------------------------------------------------
+
+SHAPE_COLOURS = {
+    "RED": (229, 57, 53),
+    "BLUE": (30, 91, 255),
+    "GREEN": (18, 161, 80),
+    "YELLOW": (255, 208, 0),
+    "PURPLE": (142, 59, 217),
+    "CYAN": (0, 184, 212),
+    "ORANGE": (255, 122, 0),
+    "PINK": (255, 79, 163),
+}
+GUIDE_FILL_ALPHA = 115  # about 45% opacity
+GUIDE_LINE_PX = 12
+GUIDES_DIR = DATA_ROOT / "guides"  # the guide image sent for each shapes render, for the debug page
+SHAPES_PROMPT_KEY = "shapes_generation_prompt"
+SHAPES_TOKEN = "{{SHAPES}}"
+# the edge of each part of a two-part shape that is shared with the other part
+SHARED_EDGE = {0: 2, 1: 3}
+GUIDE_IMAGE_LINE = (
+    "Image 1 is the room photograph with coloured guide shapes drawn on the floor; each thick black line marks "
+    "where a sofa's back goes."
+)
+
+
+def _prompt_section(start: str, end: str | None) -> str:
+    """A stretch of the floor-plan pipeline's default prompt, so the two
+    pipelines start from the same camera, finishing and decor wording."""
+    i = DEFAULT_GENERATION_PROMPT.index(start)
+    j = DEFAULT_GENERATION_PROMPT.index(end, i) if end else len(DEFAULT_GENERATION_PROMPT)
+    return DEFAULT_GENERATION_PROMPT[i:j].strip()
+
+
+DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
+    [
+        "{{IMAGE_MANIFEST}}",
+        "{{PIECE_FINISH}}",
+        "Add the furniture into the room photograph (Image 1), on the coloured guide shapes.",
+        SHAPES_TOKEN,
+        "Each sofa stays the size of its shape: never larger than the shape, never move a sofa off its shape or turn "
+        "it at an angle. The floor between shapes stays visible — keep every gap exactly as the shapes show. Each "
+        "sofa keeps its own material and colour from its own photograph, unless the FABRIC section gives it another.",
+        "After placing the furniture, remove all coloured guide shapes and black lines completely. No colour tint, "
+        "outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
+        _prompt_section("CAMERA —", "ROOM LAYOUT"),
+        _prompt_section("Keep everything else exactly the same.", "A sofa whose back is against a wall"),
+        "Remove any people from the photograph.",
+        _prompt_section("Clear away people, tools, ladders", "{{ROOM_TREATMENT}}"),
+        "{{ROOM_TREATMENT}}",
+        "{{DECOR}}",
+        "{{LIGHTING}}",
+        _prompt_section("The furniture being placed must be the visual focal point", None),
+    ]
+) + "\n"
+
+
+def get_shapes_prompt(db: Session) -> str:
+    return get_setting(db, SHAPES_PROMPT_KEY, DEFAULT_SHAPES_GENERATION_PROMPT)
+
+
+def _line_intersection(a, b, c, d):
+    """Where line a-b meets line c-d, or None when they are parallel."""
+    (x1, y1), (x2, y2), (x3, y3), (x4, y4) = a, b, c, d
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(den) < 1e-9:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+    return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+
+def shape_parts(kind: str, points: list) -> list[list[tuple[float, float]]]:
+    """The 4-corner parts of a shape. An L or corner sofa is one outline of six
+    corners, p0..p5 clockwise from the outer corner of its first part:
+        p0 ------------------ p1
+        |       part 0         |
+        p5 ------------ p4     q        q = where line p5-p4 meets line p1-p2
+                        |      |
+                        |part 1|
+                        p3 -- p2
+    part 0 = p0 p1 q p5, part 1 = q p2 p3 p4, joined along q-p4."""
+    pts = [tuple(p) for p in points]
+    if kind == "rect":
+        return [pts[:4]]
+    p0, p1, p2, p3, p4, p5 = pts
+    q = _line_intersection(p5, p4, p1, p2) or ((p1[0] + p2[0]) / 2, (p4[1] + p5[1]) / 2)
+    return [[p0, p1, q, p5], [q, p2, p3, p4]]
+
+
+def piece_shape_kind(sub_shape: str) -> str | None:
+    """The shape a piece is drawn with; None for a curved sofa (not supported)."""
+    return {"L": "L", "corner": "corner", "curved": None}.get(sub_shape, "rect")
+
+
+def attempt_pieces(attempt: Attempt) -> list[dict]:
+    """One entry per piece that gets its own shape (a "3+2" set is two), in
+    the order the draw screen lists them."""
+    pieces = []
+    for index, item in enumerate(attempt.items):
+        subs = compute_sub_pieces(item)
+        for sub in subs:
+            pieces.append(
+                {
+                    "item": item,
+                    "item_index": index,
+                    "sub_index": sub["sub_index"],
+                    "label": sub["label"] if len(subs) > 1 else item.type,
+                    "kind": piece_shape_kind(sub["shape"]),
+                }
+            )
+    return pieces
+
+
+def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | None]:
+    """Checks shapes against the attempt's pieces. Returns (clean shapes,
+    None) or (None, what is wrong)."""
+    if not isinstance(data, dict) or not isinstance(data.get("shapes"), list):
+        return None, "The shapes could not be read."
+    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
+    clean, seen = [], set()
+    for shape in data["shapes"]:
+        if not isinstance(shape, dict):
+            return None, "The shapes could not be read."
+        key = (shape.get("item_id"), shape.get("sub_index", 0))
+        piece = pieces.get(key)
+        if piece is None or key in seen:
+            return None, "A shape belongs to a piece that is not in this attempt."
+        seen.add(key)
+        kind = shape.get("kind")
+        if piece["kind"] is None:
+            return None, "Curved sofas can't be drawn on the photo yet — please use the floor plan."
+        if kind != piece["kind"]:
+            return None, "A shape doesn't match its piece."
+        if shape.get("colour") not in SHAPE_COLOURS:
+            return None, "A shape has an unknown colour."
+        raw = shape.get("points")
+        want = 4 if kind == "rect" else 6
+        if not isinstance(raw, list) or len(raw) != want:
+            return None, "A shape has the wrong number of corners."
+        try:
+            points = [[round(min(1.0, max(0.0, float(x))), 5), round(min(1.0, max(0.0, float(y))), 5)] for x, y in raw]
+        except (TypeError, ValueError):
+            return None, "A shape's corners could not be read."
+        parts = 1 if kind == "rect" else 2
+        backrest = shape.get("backrest")
+        if not isinstance(backrest, list) or len(backrest) != parts:
+            return None, "A shape's backrest could not be read."
+        lounge = shape.get("lounge") if kind == "L" else None
+        if kind == "L" and lounge not in (0, 1):
+            return None, "Mark which part of the L-shape is the lounge."
+        for part, edge in enumerate(backrest):
+            if part == lounge:
+                if edge is not None:
+                    return None, "The lounge has no backrest."
+                continue
+            if not isinstance(edge, int) or not 0 <= edge <= 3 or (parts == 2 and edge == SHARED_EDGE[part]):
+                return None, "Every part except a lounge needs a backrest edge on its outside."
+        clean.append(
+            {
+                "item_id": key[0],
+                "sub_index": key[1],
+                "kind": kind,
+                "colour": shape["colour"],
+                "points": points,
+                "backrest": list(backrest),
+                "lounge": lounge,
+            }
+        )
+    return clean, None
+
+
+def stored_shapes(attempt: Attempt) -> list[dict]:
+    """The attempt's saved shapes still valid for its current pieces (a piece
+    deleted since drops its shape), in piece order."""
+    order = {(p["item"].id, p["sub_index"]): i for i, p in enumerate(attempt_pieces(attempt))}
+    raw = (attempt.shapes or {}).get("shapes") or []
+    keep = [s for s in raw if isinstance(s, dict) and (s.get("item_id"), s.get("sub_index", 0)) in order]
+    clean, problem = validate_shapes(attempt, {"shapes": keep})
+    if problem:
+        return []
+    return sorted(clean, key=lambda s: order[(s["item_id"], s["sub_index"])])
+
+
+def missing_shape_pieces(attempt: Attempt) -> list[str]:
+    """Pieces that still need a shape before a shapes render can start
+    (curved sofas included: they can't be drawn yet)."""
+    drawn = {(s["item_id"], s["sub_index"]) for s in stored_shapes(attempt)}
+    return [p["label"] for p in attempt_pieces(attempt) if (p["item"].id, p["sub_index"]) not in drawn]
+
+
+def draw_guide_image(photo: Image.Image, shapes: list[dict]) -> Image.Image:
+    """The room photo with every shape filled in its colour at about 45%
+    opacity and a GUIDE_LINE_PX black line on each backrest edge."""
+    from PIL import ImageDraw
+
+    base = photo.convert("RGBA")
+    width, height = base.size
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    fill = ImageDraw.Draw(overlay)
+    lines = []
+    for shape in shapes:
+        rgb = SHAPE_COLOURS[shape["colour"]]
+        for part, corners in enumerate(shape_parts(shape["kind"], shape["points"])):
+            pixels = [(x * width, y * height) for x, y in corners]
+            fill.polygon(pixels, fill=(*rgb, GUIDE_FILL_ALPHA))
+            edge = shape["backrest"][part]
+            if edge is not None:
+                lines.append((pixels[edge], pixels[(edge + 1) % 4]))
+    guide = Image.alpha_composite(base, overlay)
+    draw = ImageDraw.Draw(guide)
+    radius = GUIDE_LINE_PX / 2
+    for start, end in lines:
+        draw.line([start, end], fill=(0, 0, 0, 255), width=GUIDE_LINE_PX)
+        for x, y in (start, end):  # round ends
+            draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+    return guide.convert("RGB")
+
+
+def shape_piece_name(item: Item, label: str, kind: str) -> str:
+    if kind == "L":
+        return "L-shaped sofa"
+    if kind == "corner":
+        return "corner sofa"
+    seats = sofa_seat_count(item.category, label)
+    if seats is not None:
+        return sofa_seat_description(seats)
+    if item.category == "Chair":
+        return "armchair"
+    return f"{item.category.lower()} ({label})"
+
+
+def build_shapes_text(attempt: Attempt, shapes: list[dict]) -> str:
+    """{{SHAPES}}: one paragraph per shape, naming the piece, its product
+    photo's Image number and how to build it on its shape."""
+    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
+    section = finish_section_name(attempt.items)
+    paragraphs = []
+    for shape in shapes:
+        piece = pieces[(shape["item_id"], shape["sub_index"])]
+        item, number = piece["item"], piece["item_index"] + 2  # Image 1 is the guide; products follow in item order
+        colour = shape["colour"]
+        source = (
+            f"in the exact design of Image {number}, with the material and colour given in the {section} section"
+            if item_has_finish(item)
+            else f"in the exact design, material and colour of Image {number}"
+        )
+        text = (
+            f"{colour} shape: one {shape_piece_name(item, piece['label'], shape['kind'])} {source}. Build it exactly on "
+            f"the {colour.lower()} shape, covering the same floor area, at the same size, with its back along the thick "
+            "black line, flat against the wall."
+        )
+        if shape["kind"] == "L":
+            text += (
+                " The part of the shape with no black line is an open chaise lounge with no backrest and no arm at its "
+                "tip. The sofa has one arm only, at the end of the long run away from the lounge. If the photograph "
+                "shows a straight sofa, rebuild it as this L in the same design."
+            )
+        elif shape["kind"] == "corner":
+            text += " Both parts have a backrest along their black lines; arms only at the two outer ends."
+        paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def build_shapes_prompt(
+    template: str, attempt: Attempt, shapes: list[dict], room_padded: bool, feet: bool = False
+) -> str:
+    """The shapes pipeline's prompt: {{SHAPES}} filled here, everything else
+    (image list, fabric section, look, decor, lighting, the showroom's note)
+    exactly as the floor-plan pipeline fills it."""
+    filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes))
+    prompt = build_prompt(
+        filled, attempt.room, attempt.items, attempt.room_treatment, attempt.lighting, True, "", attempt.note, feet, room_padded
+    )
+    # Image 1 is the guide image, not the bare room photo
+    return prompt.replace("Image 1 is a room.", GUIDE_IMAGE_LINE, 1)
+
+
+class PlacementModeBody(BaseModel):
+    mode: str
+
+
+class ShapesBody(BaseModel):
+    shapes: dict
+
+
+@app.put("/api/attempts/{attempt_id}/placement-mode")
+def api_set_placement_mode(
+    attempt_id: int, body: PlacementModeBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    if body.mode not in ("plan", "shapes"):
+        return error_response(400, "invalid_mode", "Choose the floor plan or drawing on the photo.")
+    if body.mode == "shapes":
+        shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
+        if not shop_feature(shop, "shape_placement"):
+            return error_response(403, "feature_off", "Drawing on the photo isn't switched on for this showroom.")
+    attempt.placement_mode = body.mode
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
+@app.put("/api/attempts/{attempt_id}/shapes")
+def api_save_shapes(
+    attempt_id: int, body: ShapesBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    attempt = get_owned_attempt(attempt_id, user, db)
+    shapes, problem = validate_shapes(attempt, body.shapes)
+    if problem:
+        return error_response(400, "invalid_shapes", problem)
+    attempt.shapes = {"version": 1, "shapes": shapes}
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
+# ---------------------------------------------------------------------------
 # Generation jobs — POST starts a background job, the client polls for the
 # result so the flow survives the phone locking or the tab backgrounding.
 # ---------------------------------------------------------------------------
@@ -3451,7 +3791,13 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         room = attempt.room
         template = get_active_prompt(db)
         writer_placement, writer_info = (None, None)
-        if not attempt.ignore_placement:
+        # "Draw on photo": the guide image replaces the room photo, and the
+        # room reader / floor plan / placement writer are not used at all
+        shapes = stored_shapes(attempt) if attempt.placement_mode == "shapes" and not attempt.ignore_placement else []
+        if attempt.placement_mode == "shapes" and not attempt.ignore_placement and not shapes:
+            fail_job(db, job_id, "Draw the furniture on the photo first.")
+            return
+        if not attempt.ignore_placement and not shapes:
             # may wait for a writer still running; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
             writer_placement, writer_info = await resolve_writer_placement(attempt, db)
@@ -3464,7 +3810,31 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         room_file, room_debug = load_local_image_with_debug(room_path, "room", f"/media/{room.photo_path}")
         photo_box = None  # where the photo sits in a padded Image 1; None when it is sent as it is
         size = derive_size(room_debug["width"], room_debug["height"])
-        if pad_room_photo_enabled(db):
+        if shapes:
+            # the guide image: drawn on the room photo, padded exactly as the photo would be
+            with Image.open(room_path) as room_image:
+                guide = draw_guide_image(room_image, shapes)
+            sent = guide
+            if pad_room_photo_enabled(db):
+                sent, photo_box = pad_to_output_ratio(guide, size)
+            GUIDES_DIR.mkdir(parents=True, exist_ok=True)
+            guide_name = f"{uuid.uuid4().hex}.jpg"
+            buffer = io.BytesIO()
+            sent.save(buffer, format="JPEG", quality=92)
+            (GUIDES_DIR / guide_name).write_bytes(buffer.getvalue())
+            room_file = (guide_name, buffer.getvalue(), "image/jpeg")
+            room_debug = {
+                "filename": guide_name,
+                "role": "guide",
+                "width": sent.width,
+                "height": sent.height,
+                "size_bytes": len(buffer.getvalue()),
+                "url": f"/media/guides/{guide_name}",
+                "original_width": guide.width,
+                "original_height": guide.height,
+                "padded": photo_box is not None,
+            }
+        elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
                 padded, photo_box = pad_to_output_ratio(room_image, size)
                 if photo_box is not None:
@@ -3483,10 +3853,13 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         image_files.append(room_file)
         debug_images.append(room_debug)
 
-        prompt = build_prompt(
-            template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
-            attempt.note, feet_in_prompt(db), photo_box is not None,
-        )
+        if shapes:
+            prompt = build_shapes_prompt(get_shapes_prompt(db), attempt, shapes, photo_box is not None, feet_in_prompt(db))
+        else:
+            prompt = build_prompt(
+                template, room, attempt.items, attempt.room_treatment, attempt.lighting, attempt.ignore_placement, writer_placement,
+                attempt.note, feet_in_prompt(db), photo_box is not None,
+            )
         print(f"=== resolved prompt for attempt {attempt_id} ===\n{prompt}\n=== end prompt ===", flush=True)
 
         for item in attempt.items:
@@ -3798,6 +4171,8 @@ def attempt_detail(attempt: Attempt) -> dict:
             {"id": latest_render.id, "image_url": f"/media/{latest_render.image_path}"} if latest_render else None
         ),
         "fix_hint_depth": FIX_HINT_DEPTH,
+        "placement_mode": attempt.placement_mode,
+        "shapes": attempt.shapes,
     }
 
 
@@ -4003,6 +4378,12 @@ def _start_generation(attempt: Attempt, ignore_placement: bool, user: User, db: 
         )
     if SHUTTING_DOWN:
         return error_response(503, "restarting", RESTARTING_MESSAGE)
+    if attempt.placement_mode == "shapes" and not ignore_placement:
+        missing = missing_shape_pieces(attempt)
+        if missing:
+            return error_response(
+                400, "shapes_missing", f"Draw every piece on the photo first (still missing: {', '.join(missing)})."
+            )
     attempt.ignore_placement = ignore_placement
     db.commit()
     job_id = begin_job(db, "generation", shop.id, user.id, attempt_id=attempt.id)
@@ -4346,6 +4727,21 @@ async def api_create_attempt(
     db.commit()
     db.refresh(attempt)
     if source is not None:
+        # a drawn-on-photo attempt keeps its mode and shapes; items are copied
+        # in order, so each shape moves to the copy of its piece
+        attempt.placement_mode = source.placement_mode
+        if source.shapes:
+            new_ids = {old.id: new.id for old, new in zip(source_items, attempt.items)}
+            attempt.shapes = {
+                **source.shapes,
+                "shapes": [
+                    {**s, "item_id": new_ids[s["item_id"]]}
+                    for s in (source.shapes.get("shapes") or [])
+                    if s.get("item_id") in new_ids
+                ],
+            }
+        db.commit()
+        db.refresh(attempt)
         # same pieces as the source: its plan and writer output carry over
         reuse = reuse_placement_writer(source, attempt, db)
         db.commit()
@@ -5061,7 +5457,7 @@ def api_admin_shop_usage(
 
 # Per-shop feature switches (shops.features), set by the superadmin on the
 # shop's page. A shop without a key gets the default here.
-SHOP_FEATURE_DEFAULTS = {"fix_this": False}
+SHOP_FEATURE_DEFAULTS = {"fix_this": False, "shape_placement": True}
 
 
 def shop_feature(shop: Shop | None, name: str) -> bool:
@@ -6017,6 +6413,7 @@ def api_studio_delete(
 
 
 PROMPT_PAGE_KEYS = [
+    SHAPES_PROMPT_KEY,
     PROMPT_SETTING_KEY,
     VISION_PROMPT_SETTING_KEY,
     VISION_MODEL_SETTING_KEY,
@@ -6053,6 +6450,8 @@ def prompt_setting_response(db: Session) -> dict:
         "placement_writer_enabled": value(PLACEMENT_WRITER_ENABLED_KEY, "true").strip().lower() == "true",
         "placement_writer_prompt": value(PLACEMENT_WRITER_PROMPT_KEY, DEFAULT_PLACEMENT_WRITER_PROMPT),
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
+        "shapes_prompt": value(SHAPES_PROMPT_KEY, DEFAULT_SHAPES_GENERATION_PROMPT),
+        "default_shapes_prompt": DEFAULT_SHAPES_GENERATION_PROMPT,
         "studio_prompt": value(STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT),
         "default_studio_prompt": DEFAULT_STUDIO_PROMPT,
         "studio_edit_prompt": value(STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT),
@@ -6142,6 +6541,7 @@ class PromptBody(BaseModel):
     pad_room_photo: bool | None = None
     placement_writer_enabled: bool | None = None
     placement_writer_prompt: str | None = None
+    shapes_prompt: str | None = None
     studio_prompt: str | None = None
     studio_edit_prompt: str | None = None
     studio_look_prompt: str | None = None
@@ -6166,6 +6566,10 @@ def api_admin_save_prompt(
         return error_response(400, "empty_vision_prompt", "The vision prompt can't be empty.")
     if body.vision_model is not None and not body.vision_model.strip():
         return error_response(400, "empty_vision_model", "The vision model can't be empty.")
+    if body.shapes_prompt is not None and SHAPES_TOKEN not in body.shapes_prompt:
+        return error_response(
+            400, "shapes_prompt_missing_shapes", f"The draw-on-photo prompt must contain {SHAPES_TOKEN} where the shapes go."
+        )
     if body.placement_writer_prompt is not None and WRITER_PIECES_TOKEN not in body.placement_writer_prompt:
         return error_response(
             400,
@@ -6213,6 +6617,8 @@ def api_admin_save_prompt(
         set_setting(db, PLACEMENT_WRITER_ENABLED_KEY, "true" if body.placement_writer_enabled else "false")
     if body.placement_writer_prompt is not None:
         set_setting(db, PLACEMENT_WRITER_PROMPT_KEY, body.placement_writer_prompt)
+    if body.shapes_prompt is not None:
+        set_setting(db, SHAPES_PROMPT_KEY, body.shapes_prompt)
     if body.studio_prompt is not None:
         set_setting(db, STUDIO_PROMPT_KEY, body.studio_prompt)
     if body.studio_edit_prompt is not None:
@@ -6273,6 +6679,7 @@ def api_debug_generation(
             "images": debug_row.images,
             "placement_writer": debug_row.placement_writer,
             "fix": debug_row.fix,
+            "placement_mode": attempt.placement_mode if attempt else None,
         }
     )
 

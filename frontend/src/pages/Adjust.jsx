@@ -164,10 +164,23 @@ export default function Adjust() {
         </span>
         <span className="chevron">&#8250;</span>
       </button>
-      <button type="button" className="adjust-row" disabled={locked} onClick={() => openStep("place")}>
+      <button
+        type="button"
+        className="adjust-row"
+        disabled={locked}
+        onClick={() => openStep(shown.placement_mode === "shapes" ? "draw" : "place")}
+      >
         <span>
           Placement
-          <div className="sub">{shown.items.some((it) => it.placement && it.placement.length) ? "placed" : "not placed"}</div>
+          <div className="sub">
+            {shown.placement_mode === "shapes"
+              ? shown.shapes?.shapes?.length
+                ? "drawn on photo"
+                : "not drawn yet"
+              : shown.items.some((it) => it.placement && it.placement.length)
+                ? "placed"
+                : "not placed"}
+          </div>
         </span>
         <span className="chevron">&#8250;</span>
       </button>

@@ -314,7 +314,7 @@ export default function Finish() {
   return (
     <div className="screen has-step-footer">
       <TopBar
-        backTo={adjust.backTo || `/attempt/${id}/place`}
+        backTo={adjust.backTo || `/attempt/${id}/${attempt.placement_mode === "shapes" ? "draw" : "place"}`}
         crumbs={[
           { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
           { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
@@ -322,7 +322,7 @@ export default function Finish() {
         ]}
       />
       <div className="eyebrow">Step 4 of 4</div>
-      <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} />
+      <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} placementMode={attempt.placement_mode} />
       <h1 style={{ marginBottom: 6 }}>Customise and finish</h1>
       <p className="finish-subtitle muted">
         Change colour or material for each piece. The design – shape, seats, arms and legs – always stays the same.
@@ -422,7 +422,7 @@ export default function Finish() {
       </div>
 
       <StepFooter
-        backTo={adjust.backTo || `/attempt/${id}/place`}
+        backTo={adjust.backTo || `/attempt/${id}/${attempt.placement_mode === "shapes" ? "draw" : "place"}`}
         status={`${customisedCount} of ${attempt.items.length} ${attempt.items.length === 1 ? "piece" : "pieces"} customised`}
         primaryLabel={anySaving ? "Saving…" : "Generate"}
         primaryBusyLabel="Starting…"

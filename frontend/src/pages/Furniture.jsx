@@ -120,6 +120,7 @@ export default function Furniture() {
   const navigate = useNavigate();
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
+  const [features, setFeatures] = useState({});
   const [error, setError] = useState(null);
   // choice: a TYPE_CARDS key, or "Dining table" / "Bed"; null until picked
   const [choice, setChoice] = useState(null);
@@ -136,6 +137,7 @@ export default function Furniture() {
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
+      setFeatures(data.features || {});
     } catch (err) {
       setError(err.message);
     }
@@ -250,7 +252,7 @@ export default function Furniture() {
         ]}
       />
       <div className="eyebrow">Step 2 of 4</div>
-      <StepBar current={2} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} />
+      <StepBar current={2} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} placementMode={attempt.placement_mode} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
         <h1 style={{ marginBottom: 0 }}>Add furniture</h1>
         <button type="button" className="link-btn" onClick={() => setShowPlan(true)}>
@@ -386,7 +388,10 @@ export default function Furniture() {
         status={pieceCount ? `${pieceCount} ${pieceCount === 1 ? "piece" : "pieces"} added` : "Add a piece of furniture to continue"}
         primaryLabel="Next"
         primaryDisabled={!pieceCount}
-        onPrimary={() => navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`)}
+        onPrimary={() =>
+          // shops with "Draw on photo" switched on are asked how to place first
+          navigate(`/attempt/${id}/${features.shape_placement ? "placement" : "place"}${adjust.query ? `?${adjust.query}` : ""}`)
+        }
       />
     </div>
   );

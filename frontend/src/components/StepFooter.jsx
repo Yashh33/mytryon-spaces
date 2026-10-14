@@ -52,14 +52,16 @@ export function StepFooter({
         ) : (
           <div className="step-footer-fill" />
         )}
-        <button
-          type="button"
-          className="btn btn-primary step-footer-primary"
-          disabled={primaryDisabled || busy}
-          onClick={onPrimary}
-        >
-          {busy && primaryBusyLabel ? primaryBusyLabel : primaryLabel}
-        </button>
+        {primaryLabel ? (
+          <button
+            type="button"
+            className="btn btn-primary step-footer-primary"
+            disabled={primaryDisabled || busy}
+            onClick={onPrimary}
+          >
+            {busy && primaryBusyLabel ? primaryBusyLabel : primaryLabel}
+          </button>
+        ) : null}
       </div>
     </>
   );

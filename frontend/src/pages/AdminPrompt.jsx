@@ -29,6 +29,7 @@ export default function AdminPrompt() {
   const [padRoomPhoto, setPadRoomPhoto] = useState(true);
   const [writerEnabled, setWriterEnabled] = useState(true);
   const [writerPrompt, setWriterPrompt] = useState("");
+  const [shapesPrompt, setShapesPrompt] = useState("");
   const [studioPrompt, setStudioPrompt] = useState("");
   const [studioEditPrompt, setStudioEditPrompt] = useState("");
   const [studioLookPrompt, setStudioLookPrompt] = useState("");
@@ -50,6 +51,7 @@ export default function AdminPrompt() {
     setPadRoomPhoto(res.pad_room_photo !== false);
     setWriterEnabled(res.placement_writer_enabled);
     setWriterPrompt(res.placement_writer_prompt);
+    setShapesPrompt(res.shapes_prompt);
     setStudioPrompt(res.studio_prompt);
     setStudioEditPrompt(res.studio_edit_prompt);
     setStudioLookPrompt(res.studio_look_prompt);
@@ -85,6 +87,7 @@ export default function AdminPrompt() {
         pad_room_photo: padRoomPhoto,
         placement_writer_enabled: writerEnabled,
         placement_writer_prompt: writerPrompt,
+        shapes_prompt: shapesPrompt,
         studio_prompt: studioPrompt,
         studio_edit_prompt: studioEditPrompt,
         studio_look_prompt: studioLookPrompt,
@@ -167,6 +170,19 @@ export default function AdminPrompt() {
         Must contain <span className="mono">{"{{PIECES}}"}</span>.{" "}
         <button type="button" className="link-btn" onClick={() => setWriterPrompt(data.default_placement_writer_prompt)}>
           Put back the built-in writer prompt
+        </button>
+      </div>
+
+      <div className="section-label" style={{ marginTop: 26 }}>Draw on photo (Beta) – generation prompt</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        Used instead of the generation prompt above when the salesman drew the furniture on the photo. Image 1 is then the
+        room photo with the coloured shapes on it; the floor plan and the placement writer are not used.
+      </div>
+      <textarea className="prompt-textarea" spellCheck="false" value={shapesPrompt} onChange={(e) => setShapesPrompt(e.target.value)} />
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+        Must contain <span className="mono">{"{{SHAPES}}"}</span> (one paragraph per drawn shape).{" "}
+        <button type="button" className="link-btn" onClick={() => setShapesPrompt(data.default_shapes_prompt)}>
+          Put back the built-in draw-on-photo prompt
         </button>
       </div>
 

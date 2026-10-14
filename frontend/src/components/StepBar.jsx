@@ -7,13 +7,14 @@ const STEPS = [
   { n: 4, label: "Finish" },
 ];
 
-/** `query` (e.g. "adjust=12") is kept on links between the attempt's own steps. */
-export function StepBar({ current, attemptId, roomId, query = "" }) {
+/** `query` (e.g. "adjust=12") is kept on links between the attempt's own steps.
+ * `placementMode` "shapes" sends step 3 to the draw-on-photo screen. */
+export function StepBar({ current, attemptId, roomId, query = "", placementMode = "plan" }) {
   function targetFor(n) {
     if (n === 1) return `/room/${roomId}`;
     const suffix = query ? `?${query}` : "";
     if (n === 2) return `/attempt/${attemptId}/furniture${suffix}`;
-    if (n === 3) return `/attempt/${attemptId}/place${suffix}`;
+    if (n === 3) return `/attempt/${attemptId}/${placementMode === "shapes" ? "draw" : "place"}${suffix}`;
     return `/attempt/${attemptId}/finish${suffix}`;
   }
 

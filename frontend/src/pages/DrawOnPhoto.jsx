@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
@@ -6,42 +6,38 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
 import { StepFooter } from "../components/StepFooter.jsx";
-import { PlacementCard } from "../components/PlacementCard.jsx";
 import { useAdjustMode } from "../adjustMode.js";
 import {
-  SET_PIECE_SNAP_FT,
-  SINGLE_PIECE_SNAP_FT,
-  defaultPlacement,
-  flipPlacement,
-  itemsToBlocks,
-  resizePlacement,
-  rotatePlacement,
-} from "../placement.js";
-import {
-  BACK_LINE_PX,
-  DEFAULT_FLOOR_QUAD,
-  FLOOR_POINT_MAX,
-  FLOOR_POINT_MIN,
-  OUTLINE_PX,
-  SIDE_OPACITY,
-  TOP_OPACITY,
-  applyH,
-  darker,
-  floorTransform,
-  guideBoxes,
-  guidePieces,
-  planFeetFor,
-} from "../floorGuide.js";
+  COLOUR_HEX,
+  backrestAllowed,
+  centroid,
+  flipShape,
+  moveCorner,
+  moveShape,
+  newShape,
+  piecesOf,
+  shapeCentre,
+  shapeParts,
+  snapAngle,
+  swapLounge,
+  transformPoints,
+} from "../shapes.js";
 
 const SAVE_DELAY_MS = 400;
-const DOT_R = 16; // CSS px: big enough for a finger
-const FLOOR_PAD = 0.12; // room around the photo (fraction of its width) so a dot can sit just outside it
-const GRID_LINES = 6;
+const TAP_SLOP_PX = 5; // a finger may wander this far and still count as a tap
+// on-screen sizes (CSS px), turned into photo pixels with `scale`
+const CORNER_R = 8;
+const RESIZE_SIZE = 32;
+const ROTATE_R = 17;
+const HANDLE_GAP = 14; // handles sit this far outside the shape
+const ROTATE_STICK = 30;
 
-/** "Draw on photo (Beta)": A) mark the 4 corners of the floor on the photo
- * (once per room photo), B) place the pieces on a top-down plan of that floor
- * with the usual plan editor, while a live preview draws them on the photo
- * as see-through boxes — the same guide image the picture is made from. */
+/** "Draw on photo (Beta)": each piece is drawn as a coloured shape on the
+ * room photo. Drag inside a shape to move it; the square handle resizes the
+ * whole shape from its centre, the round handle turns it (snapping to quarter
+ * turns); two fingers pinch to resize and twist to turn. Corner dots are for
+ * fine-tuning; tapping an edge puts the backrest (black line) there. Shapes
+ * never leave the photo. Saved on the attempt as corner points. */
 export default function DrawOnPhoto() {
   const { id } = useParams();
   const adjust = useAdjustMode(id);
@@ -49,41 +45,28 @@ export default function DrawOnPhoto() {
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
   const [error, setError] = useState(null);
-  const [stage, setStage] = useState(null); // "floor" | "plan"
-  const [quad, setQuad] = useState(DEFAULT_FLOOR_QUAD);
-  const [savingFloor, setSavingFloor] = useState(false);
-  const [blocks, setBlocks] = useState([]);
-  const [selectedKey, setSelectedKey] = useState(null);
+  const [shapes, setShapes] = useState([]);
+  const [selected, setSelected] = useState(null); // piece key
   const [size, setSize] = useState(null); // the photo's natural { w, h }
-  const [saveState, setSaveState] = useState("saved");
-  const [fullScreen, setFullScreen] = useState(false);
+  const [scale, setScale] = useState(1); // photo pixels per screen pixel
+  const [saveState, setSaveState] = useState("saved"); // "saved" | "saving" | "error"
+  const svgRef = useRef(null);
+  const drag = useRef(null); // one-finger action in progress
+  const pointers = useRef(new Map()); // pointerId -> [clientX, clientY]
+  const gesture = useRef(null); // two-finger pinch / twist in progress
   const saveTimer = useRef(null);
   const latest = useRef([]);
-
-  function buildBlocks(att) {
-    const saved = att.shapes?.version === 2 ? att.shapes.blocks || [] : [];
-    const byKey = Object.fromEntries(saved.map((b) => [`${b.item_id}-${b.sub_index}`, b]));
-    const pieces = guidePieces(att.items);
-    const colourByKey = Object.fromEntries(pieces.map((p) => [p.key, p.colour.hex]));
-    return itemsToBlocks(att.items).map((b) => ({
-      ...b,
-      placement: byKey[b.key]?.geometry || null,
-      widthFt: byKey[b.key]?.width_ft || b.widthFt,
-      color: colourByKey[b.key],
-      photo_url: att.items.find((i) => i.id === b.itemId)?.photo_url,
-    }));
-  }
+  const shapesRef = useRef([]);
+  shapesRef.current = shapes;
 
   async function load() {
     setError(null);
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
-      setQuad(data.attempt.room.floor_quad || DEFAULT_FLOOR_QUAD);
-      setStage((prev) => prev || (data.attempt.room.floor_quad ? "plan" : "floor"));
-      const fresh = buildBlocks(data.attempt);
-      setBlocks(fresh);
-      latest.current = fresh;
+      const saved = data.attempt.shapes?.shapes || [];
+      setShapes(saved);
+      latest.current = saved;
     } catch (err) {
       setError(err.message);
     }
@@ -95,24 +78,22 @@ export default function DrawOnPhoto() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const room = attempt?.room;
-  const feet = useMemo(() => planFeetFor(room), [room]);
-  const pieces = useMemo(() => (attempt ? guidePieces(attempt.items) : []), [attempt]);
+  useEffect(() => {
+    function measure() {
+      if (svgRef.current && size) setScale(size.w / Math.max(svgRef.current.getBoundingClientRect().width, 1));
+    }
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [size]);
 
-  // ---- saving the plan ----------------------------------------------------
-  function savePlan(next) {
+  function save(next) {
     latest.current = next;
     setSaveState("saving");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const plan = {
-        version: 2,
-        blocks: latest.current
-          .filter((b) => b.placement)
-          .map((b) => ({ item_id: b.itemId, sub_index: b.subIndex, shape: b.shape, geometry: b.placement, width_ft: b.widthFt })),
-      };
       try {
-        await api.put(`/api/attempts/${id}/shapes`, { json: { shapes: plan } });
+        await api.put(`/api/attempts/${id}/shapes`, { json: { shapes: { version: 1, shapes: latest.current } } });
         setSaveState("saved");
       } catch (err) {
         setSaveState("error");
@@ -121,367 +102,408 @@ export default function DrawOnPhoto() {
     }, SAVE_DELAY_MS);
   }
 
-  function change(key, patch, persist = true) {
-    setBlocks((prev) => {
-      const next = prev.map((b) => (b.key === key ? { ...b, ...patch } : b));
-      if (persist) savePlan(next);
-      else latest.current = next;
-      return next;
-    });
+  function update(next) {
+    setShapes(next);
+    save(next);
   }
 
-  const blockOf = (key) => blocks.find((b) => b.key === key);
-  const selectedBlock = blockOf(selectedKey) || null;
-  const pendingKey = selectedBlock && !selectedBlock.placement ? selectedBlock.key : null;
+  const keyOf = (s) => `${s.item_id}:${s.sub_index}`;
+  const aspect = size ? size.w / size.h : 1;
 
-  const cardProps = {
-    room: room ? { ...room, layout_json: { depth_vs_width: room.layout_json?.depth_vs_width || "about square" }, layout_status: "ready" } : null,
-    blocks,
-    selectedBlock,
-    selectedKey,
-    planFeet: feet,
-    onSelectBlock: setSelectedKey,
-    onMoveBlock: (key, placement) => change(key, { placement }, false),
-    onCommitBlock: (key, placement) => change(key, { placement }),
-    onResizeBlock: (key, orig, x, y, handle = "length") => {
-      const b = blockOf(key);
-      if (!b) return;
-      const snap = b.inSet ? SET_PIECE_SNAP_FT : SINGLE_PIECE_SNAP_FT;
-      const { placement, widthFt } = resizePlacement(b.shape, orig, x, y, feet, snap, handle);
-      change(key, handle === "length" ? { placement, widthFt } : { placement }, false);
-    },
-    onCommitResize: () => savePlan(latest.current),
-    onDropPendingAt: (key, x, y) => {
-      const b = blockOf(key);
-      if (b) change(key, { placement: defaultPlacement(b.shape, b.widthFt, feet, x, y) });
-    },
-    pendingKey,
-    addObstructionMode: false,
-    onAddObstructionAt: () => {},
-    onTapFeature: () => {},
-    onMoveFeature: () => {},
-    onTapObstruction: () => {},
-    onRotate: () => {
-      const b = selectedBlock;
-      if (b?.placement) change(b.key, { placement: rotatePlacement(b.shape, b.placement, feet) });
-    },
-    onFlip: () => {
-      const b = selectedBlock;
-      if (b?.placement) change(b.key, { placement: flipPlacement(b.shape, b.placement, feet) });
-    },
-    onRequestRemove: () => {
-      if (selectedBlock) change(selectedBlock.key, { placement: null });
-    },
-  };
-
-  // ---- live preview ---------------------------------------------------------
-  const preview = useMemo(() => {
-    if (!size) return { boxes: [], loungeSide: {} };
-    const byKey = Object.fromEntries(blocks.filter((b) => b.placement).map((b) => [b.key, b.placement]));
-    return guideBoxes(quad, size.w, size.h, feet, pieces, byKey);
-  }, [blocks, quad, feet, pieces, size]);
-
-  // ---- floor corners ----------------------------------------------------------
-  const floorSvg = useRef(null);
-  const dotDrag = useRef(null);
-
-  function toPhoto(e) {
-    const r = floorSvg.current.getBoundingClientRect();
-    const fx = (e.clientX - r.left) / r.width;
-    const fy = (e.clientY - r.top) / r.height;
-    const padY = (FLOOR_PAD * size.w) / size.h;
-    // the svg spans the photo plus FLOOR_PAD on every side
-    return [fx * (1 + 2 * FLOOR_PAD) - FLOOR_PAD, fy * (1 + 2 * padY) - padY];
+  /** Pointer position as fractions of the photo. */
+  function toPhoto(clientX, clientY) {
+    const rect = svgRef.current.getBoundingClientRect();
+    return [(clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height];
   }
 
-  async function saveFloor() {
-    setSavingFloor(true);
+  /** Angle (degrees, clockwise on screen) and distance (photo-height units)
+   * from `centre` to a point, measured in true photo proportions. */
+  function polar(centre, p) {
+    const dx = (p[0] - centre[0]) * aspect;
+    const dy = p[1] - centre[1];
+    return { deg: (Math.atan2(dy, dx) * 180) / Math.PI, dist: Math.hypot(dx, dy) };
+  }
+
+  function setShapePoints(key, points) {
+    setShapes((prev) => prev.map((s) => (keyOf(s) === key ? { ...s, points } : s)));
+  }
+
+  function startGesture() {
+    const shape = shapesRef.current.find((s) => keyOf(s) === selected);
+    const [a, b] = [...pointers.current.values()];
+    if (!shape || !a || !b) return;
+    drag.current = null;
+    const pa = toPhoto(...a);
+    const pb = toPhoto(...b);
+    const v = polar(pa, pb);
+    gesture.current = { key: selected, orig: shape.points, deg: v.deg, dist: Math.max(v.dist, 1e-6) };
+  }
+
+  function onPointerDown(e) {
+    e.preventDefault();
+    svgRef.current.setPointerCapture(e.pointerId);
+    pointers.current.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pointers.current.size === 2) {
+      startGesture(); // second finger: pinch / twist the selected shape
+      return;
+    }
+    if (pointers.current.size > 2) return;
+    const t = e.target.dataset || {};
+    const key = t.key || null;
+    const shape = key ? shapesRef.current.find((s) => keyOf(s) === key) : null;
+    const at = toPhoto(e.clientX, e.clientY);
+    drag.current = {
+      role: shape ? t.role : "empty",
+      key,
+      pointerId: e.pointerId,
+      start: at,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      moved: false,
+      orig: shape?.points,
+      index: t.index != null ? Number(t.index) : null,
+      part: t.part != null ? Number(t.part) : null,
+      edge: t.edge != null ? Number(t.edge) : null,
+    };
+    if (shape) {
+      setSelected(key);
+      if (t.role === "resize" || t.role === "rotate") {
+        const centre = shapeCentre(shape.points);
+        Object.assign(drag.current, { centre, from: polar(centre, at) });
+      }
+    }
+  }
+
+  function onPointerMove(e) {
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, [e.clientX, e.clientY]);
+    const g = gesture.current;
+    if (g) {
+      const [a, b] = [...pointers.current.values()];
+      if (!a || !b) return;
+      const v = polar(toPhoto(...a), toPhoto(...b));
+      const points = transformPoints(g.orig, v.dist / g.dist, snapAngle(v.deg - g.deg), aspect);
+      if (points) setShapePoints(g.key, points);
+      return;
+    }
+    const d = drag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    if (!d.moved && Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY) < TAP_SLOP_PX) return;
+    d.moved = true;
+    if (d.role === "empty") return;
+    const at = toPhoto(e.clientX, e.clientY);
+    if (d.role === "corner") {
+      setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveCorner(s, d.index, at[0], at[1]) : s)));
+    } else if (d.role === "resize") {
+      const now = polar(d.centre, at);
+      const points = transformPoints(d.orig, now.dist / Math.max(d.from.dist, 1e-6), 0, aspect, true);
+      if (points) setShapePoints(d.key, points);
+    } else if (d.role === "rotate") {
+      const now = polar(d.centre, at);
+      const points = transformPoints(d.orig, 1, snapAngle(now.deg - d.from.deg), aspect);
+      if (points) setShapePoints(d.key, points); // a turn that won't fit stops at the last one that did
+    } else {
+      // "move" or a drag that began on an edge: the whole shape follows
+      setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveShape(s, d.orig, at[0] - d.start[0], at[1] - d.start[1]) : s)));
+    }
+  }
+
+  function onPointerUp(e) {
+    pointers.current.delete(e.pointerId);
+    if (gesture.current) {
+      if (pointers.current.size < 2) {
+        gesture.current = null;
+        save(shapesRef.current);
+      }
+      return;
+    }
+    const d = drag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    drag.current = null;
+    if (e.type === "pointercancel") return;
+    if (d.moved && d.role !== "empty") save(shapesRef.current);
+    else if (!d.moved && d.role === "empty") setSelected(null); // tap on the photo: deselect
+    else if (!d.moved && d.role === "edge") setBackrest(d.key, d.part, d.edge);
+  }
+
+  function setBackrest(key, part, edge) {
+    update(
+      shapesRef.current.map((s) => {
+        if (keyOf(s) !== key || !backrestAllowed(s, part, edge)) return s;
+        const backrest = [...s.backrest];
+        backrest[part] = edge;
+        return { ...s, backrest };
+      })
+    );
+  }
+
+  function addShape(piece, index) {
+    const shape = newShape(piece, index);
+    update([...shapes.filter((s) => keyOf(s) !== piece.key), shape]);
+    setSelected(piece.key);
+  }
+
+  function removeShape(key) {
+    update(shapes.filter((s) => keyOf(s) !== key));
+    if (selected === key) setSelected(null);
+  }
+
+  function changeShape(key, fn) {
+    update(shapes.map((s) => (keyOf(s) === key ? fn(s) : s)));
+  }
+
+  async function useFloorPlan() {
     try {
-      const data = await api.put(`/api/rooms/${room.id}/floor`, { json: { points: quad } });
-      setAttempt((prev) => ({ ...prev, room: { ...prev.room, ...data.room } }));
-      setStage("plan");
+      await api.put(`/api/attempts/${id}/placement-mode`, { json: { mode: "plan" } });
+      navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`);
     } catch (err) {
       toast(err.message);
-    } finally {
-      setSavingFloor(false);
     }
   }
 
   if (!attempt && !error) return <div className="screen"><Loading /></div>;
   if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
 
+  const pieces = piecesOf(attempt.items);
+  const byKey = Object.fromEntries(shapes.map((s) => [keyOf(s), s]));
+  const curved = pieces.filter((p) => !p.kind);
+  const missing = pieces.filter((p) => p.kind && !byKey[p.key]);
+  const ready = pieces.length > 0 && curved.length === 0 && missing.length === 0;
   const W = size?.w || 1;
   const H = size?.h || 1;
-  const curved = pieces.filter((p) => p.shape === "curved");
-  const unplaced = blocks.filter((b) => !b.placement && b.shape !== "curved");
-  const floorSaved = Boolean(room.floor_quad);
-  const ready = floorSaved && curved.length === 0 && unplaced.length === 0 && pieces.length > 0;
-  const scale = W / 900; // stroke sizes in the preview, relative to a ~900 px wide view
-
-  const photoImg = (
-    <img
-      src={room.photo_url}
-      alt=""
-      draggable={false}
-      onLoad={(e) => setSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
-    />
-  );
-
-  const header = (
-    <>
-      <TopBar
-        backTo={adjust.backTo || `/attempt/${id}/placement`}
-        crumbs={[
-          { label: room.customer_name, to: `/customer/${room.customer_id}` },
-          { label: room.room_type, to: `/room/${room.id}` },
-          { label: "Attempt" },
-        ]}
-      />
-      <div className="eyebrow">Step 3 of 4</div>
-      <StepBar current={3} attemptId={attempt.id} roomId={room.id} query={adjust.query} placementMode="shapes" />
-      <h1 style={{ marginBottom: 4 }}>
-        Draw on photo <span className="beta-tag">Beta</span>
-      </h1>
-    </>
-  );
-
-  // ---------------------------------------------------------------- A: floor
-  if (stage === "floor") {
-    const padY = size ? (FLOOR_PAD * W) / H : FLOOR_PAD;
-    const vb = `${-FLOOR_PAD * W} ${-padY * H} ${W * (1 + 2 * FLOOR_PAD)} ${H * (1 + 2 * padY)}`;
-    const h = floorTransform(quad);
-    const at = (u, v) => {
-      const [x, y] = applyH(h, u, v);
-      return [x * W, y * H];
-    };
-    const viewScale = size && floorSvg.current ? (W * (1 + 2 * FLOOR_PAD)) / floorSvg.current.getBoundingClientRect().width : 1;
-    const grid = [];
-    if (h) {
-      for (let i = 1; i < GRID_LINES; i++) {
-        grid.push([at(i / GRID_LINES, 0), at(i / GRID_LINES, 1)]);
-        grid.push([at(0, i / GRID_LINES), at(1, i / GRID_LINES)]);
-      }
-    }
-    const outline = [quad[0], quad[1], quad[3], quad[2]].map(([x, y]) => `${x * W},${y * H}`).join(" ");
-    return (
-      <div className="screen has-step-footer">
-        {header}
-        <div className="hint-line" style={{ marginBottom: 12 }}>Drag the 4 dots to the corners of the floor.</div>
-        <div className="floor-stage" style={{ padding: `${(padY / (1 + 2 * padY)) * 100}% ${(FLOOR_PAD / (1 + 2 * FLOOR_PAD)) * 100}%` }}>
-          <div className="floor-photo">{photoImg}</div>
-          {size ? (
-            <svg
-              ref={floorSvg}
-              className="floor-svg"
-              viewBox={vb}
-              preserveAspectRatio="none"
-              onPointerMove={(e) => {
-                const d = dotDrag.current;
-                if (!d || d.pointerId !== e.pointerId) return;
-                const [x, y] = toPhoto(e);
-                const clamp = (v) => Math.round(Math.min(FLOOR_POINT_MAX, Math.max(FLOOR_POINT_MIN, v)) * 100000) / 100000;
-                setQuad((prev) => prev.map((p, i) => (i === d.index ? [clamp(x), clamp(y)] : p)));
-              }}
-              onPointerUp={() => {
-                dotDrag.current = null;
-              }}
-              onPointerCancel={() => {
-                dotDrag.current = null;
-              }}
-            >
-              {grid.map(([a, b], i) => (
-                <line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="#fff" strokeOpacity={0.45} strokeWidth={1.2 * viewScale} pointerEvents="none" />
-              ))}
-              <polygon points={outline} fill="rgba(255,255,255,0.08)" stroke="#fff" strokeWidth={1.6 * viewScale} pointerEvents="none" />
-              {quad.map(([x, y], index) => (
-                <g key={index}>
-                  <circle
-                    cx={x * W} cy={y * H} r={DOT_R * viewScale}
-                    className="floor-dot"
-                    strokeWidth={3 * viewScale}
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      e.currentTarget.ownerSVGElement.setPointerCapture(e.pointerId);
-                      dotDrag.current = { index, pointerId: e.pointerId };
-                    }}
-                  />
-                  <text x={x * W} y={y * H} fontSize={15 * viewScale} className="floor-dot-num" textAnchor="middle" dominantBaseline="central" pointerEvents="none">
-                    {index + 1}
-                  </text>
-                </g>
-              ))}
-            </svg>
-          ) : null}
-        </div>
-        <div className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
-          1 and 2: where the back wall meets the floor, at its left and right ends. 3 and 4: where the side walls meet the floor near
-          the bottom of the photo (they may sit just outside it).
-        </div>
-        <StepFooter
-          backTo={floorSaved ? null : adjust.backTo || `/attempt/${id}/placement`}
-          onBack={floorSaved ? () => { setQuad(room.floor_quad); setStage("plan"); } : undefined}
-          status="Saved on this room photo for later attempts"
-          primaryLabel="Done"
-          primaryBusyLabel="Saving…"
-          busy={savingFloor}
-          onPrimary={saveFloor}
-        />
-      </div>
-    );
-  }
-
-  // ---------------------------------------------------------------- B: plan
+  const px = ([x, y]) => [x * W, y * H];
   const status = curved.length
     ? "Curved sofas: please use Floor plan"
-    : unplaced.length
-      ? `${unplaced.length} ${unplaced.length === 1 ? "piece" : "pieces"} still to place`
+    : missing.length
+      ? `${missing.length} ${missing.length === 1 ? "piece" : "pieces"} still to draw`
       : saveState === "saving"
         ? "Saving…"
         : saveState === "error"
           ? "Not saved — check the connection"
-          : "All pieces placed";
+          : "All pieces drawn";
+  const selectedShape = selected ? byKey[selected] : null;
+
+  /** Resize (bottom-right) and rotate (above) handles, outside the shape's
+   * bounding box but always kept on the photo so they can be reached. */
+  function handlesFor(s) {
+    const pts = s.points.map(px);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const keep = (v, r, limit) => Math.min(Math.max(v, r), limit - r);
+    const rs = RESIZE_SIZE * scale;
+    const rr = ROTATE_R * scale;
+    const resize = [keep(maxX + HANDLE_GAP * scale + rs / 2, rs / 2, W), keep(maxY + HANDLE_GAP * scale + rs / 2, rs / 2, H)];
+    const midX = (minX + maxX) / 2;
+    const rotate = [keep(midX, rr, W), keep(minY - (ROTATE_STICK + HANDLE_GAP) * scale - rr, rr, H)];
+    return { resize, rotate, stickFrom: [midX, minY], rs, rr };
+  }
 
   return (
     <div className="screen has-step-footer">
-      {header}
+      <TopBar
+        backTo={adjust.backTo || `/attempt/${id}/placement`}
+        crumbs={[
+          { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
+          { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
+          { label: "Attempt" },
+        ]}
+      />
+      <div className="eyebrow">Step 3 of 4</div>
+      <StepBar current={3} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} placementMode="shapes" />
+      <h1 style={{ marginBottom: 4 }}>
+        Draw on photo <span className="beta-tag">Beta</span>
+      </h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
-        {pendingKey ? "Tap the plan to drop this piece" : "Tap a piece below, then tap the plan to place it. The photo shows the result live."}
+        Add each piece, then drag it onto the floor. Square handle: resize. Round handle: turn (or pinch and twist with two
+        fingers). Tap an edge to put the backrest (black line) there.
       </div>
-      <div className="shapes-layout">
-        <div className="shapes-plan">
-          {!fullScreen ? <PlacementCard {...cardProps} fullScreen={false} onToggleFullScreen={() => setFullScreen(true)} /> : null}
-          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-            The plan is the floor you marked: {feet.wFt} ft wide × {feet.hFt} ft deep. Top = back wall, bottom = camera side.
-          </div>
+
+      <div className="draw-layout">
+        <div className="draw-photo">
+          <img
+            src={attempt.room.photo_url}
+            alt=""
+            draggable={false}
+            onLoad={(e) => setSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+          />
+          {size ? (
+            <svg
+              ref={svgRef}
+              className="draw-svg"
+              viewBox={`0 0 ${W} ${H}`}
+              preserveAspectRatio="none"
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
+            >
+              {shapes.map((s) => {
+                const key = keyOf(s);
+                const hex = COLOUR_HEX[s.colour];
+                const parts = shapeParts(s.kind, s.points);
+                const isSelected = key === selected;
+                return (
+                  <g key={key} className={"draw-shape" + (isSelected ? " selected" : "")}>
+                    {parts.map((corners, part) => (
+                      <polygon
+                        key={part}
+                        data-role="move"
+                        data-key={key}
+                        points={corners.map((p) => px(p).join(",")).join(" ")}
+                        fill={hex}
+                        fillOpacity={0.45}
+                        stroke={hex}
+                        strokeWidth={(isSelected ? 3 : 1.5) * scale}
+                        strokeLinejoin="round"
+                      />
+                    ))}
+                    {parts.map((corners, part) => {
+                      const edge = s.backrest[part];
+                      if (edge == null) return null;
+                      const [a, b] = [px(corners[edge]), px(corners[(edge + 1) % 4])];
+                      return (
+                        <line key={`b${part}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="#000" strokeWidth={9 * scale} strokeLinecap="round" pointerEvents="none" />
+                      );
+                    })}
+                    {s.kind === "L"
+                      ? (() => {
+                          const [cx, cy] = px(centroid(parts[s.lounge]));
+                          return (
+                            <text x={cx} y={cy} className="draw-label" fontSize={13 * scale} textAnchor="middle" dominantBaseline="central" pointerEvents="none">
+                              LOUNGE
+                            </text>
+                          );
+                        })()
+                      : null}
+                    {isSelected
+                      ? parts.flatMap((corners, part) =>
+                          [0, 1, 2, 3]
+                            .filter((edge) => backrestAllowed(s, part, edge))
+                            .map((edge) => {
+                              const [a, b] = [px(corners[edge]), px(corners[(edge + 1) % 4])];
+                              return (
+                                <line
+                                  key={`e${part}-${edge}`}
+                                  data-role="edge"
+                                  data-key={key}
+                                  data-part={part}
+                                  data-edge={edge}
+                                  x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]}
+                                  className="draw-edge-hit"
+                                  strokeWidth={22 * scale}
+                                />
+                              );
+                            })
+                        )
+                      : null}
+                  </g>
+                );
+              })}
+
+              {/* the selected shape's handles go on top of every shape */}
+              {selectedShape
+                ? (() => {
+                    const key = selected;
+                    const hex = COLOUR_HEX[selectedShape.colour];
+                    const h = handlesFor(selectedShape);
+                    return (
+                      <g className="draw-handles">
+                        <line
+                          x1={h.stickFrom[0]} y1={h.stickFrom[1]} x2={h.rotate[0]} y2={h.rotate[1] + h.rr}
+                          stroke="#fff" strokeWidth={3 * scale} strokeDasharray={`${4 * scale} ${3 * scale}`} pointerEvents="none"
+                        />
+                        <g className="draw-rotate">
+                          <circle data-role="rotate" data-key={key} cx={h.rotate[0]} cy={h.rotate[1]} r={h.rr} fill="#fff" stroke={hex} strokeWidth={3 * scale} />
+                          <text x={h.rotate[0]} y={h.rotate[1]} fontSize={20 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                            ↻
+                          </text>
+                        </g>
+                        <g className="draw-resize">
+                          <rect
+                            data-role="resize" data-key={key}
+                            x={h.resize[0] - h.rs / 2} y={h.resize[1] - h.rs / 2} width={h.rs} height={h.rs} rx={5 * scale}
+                            fill="#fff" stroke={hex} strokeWidth={3 * scale}
+                          />
+                          <text x={h.resize[0]} y={h.resize[1]} fontSize={19 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                            ⤡
+                          </text>
+                        </g>
+                        {selectedShape.points.map((p, index) => {
+                          const [cx, cy] = px(p);
+                          return (
+                            <circle
+                              key={`c${index}`}
+                              data-role="corner" data-key={key} data-index={index}
+                              cx={cx} cy={cy} r={CORNER_R * scale}
+                              className="draw-handle"
+                              stroke={hex}
+                              strokeWidth={2.5 * scale}
+                            />
+                          );
+                        })}
+                      </g>
+                    );
+                  })()
+                : null}
+            </svg>
+          ) : null}
         </div>
 
-        <div className="shapes-preview">
-          <div className="section-label" style={{ marginTop: 0 }}>Live preview</div>
-          <div className="draw-photo">
-            {photoImg}
-            {size ? (
-              <svg className="draw-svg preview-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-                {preview.boxes.map(({ piece, parts }) => {
-                  const hex = piece.colour.hex;
-                  const line = darker(hex);
-                  return (
-                    <g key={piece.key}>
-                      <g opacity={SIDE_OPACITY}>
-                        {parts.flatMap((part, pi) =>
-                          [0, 1, 2, 3].map((i) => {
-                            const j = (i + 1) % 4;
-                            const pts = [part.bottom[i], part.bottom[j], part.top[j], part.top[i]].map((p) => p.join(",")).join(" ");
-                            return <polygon key={`s${pi}-${i}`} points={pts} fill={hex} />;
-                          })
-                        )}
-                      </g>
-                      <g opacity={TOP_OPACITY}>
-                        {parts.map((part, pi) => (
-                          <polygon key={`t${pi}`} points={part.top.map((p) => p.join(",")).join(" ")} fill={hex} />
-                        ))}
-                      </g>
-                      {parts.map((part, pi) => (
-                        <g key={`o${pi}`} fill="none" stroke={line} strokeWidth={OUTLINE_PX * scale} strokeLinejoin="round">
-                          <polygon points={part.top.map((p) => p.join(",")).join(" ")} />
-                          <polygon points={part.bottom.map((p) => p.join(",")).join(" ")} />
-                          {[0, 1, 2, 3].map((i) => (
-                            <line key={i} x1={part.bottom[i][0]} y1={part.bottom[i][1]} x2={part.top[i][0]} y2={part.top[i][1]} />
-                          ))}
-                        </g>
-                      ))}
-                      {parts.map((part, pi) =>
-                        part.back == null ? null : (
-                          <line
-                            key={`b${pi}`}
-                            x1={part.top[part.back][0]} y1={part.top[part.back][1]}
-                            x2={part.top[(part.back + 1) % 4][0]} y2={part.top[(part.back + 1) % 4][1]}
-                            stroke="#000" strokeWidth={BACK_LINE_PX * scale} strokeLinecap="round"
-                          />
-                        )
-                      )}
-                    </g>
-                  );
-                })}
-                {preview.boxes.map(({ piece, parts }) => {
-                  const tops = parts.flatMap((p) => p.top);
-                  const cx = tops.reduce((s, p) => s + p[0], 0) / tops.length;
-                  const top = Math.min(...tops.map((p) => p[1]));
-                  const lounge = parts.find((p) => p.lounge);
-                  const text = `${piece.number} · ${piece.typeLabel}`;
-                  return (
-                    <g key={`l${piece.key}`}>
-                      <GuideTag x={cx} y={top - 26 * scale} text={text} size={20 * scale} />
-                      {lounge ? (
-                        <GuideTag
-                          x={lounge.top.reduce((s, p) => s + p[0], 0) / 4}
-                          y={lounge.top.reduce((s, p) => s + p[1], 0) / 4}
-                          text="LOUNGE"
-                          size={14 * scale}
-                        />
-                      ) : null}
-                    </g>
-                  );
-                })}
-              </svg>
-            ) : null}
-          </div>
-          <button type="button" className="link-btn" style={{ marginTop: 8 }} onClick={() => setStage("floor")}>
-            Adjust floor corners
-          </button>
+        <div className="draw-side">
+          {selectedShape ? (
+            <div className="draw-selected">
+              <div className="draw-selected-title">
+                <span className="draw-swatch" style={{ background: COLOUR_HEX[selectedShape.colour] }} />
+                {pieces.find((p) => p.key === selected)?.name}
+              </div>
+              <div className="draw-actions">
+                {selectedShape.kind === "L" ? (
+                  <button type="button" className="btn btn-ghost btn-small" onClick={() => changeShape(selected, swapLounge)}>
+                    The other part is the lounge
+                  </button>
+                ) : null}
+                {selectedShape.kind !== "rect" ? (
+                  <button type="button" className="btn btn-ghost btn-small" onClick={() => changeShape(selected, flipShape)}>
+                    Flip left ↔ right
+                  </button>
+                ) : null}
+                <button type="button" className="btn btn-small btn-danger-ghost" onClick={() => removeShape(selected)}>
+                  Delete shape
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="section-label">Pieces</div>
           <div className="draw-pieces">
-            {pieces.map((p) => {
-              const b = blockOf(p.key);
-              const side = preview.loungeSide[p.number];
-              return (
-                <button
-                  key={p.key}
-                  type="button"
-                  className={"draw-piece" + (p.key === selectedKey ? " selected" : "")}
-                  onClick={() => setSelectedKey(p.key)}
-                  disabled={p.shape === "curved"}
-                >
-                  {p.photoUrl ? <img src={p.photoUrl} alt="" /> : <span className="draw-piece-img" />}
-                  <span className="draw-swatch" style={{ background: p.colour.hex }} title={p.colour.name} />
-                  <span className="draw-piece-name">
-                    {p.number} · {p.typeLabel}
-                    {p.description ? <span className="draw-piece-desc">{p.description}</span> : null}
-                    {p.shape === "curved" ? <span className="draw-piece-note">Curved sofas: please use Floor plan</span> : null}
-                    {side ? <span className="draw-piece-desc">Lounge on the {side} in the picture</span> : null}
-                  </span>
-                  <span className={"piece-row-state" + (b?.placement ? " placed" : "")}>
-                    {p.shape === "curved" ? "" : b?.placement ? "Placed ✓" : "Tap the plan"}
-                  </span>
-                </button>
-              );
-            })}
+            {pieces.map((p, index) => (
+              <div key={p.key} className={"draw-piece" + (p.key === selected ? " selected" : "")}>
+                {p.photo_url ? <img src={p.photo_url} alt="" /> : <span className="draw-piece-img" />}
+                <span className="draw-swatch" style={{ background: COLOUR_HEX[p.colour] }} title={p.colour} />
+                <span className="draw-piece-name">
+                  {p.name}
+                  {!p.kind ? <span className="draw-piece-note">Curved sofas: please use Floor plan</span> : null}
+                </span>
+                {!p.kind ? null : byKey[p.key] ? (
+                  <button type="button" className="btn btn-ghost btn-small" onClick={() => setSelected(p.key)}>
+                    Edit
+                  </button>
+                ) : (
+                  <button type="button" className="btn btn-primary btn-small" onClick={() => addShape(p, index)}>
+                    Add
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
           {curved.length ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              style={{ marginTop: 12 }}
-              onClick={async () => {
-                try {
-                  await api.put(`/api/attempts/${id}/placement-mode`, { json: { mode: "plan" } });
-                  navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`);
-                } catch (err) {
-                  toast(err.message);
-                }
-              }}
-            >
+            <button type="button" className="btn btn-ghost" style={{ marginTop: 12 }} onClick={useFloorPlan}>
               Use the floor plan instead
             </button>
           ) : null}
         </div>
       </div>
-
-      {fullScreen ? (
-        <div className="placement-fullscreen">
-          <PlacementCard {...cardProps} fullScreen onToggleFullScreen={() => setFullScreen(false)} />
-        </div>
-      ) : null}
 
       <StepFooter
         backTo={adjust.backTo || `/attempt/${id}/placement`}
@@ -491,19 +513,5 @@ export default function DrawOnPhoto() {
         onPrimary={() => navigate(`/attempt/${id}/finish${adjust.query ? `?${adjust.query}` : ""}`)}
       />
     </div>
-  );
-}
-
-/** A white rounded label, as on the guide image. */
-function GuideTag({ x, y, text, size }) {
-  const w = text.length * size * 0.62 + size * 0.9;
-  const h = size * 1.55;
-  return (
-    <g pointerEvents="none">
-      <rect x={x - w / 2} y={y - h / 2} width={w} height={h} rx={h / 3} fill="#fff" fillOpacity={0.92} stroke="rgba(0,0,0,0.35)" strokeWidth={size * 0.06} />
-      <text x={x} y={y} fontSize={size} textAnchor="middle" dominantBaseline="central" fill="#111" fontWeight="700" fontFamily="var(--sans)">
-        {text}
-      </text>
-    </g>
   );
 }

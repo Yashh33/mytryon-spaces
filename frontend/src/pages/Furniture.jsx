@@ -100,59 +100,6 @@ function TypeIcon({ kind, selected }) {
   );
 }
 
-/** The piece's short description ("white boucle fabric, rounded arms, low
- * base"), written by a vision call when the piece is added and used by Draw
- * on photo. Tap to correct it. */
-function ItemDescription({ attemptId, item, onSaved }) {
-  const toast = useToast();
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(item.short_description || "");
-  const [saving, setSaving] = useState(false);
-
-  async function save() {
-    setSaving(true);
-    try {
-      const data = await api.put(`/api/attempts/${attemptId}/items/${item.id}/description`, { json: { short_description: value } });
-      onSaved(data.attempt);
-      setEditing(false);
-    } catch (err) {
-      toast(err.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!editing) {
-    return (
-      <button
-        type="button"
-        className="item-desc"
-        onClick={() => {
-          setValue(item.short_description || "");
-          setEditing(true);
-        }}
-      >
-        {item.short_description || "Describing the photo…"} <span className="item-desc-edit">Edit</span>
-      </button>
-    );
-  }
-  return (
-    <div className="item-desc-form">
-      <input
-        type="text"
-        value={value}
-        maxLength={120}
-        placeholder="e.g. white boucle fabric, rounded arms, low base"
-        onChange={(e) => setValue(e.target.value)}
-        autoFocus
-      />
-      <button type="button" className="btn btn-primary btn-small" disabled={saving} onClick={save}>
-        {saving ? "…" : "Save"}
-      </button>
-    </div>
-  );
-}
-
 function QtyStepper({ count, onChange, canAdd, label }) {
   return (
     <div className="qty-stepper">
@@ -323,7 +270,6 @@ export default function Furniture() {
               {it.category} &middot; {it.type}
             </div>
             <div className="width">{it.width_ft}ft wide</div>
-            <ItemDescription attemptId={attempt.id} item={it} onSaved={setAttempt} />
           </div>
           <button type="button" className="del" onClick={() => handleDelete(it.id)}>
             &times;

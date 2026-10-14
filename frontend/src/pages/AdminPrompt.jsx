@@ -175,15 +175,12 @@ export default function AdminPrompt() {
 
       <div className="section-label" style={{ marginTop: 26 }}>Draw on photo (Beta) – generation prompt</div>
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
-        Used instead of the generation prompt above when the salesman placed the furniture with Draw on photo. Image 1 is then
-        the room photo with numbered see-through boxes on the floor; the room reader, the floor plan and the placement writer
-        are not used.
+        Used instead of the generation prompt above when the salesman drew the furniture on the photo. Image 1 is then the
+        room photo with the coloured shapes on it; the floor plan and the placement writer are not used.
       </div>
       <textarea className="prompt-textarea" spellCheck="false" value={shapesPrompt} onChange={(e) => setShapesPrompt(e.target.value)} />
       <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-        Must contain <span className="mono">{"{{PIECE_BLOCKS}}"}</span> (one block per piece). Optional:{" "}
-        <span className="mono">{"{{PIECE_FINISH}}"}</span>, <span className="mono">{"{{ROOM_TREATMENT}}"}</span>,{" "}
-        <span className="mono">{"{{LIGHTING}}"}</span>.{" "}
+        Must contain <span className="mono">{"{{SHAPES}}"}</span> (one paragraph per drawn shape).{" "}
         <button type="button" className="link-btn" onClick={() => setShapesPrompt(data.default_shapes_prompt)}>
           Put back the built-in draw-on-photo prompt
         </button>

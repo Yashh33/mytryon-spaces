@@ -88,8 +88,8 @@ export default function DebugGeneration() {
         <div className="muted" style={{ fontSize: 13 }}>Not used for a fix.</div>
       ) : data.placement_mode === "shapes" && !writer ? (
         <div className="muted" style={{ fontSize: 13 }}>
-          Draw on photo: the floor plan and the placement writer were not used. Image 1 above (role &quot;guide&quot;) is the room
-          photo with the guide drawn on it, exactly as sent.
+          Draw on photo: the furniture was drawn on the photo, so the floor plan and the placement writer were not used. Image 1
+          above (role &quot;guide&quot;) is the room photo with the shapes, exactly as sent.
         </div>
       ) : !writer ? (
         <div className="muted" style={{ fontSize: 13 }}>Not recorded for this render (made before the writer existed, or placement was skipped).</div>

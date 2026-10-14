@@ -30,7 +30,6 @@ export function PlacementCard({
   onToggleFullScreen,
   hideControls = false,
   onSvg = null,
-  planFeet = null,
 }) {
   const hasWallFeatures = Object.values(planFeatures(room.layout_json).walls).some((groups) => groups.length > 0);
   return (
@@ -60,7 +59,6 @@ export function PlacementCard({
         onMoveFeature={onMoveFeature}
         onTapObstruction={onTapObstruction}
         onSvg={onSvg}
-        planFeet={planFeet}
       />
       {hasWallFeatures ? (
         <div className="hint-line fp-feature-hint">Tap a door or window to remove it, or drag it along the wall to move it.</div>

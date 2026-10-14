@@ -3215,6 +3215,9 @@ GUIDE_LINE_PX = 12
 GUIDES_DIR = DATA_ROOT / "guides"  # the guide image sent for each shapes render, for the debug page
 SHAPES_PROMPT_KEY = "shapes_generation_prompt"
 SHAPES_TOKEN = "{{SHAPES}}"
+# the gap writer's section (see GAP WRITER); empty when it failed or timed out
+OPEN_FLOOR_TOKEN = "{{OPEN_FLOOR}}"
+OPEN_FLOOR_HEADING = "OPEN FLOOR AROUND EACH SOFA:"
 # the edge of each part of a two-part shape that is shared with the other part
 SHARED_EDGE = {0: 2, 1: 3}
 GUIDE_IMAGE_LINE = (
@@ -3242,6 +3245,7 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "sofa keeps its own material and colour from its own photograph, unless the FABRIC section gives it another.",
         "Shapes far from the camera look small. Keep each sofa exactly as small and as far away as its shape — never "
         "move the camera closer, never zoom in, never re-frame the photo to make a sofa bigger or more central.",
+        OPEN_FLOOR_TOKEN,
         "After placing the furniture, remove all coloured guide shapes, labels and black lines completely. No colour "
         "tint, outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
         _prompt_section("CAMERA —", "ROOM LAYOUT"),
@@ -3265,6 +3269,7 @@ SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "5959efbe198a487bc8b1c2c20284d93d51013f3b96f96d1c42c5541649b12aa1",  # before labels, one line per paragraph, no "Remove any people" line
     "31aabb1b08283b69bd41966a53c9285186d8e9c1d20d4fa3b196ff2823aee4db",  # before the final check line
     "939373a17e0de655b78a215041db88cf4f4d0980cfb821607bf8cf1cdcc29de6",  # before the size rule, with the focal point paragraph
+    "4c64965fad27c36bff7d05dd0b220f1696f3de221d7084fd466d00ef9362dd2f",  # before {{OPEN_FLOOR}} (the gap writer's section)
 }
 
 
@@ -3575,18 +3580,176 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
 
 
 def build_shapes_prompt(
-    template: str, attempt: Attempt, shapes: list[dict], room_padded: bool, feet: bool = False, aspect: float = 1.0
+    template: str,
+    attempt: Attempt,
+    shapes: list[dict],
+    room_padded: bool,
+    feet: bool = False,
+    aspect: float = 1.0,
+    open_floor: list[str] | None = None,
 ) -> str:
-    """The shapes pipeline's prompt: {{SHAPES}} filled here, everything else
-    (image list, fabric section, look, decor, lighting, the showroom's note)
-    exactly as the floor-plan pipeline fills it. `aspect` is the room photo's
-    width / height (the shapes' corners are fractions of it)."""
+    """The shapes pipeline's prompt: {{SHAPES}} and {{OPEN_FLOOR}} filled
+    here, everything else (image list, fabric section, look, decor, lighting,
+    the showroom's note) exactly as the floor-plan pipeline fills it.
+    `aspect` is the room photo's width / height (the shapes' corners are
+    fractions of it). `open_floor` is the gap writer's lines; without them
+    the section is left out."""
     filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect))
+    section = OPEN_FLOOR_HEADING + "\n" + "\n".join(open_floor) if open_floor else ""
+    if OPEN_FLOOR_TOKEN in filled:
+        filled = filled.replace(OPEN_FLOOR_TOKEN, section)
+        filled = re.sub(r"(\r?\n){3,}", "\n\n", filled)  # no empty paragraph where the section was left out
+    elif section:
+        # an edited prompt without the slot: right after the size rule, if it has one
+        match = re.search(r"Shapes far from the camera look small[^\n]*\n?", filled)
+        if match:
+            filled = filled[: match.end()].rstrip("\r\n") + "\n\n" + section + "\n\n" + filled[match.end() :].lstrip("\r\n")
     prompt = build_prompt(
         filled, attempt.room, attempt.items, attempt.room_treatment, attempt.lighting, True, "", attempt.note, feet, room_padded
     )
     # Image 1 is the guide image, not the bare room photo
     return prompt.replace("Image 1 is a room.", GUIDE_IMAGE_LINE, 1)
+
+
+# ---- GAP WRITER ---------------------------------------------------------------
+# Draw on photo only. Before the render, the guide image (exactly as the image
+# model gets it) goes to the vision model with the gap prompt; it writes one
+# line per labelled shape about the open floor around it, which goes into the
+# prompt as OPEN FLOOR AROUND EACH SOFA. It never blocks the render: on a
+# failure or after GAP_WRITER_TIMEOUT_S the section is left out. A result is
+# reused while the shapes (and the photo, prompt and model) are unchanged —
+# Generate again, or Adjust & try again without moving a shape. Logged in
+# generation_debug.placement_writer as {"gap_writer": {...}} (a Draw-on-photo
+# render has no placement writer), shown on the Debug page.
+
+GAP_WRITER_PROMPT_KEY = "gap_writer_prompt"
+GAP_WRITER_TIMEOUT_S = 60
+GAP_LINE_MAX_CHARS = 500
+DEFAULT_GAP_WRITER_PROMPT = """\
+This photo of a room has coloured shapes drawn on the floor, each with a white label like "1 · L-SHAPE" or "2 · 3-SEATER". Each shape shows exactly where a sofa will stand. The thick black line marks the sofa's back. A part marked LOUNGE is an open chaise.
+
+For each labelled shape, write 1–2 short sentences, in plain words, about the OPEN FLOOR around it — so an image editor keeps those gaps:
+- What each end of the shape is near, and whether there is open floor between that end and the nearest wall, corner, door, window or other shape. Say roughly how big the gap is in simple terms (for example "about half a seat wide", "about an arm's length", "a narrow gap", or "touches the wall").
+- Name only things you can clearly see in the photo (a wall, a corner, a doorway, a window, another shape). Never guess or invent a door or window.
+- Use LEFT / RIGHT as seen in the picture.
+- Do not describe the camera, the room style, or the sofa design. Do not repeat which end the lounge is on.
+
+Reply with only one line per shape, in label order, each line starting with the label exactly as written on the photo, for example:
+1 · L-SHAPE: Its left end stops about half a seat before the left corner of the back wall, with open floor between them; the doorway on the left wall stays fully clear. Its lounge tip stops a narrow gap short of the big window on the right."""
+
+
+def get_gap_writer_prompt(db: Session) -> str:
+    return get_setting(db, GAP_WRITER_PROMPT_KEY, DEFAULT_GAP_WRITER_PROMPT)
+
+
+def gap_writer_key(room: Room, shapes: list[dict], tags: list[str], padded: bool, prompt: str, model: str) -> str:
+    """What the gap writer's answer depends on: the photo, every shape as
+    drawn (by its label, not its item id, so an Adjust copy matches), the
+    padding, the prompt and the model."""
+    drawn = [
+        [tag, s["kind"], s["points"], s["backrest"], s["lounge"]] for tag, s in zip(tags, shapes)
+    ]
+    payload = json.dumps([room.photo_path, drawn, padded, prompt, model], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def parse_gap_lines(output: str, tags: list[str]) -> list[str]:
+    """One "TAG: text" line per shape the writer answered for, in label order.
+    Bullets, bold and a slightly different dot in the label are tolerated."""
+    lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+    found = []
+    for tag in tags:
+        tokens = re.findall(r"[A-Za-z0-9]+", tag)
+        pattern = re.compile(
+            r"^[\s\-\*•>#]*" + r"[^A-Za-z0-9]*".join(map(re.escape, tokens)) + r"[\s\*]*[:\-–—]\s*(.+)$", re.IGNORECASE
+        )
+        for line in lines:
+            match = pattern.match(line)
+            if match:
+                text = " ".join(match.group(1).replace("**", "").split())[:GAP_LINE_MAX_CHARS]
+                if text:
+                    found.append(f"{tag}: {text}")
+                break
+    return found
+
+
+def call_gap_writer(image: bytes, prompt: str, model: str) -> dict:
+    """One gap writer call, no retries (the render waits for it).
+    Synchronous — callers offload it to a thread."""
+    start = time.monotonic()
+    result = client.with_options(max_retries=0).chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(image).decode('ascii')}"}},
+                ],
+            }
+        ],
+        timeout=GAP_WRITER_TIMEOUT_S,
+    )
+    return {
+        "output": result.choices[0].message.content or "",
+        "usage": result.usage.model_dump() if result.usage else None,
+        "elapsed_s": round(time.monotonic() - start, 1),
+    }
+
+
+def find_reusable_gap_result(db: Session, room_id: int, key: str) -> tuple[int, dict] | None:
+    """The latest usable gap writer result with this key among the room's
+    renders (any attempt: an Adjust copy has the same shapes), as
+    (render id, logged result)."""
+    rows = (
+        db.query(GenerationDebug)
+        .join(Render, Render.id == GenerationDebug.render_id)
+        .join(Attempt, Attempt.id == Render.attempt_id)
+        .filter(Attempt.room_id == room_id, Attempt.placement_mode == "shapes")
+        .order_by(GenerationDebug.id.desc())
+        .limit(50)
+        .all()
+    )
+    for row in rows:
+        gap = row.placement_writer.get("gap_writer") if isinstance(row.placement_writer, dict) else None
+        if isinstance(gap, dict) and gap.get("key") == key and gap.get("lines"):
+            return row.render_id, gap
+    return None
+
+
+async def resolve_gap_writer(db: Session, attempt: Attempt, guide: bytes, shapes: list[dict], padded: bool) -> dict:
+    """The gap writer's result for this render, reused or fresh. Never raises:
+    a failure comes back with no lines and a reason."""
+    order = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
+    tags = [order[(s["item_id"], s["sub_index"])] for s in shapes]
+    prompt = get_gap_writer_prompt(db)
+    model = get_active_vision_model(db)
+    key = gap_writer_key(attempt.room, shapes, tags, padded, prompt, model)
+    info = {"key": key, "model": model, "lines": [], "output": None, "usage": None, "elapsed_s": None, "reason": None}
+    try:
+        reusable = find_reusable_gap_result(db, attempt.room_id, key)
+    except Exception:
+        logger.exception("gap writer reuse lookup failed attempt_id=%s", attempt.id)
+        reusable = None
+    if reusable:
+        render_id, gap = reusable
+        return {**info, **{k: gap.get(k) for k in ("lines", "output", "usage", "elapsed_s")}, "reused_from_render": render_id}
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(call_gap_writer, guide, prompt, model), GAP_WRITER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("gap writer timed out attempt_id=%s", attempt.id)
+        return {**info, "reason": f"timed out after {GAP_WRITER_TIMEOUT_S} s"}
+    except Exception as exc:
+        logger.exception("gap writer failed attempt_id=%s", attempt.id)
+        return {**info, "reason": f"failed: {exc.__class__.__name__}"}
+    lines = parse_gap_lines(result["output"], tags)
+    return {
+        **info,
+        **result,
+        "lines": lines,
+        "spent": result["usage"],  # this render's own call, logged with its spend
+        "reason": None if lines else "no line started with a shape's label",
+    }
 
 
 # ---- product descriptions ---------------------------------------------------
@@ -4003,7 +4166,9 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             # may wait for a writer still running; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
             writer_placement, writer_info = await resolve_writer_placement(attempt, db)
-        JOBS[job_id] = {"status": "processing", "stage": "generating"}
+        if not shapes:
+            JOBS[job_id] = {"status": "processing", "stage": "generating"}
+        gap_info = None  # Draw on photo: the gap writer's result
 
         image_files: list[tuple[str, bytes, str]] = []
         debug_images: list[dict] = []
@@ -4038,6 +4203,10 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 "original_height": guide.height,
                 "padded": photo_box is not None,
             }
+            # the gap writer reads this same guide image; the client shows "Preparing layout…"
+            JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
+            gap_info = await resolve_gap_writer(db, attempt, buffer.getvalue(), shapes, photo_box is not None)
+            JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
                 padded, photo_box = pad_to_output_ratio(room_image, size)
@@ -4059,7 +4228,13 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
 
         if shapes:
             prompt = build_shapes_prompt(
-                get_shapes_prompt(db), attempt, shapes, photo_box is not None, feet_in_prompt(db), guide.width / guide.height
+                get_shapes_prompt(db),
+                attempt,
+                shapes,
+                photo_box is not None,
+                feet_in_prompt(db),
+                guide.width / guide.height,
+                gap_info["lines"] if gap_info else None,
             )
         else:
             prompt = build_prompt(
@@ -4121,7 +4296,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 elapsed_s=result["elapsed_s"],
                 usage=result["usage"],
                 images=debug_images,
-                placement_writer=writer_info,
+                # a Draw-on-photo render has no placement writer: the column holds the gap writer's result
+                placement_writer={"gap_writer": gap_info} if gap_info else writer_info,
             )
         )
         usage = result["usage"]
@@ -4143,6 +4319,16 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 f"{writer_spend['completion_tokens']} out tokens, ${writer_cost:.6f}"
             )
             attempt.placement_writer = {**attempt.placement_writer, "unlogged_usage": None}
+        gap_spend = (gap_info or {}).get("spent")
+        if gap_spend:
+            # the gap writer's own call for this render, logged in this same row; no extra credits
+            gap_in, gap_out = gap_spend.get("prompt_tokens") or 0, gap_spend.get("completion_tokens") or 0
+            gap_cost = writer_usd_cost(gap_in, gap_out)
+            tokens_in = (tokens_in or 0) + gap_in
+            tokens_out = (tokens_out or 0) + gap_out
+            usd_cost = round((usd_cost or 0) + gap_cost, 6)
+            gap_note = f"includes gap writer: {gap_in} in / {gap_out} out tokens, ${gap_cost:.6f}"
+            note = f"{note}; {gap_note}" if note else gap_note
         db.add(
             CreditLedger(
                 shop_id=shop_id,
@@ -6624,6 +6810,7 @@ def api_studio_delete(
 
 PROMPT_PAGE_KEYS = [
     SHAPES_PROMPT_KEY,
+    GAP_WRITER_PROMPT_KEY,
     PROMPT_SETTING_KEY,
     VISION_PROMPT_SETTING_KEY,
     VISION_MODEL_SETTING_KEY,
@@ -6662,6 +6849,8 @@ def prompt_setting_response(db: Session) -> dict:
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
         "shapes_prompt": value(SHAPES_PROMPT_KEY, DEFAULT_SHAPES_GENERATION_PROMPT),
         "default_shapes_prompt": DEFAULT_SHAPES_GENERATION_PROMPT,
+        "gap_writer_prompt": value(GAP_WRITER_PROMPT_KEY, DEFAULT_GAP_WRITER_PROMPT),
+        "default_gap_writer_prompt": DEFAULT_GAP_WRITER_PROMPT,
         "studio_prompt": value(STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT),
         "default_studio_prompt": DEFAULT_STUDIO_PROMPT,
         "studio_edit_prompt": value(STUDIO_EDIT_PROMPT_KEY, DEFAULT_STUDIO_EDIT_PROMPT),
@@ -6752,6 +6941,7 @@ class PromptBody(BaseModel):
     placement_writer_enabled: bool | None = None
     placement_writer_prompt: str | None = None
     shapes_prompt: str | None = None
+    gap_writer_prompt: str | None = None
     studio_prompt: str | None = None
     studio_edit_prompt: str | None = None
     studio_look_prompt: str | None = None
@@ -6780,6 +6970,8 @@ def api_admin_save_prompt(
         return error_response(
             400, "shapes_prompt_missing_shapes", f"The draw-on-photo prompt must contain {SHAPES_TOKEN} where the shapes go."
         )
+    if body.gap_writer_prompt is not None and not body.gap_writer_prompt.strip():
+        return error_response(400, "empty_gap_writer_prompt", "The gap writer prompt can't be empty.")
     if body.placement_writer_prompt is not None and WRITER_PIECES_TOKEN not in body.placement_writer_prompt:
         return error_response(
             400,
@@ -6829,6 +7021,8 @@ def api_admin_save_prompt(
         set_setting(db, PLACEMENT_WRITER_PROMPT_KEY, body.placement_writer_prompt)
     if body.shapes_prompt is not None:
         set_setting(db, SHAPES_PROMPT_KEY, body.shapes_prompt)
+    if body.gap_writer_prompt is not None and body.gap_writer_prompt != get_gap_writer_prompt(db):
+        set_setting(db, GAP_WRITER_PROMPT_KEY, body.gap_writer_prompt)  # saved only once it differs from what is in use
     if body.studio_prompt is not None:
         set_setting(db, STUDIO_PROMPT_KEY, body.studio_prompt)
     if body.studio_edit_prompt is not None:
@@ -6873,6 +7067,11 @@ def api_debug_generation(
         return error_response(404, "no_debug_data", "No debug data was recorded for this render.")
     attempt = render.attempt
     room = attempt.room if attempt else None
+    # a Draw-on-photo render logs the gap writer in the placement writer's column
+    writer_log = debug_row.placement_writer
+    gap_writer = writer_log.get("gap_writer") if isinstance(writer_log, dict) else None
+    if gap_writer is not None:
+        writer_log = None
     return JSONResponse(
         content={
             "render_id": render.id,
@@ -6887,7 +7086,8 @@ def api_debug_generation(
             "elapsed_s": debug_row.elapsed_s,
             "usage": debug_row.usage,
             "images": debug_row.images,
-            "placement_writer": debug_row.placement_writer,
+            "placement_writer": writer_log,
+            "gap_writer": gap_writer,
             "fix": debug_row.fix,
             "placement_mode": attempt.placement_mode if attempt else None,
         }

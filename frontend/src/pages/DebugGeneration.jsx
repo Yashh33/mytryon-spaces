@@ -32,6 +32,7 @@ export default function DebugGeneration() {
   if (error) return <div className="screen"><TopBar backTo="/admin" crumbs={crumbs} /><ErrorBlock message={error} onRetry={load} /></div>;
 
   const writer = data.placement_writer;
+  const gap = data.gap_writer; // Draw on photo only
   const plan = data.images.find((img) => img.role === "plan");
   const sent = data.images.filter((img) => img.role !== "plan");
   const writerUsage = writer?.usage;
@@ -142,6 +143,29 @@ export default function DebugGeneration() {
 
       <div className="section-label" style={{ marginTop: 26 }}>Prompt sent to the image model</div>
       <pre className="debug-pre">{data.prompt}</pre>
+
+      {gap ? (
+        <>
+          <div className="section-label" style={{ marginTop: 26 }}>Gap writer</div>
+          <div className={"debug-verdict " + (gap.lines?.length ? "used" : "fallback")}>
+            {gap.lines?.length
+              ? "USED — its lines went into the prompt as OPEN FLOOR AROUND EACH SOFA"
+              : `LEFT OUT — ${gap.reason || "no lines"}; the render went ahead without the section`}
+          </div>
+          <div className="muted" style={{ fontSize: 12.5, margin: "6px 0 14px" }}>
+            {gap.reused_from_render
+              ? `Reused from render ${gap.reused_from_render} (same shapes) — no call was made for this render. Figures are from the original call: `
+              : ""}
+            {gap.model ? `${gap.model} · ` : ""}
+            {gap.elapsed_s != null ? `${gap.elapsed_s} s · ` : ""}
+            {gap.usage ? `${gap.usage.prompt_tokens} in / ${gap.usage.completion_tokens} out tokens` : "no token usage recorded"}
+          </div>
+          <div className="debug-label">Lines used</div>
+          <pre className="debug-pre">{gap.lines?.length ? gap.lines.join("\n") : "—"}</pre>
+          <div className="debug-label">Gap writer output (raw)</div>
+          <pre className="debug-pre">{gap.output || "—"}</pre>
+        </>
+      ) : null}
 
       <div className="section-label" style={{ marginTop: 26 }}>Image model usage</div>
       <pre className="debug-pre">{JSON.stringify(data.usage, null, 2)}</pre>

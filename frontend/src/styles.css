@@ -453,6 +453,7 @@ h2 { font-size: 19px; }
 .draw-rotate circle { cursor: grab; }
 .draw-resize rect { cursor: nwse-resize; }
 .draw-tilt rect { cursor: ns-resize; }
+.draw-bend circle { cursor: grab; }
 .item-desc { display: block; background: none; border: 0; padding: 2px 0 0; text-align: left; font-size: 12px; color: var(--muted); cursor: pointer; }
 .item-desc-edit { color: var(--orange-d); font-weight: 700; margin-left: 4px; }
 .item-desc-form { display: flex; gap: 6px; margin-top: 4px; }

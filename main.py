@@ -3196,8 +3196,9 @@ async def resolve_writer_placement(attempt: Attempt, db: Session) -> tuple[str |
 # attempt.shapes = {"version": 1, "shapes": [shape, ...]}, one shape per piece
 # (sub_index splits a 3+2 set), points as fractions of the photo's width and
 # height:
-#   {"item_id", "sub_index", "kind": "rect" | "L" | "corner", "colour": "BLUE",
-#    "points": [[x, y], ...],   # 4 for rect; 6 for L / corner (see shape_parts)
+#   {"item_id", "sub_index", "kind": "rect" | "L" | "corner" | "curved", "colour": "BLUE",
+#    "points": [[x, y], ...],   # 4 for rect; 6 for L / corner (see shape_parts);
+#                               # 5 for curved (see curved_outline)
 #    "backrest": [edge | null per part],   # edge i runs from corner i to i+1
 #    "lounge": part index | null}          # L only: the part with no backrest
 # Mirrors frontend/src/shapes.js.
@@ -3226,12 +3227,15 @@ OPEN_FLOOR_TOKEN = "{{OPEN_FLOOR}}"
 OPEN_FLOOR_HEADING = "OPEN FLOOR AROUND EACH SOFA:"
 SHAPES_FINAL_CHECK = (
     "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
-    "both parts and no chaise; every sofa has the stated number of seats; no shape, label or line remains."
+    "both parts and no chaise; every curved sofa follows its curve; every sofa has the stated number of seats; no "
+    "shape, label or line remains."
 )
 # Final check lines the Draw-on-photo prompt had before; in a saved prompt
 # that was edited (so not moved to the new default), startup replaces just
 # that line with SHAPES_FINAL_CHECK and leaves the rest as it is.
 PREVIOUS_SHAPES_FINAL_CHECKS = [
+    "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
+    "both parts and no chaise; every sofa has the stated number of seats; no shape, label or line remains.",
     "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated number "
     "of seats; no shape, label or line remains.",
 ]
@@ -3287,6 +3291,7 @@ SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "939373a17e0de655b78a215041db88cf4f4d0980cfb821607bf8cf1cdcc29de6",  # before the size rule, with the focal point paragraph
     "4c64965fad27c36bff7d05dd0b220f1696f3de221d7084fd466d00ef9362dd2f",  # before {{OPEN_FLOOR}} (the gap writer's section)
     "fd3e79f4c610ad58d5ac5e933a54534ae3399b75ef1489039b60f61e55577009",  # before the corner sofa in the final check
+    "c4fd70c38c1744fa5475425f58e4ca1a550e0afea27191f8502e1cdce048b32c",  # before curved sofas in the final check
 }
 
 
@@ -3317,14 +3322,44 @@ def shape_parts(kind: str, points: list) -> list[list[tuple[float, float]]]:
     pts = [tuple(p) for p in points]
     if kind == "rect":
         return [pts[:4]]
+    if kind == "curved":
+        return []  # a curved band has no 4-corner parts: see curved_outline
     p0, p1, p2, p3, p4, p5 = pts
     q = _line_intersection(p5, p4, p1, p2) or ((p1[0] + p2[0]) / 2, (p4[1] + p5[1]) / 2)
     return [[p0, p1, q, p5], [q, p2, p3, p4]]
 
 
-def piece_shape_kind(sub_shape: str) -> str | None:
-    """The shape a piece is drawn with; None for a curved sofa (not supported)."""
-    return {"L": "L", "corner": "corner", "curved": None}.get(sub_shape, "rect")
+CURVE_STEPS = 48  # points along each arc of a curved band on the guide image
+
+
+def curved_outline(points: list, steps: int = CURVE_STEPS) -> tuple[list, list]:
+    """A curved sofa's band, as (outline, back arc) point lists (fractions of
+    the photo). Its 5 points: p0, p1 the back arc's ends, p2, p3 the front
+    arc's ends (p2 beside p1, p3 beside p0), p4 the middle of the back arc.
+    Each arc is a quadratic curve through its ends and its middle; the front
+    arc's middle is p4 moved as far as the front ends sit from the back ends,
+    so the seat keeps its depth. Mirrors curvedOutline in frontend/src/shapes.js."""
+    p0, p1, p2, p3, p4 = [tuple(p) for p in points]
+
+    def arc(a, middle, b) -> list:
+        control = (2 * middle[0] - (a[0] + b[0]) / 2, 2 * middle[1] - (a[1] + b[1]) / 2)
+        return [
+            (
+                (1 - t) ** 2 * a[0] + 2 * (1 - t) * t * control[0] + t * t * b[0],
+                (1 - t) ** 2 * a[1] + 2 * (1 - t) * t * control[1] + t * t * b[1],
+            )
+            for t in (i / steps for i in range(steps + 1))
+        ]
+
+    shift = ((p2[0] + p3[0]) / 2 - (p0[0] + p1[0]) / 2, (p2[1] + p3[1]) / 2 - (p0[1] + p1[1]) / 2)
+    back = arc(p0, p4, p1)
+    front = arc(p2, (p4[0] + shift[0], p4[1] + shift[1]), p3)  # p2 -> p3, so the outline runs round
+    return back + front, back
+
+
+def piece_shape_kind(sub_shape: str) -> str:
+    """The shape a piece is drawn with."""
+    return {"L": "L", "corner": "corner", "curved": "curved"}.get(sub_shape, "rect")
 
 
 def attempt_pieces(attempt: Attempt) -> list[dict]:
@@ -3357,6 +3392,8 @@ def shape_type_label(item: Item, label: str, kind: str | None) -> str:
         return "L-SHAPE"
     if kind == "corner":
         return "CORNER SOFA"
+    if kind == "curved":
+        return "CURVED SOFA"
     seats = sofa_seat_count(item.category, label)
     if item.category == "Chair" or seats == 1:
         return "ARMCHAIR"
@@ -3383,24 +3420,24 @@ def validate_shapes(attempt: Attempt, data) -> tuple[list[dict] | None, str | No
             return None, "A shape belongs to a piece that is not in this attempt."
         seen.add(key)
         kind = shape.get("kind")
-        if piece["kind"] is None:
-            return None, "Curved sofas can't be drawn on the photo yet — please use the floor plan."
         if kind != piece["kind"]:
             return None, "A shape doesn't match its piece."
         if shape.get("colour") not in SHAPE_COLOURS and shape.get("colour") not in OLD_SHAPE_COLOURS:
             return None, "A shape has an unknown colour."
         raw = shape.get("points")
-        want = 4 if kind == "rect" else 6
+        want = {"rect": 4, "curved": 5}.get(kind, 6)
         if not isinstance(raw, list) or len(raw) != want:
             return None, "A shape has the wrong number of corners."
         try:
             points = [[round(min(1.0, max(0.0, float(x))), 5), round(min(1.0, max(0.0, float(y))), 5)] for x, y in raw]
         except (TypeError, ValueError):
             return None, "A shape's corners could not be read."
-        parts = 1 if kind == "rect" else 2
+        parts = 1 if kind in ("rect", "curved") else 2
         backrest = shape.get("backrest")
         if not isinstance(backrest, list) or len(backrest) != parts:
             return None, "A shape's backrest could not be read."
+        if kind == "curved" and backrest != [0]:
+            return None, "A curved sofa's backrest is its back arc."
         lounge = shape.get("lounge") if kind == "L" else None
         if kind == "L" and lounge not in (0, 1):
             return None, "Mark which part of the L-shape is the lounge."
@@ -3438,8 +3475,7 @@ def stored_shapes(attempt: Attempt) -> list[dict]:
 
 
 def missing_shape_pieces(attempt: Attempt) -> list[str]:
-    """Pieces that still need a shape before a shapes render can start
-    (curved sofas included: they can't be drawn yet)."""
+    """Pieces that still need a shape before a shapes render can start."""
     drawn = {(s["item_id"], s["sub_index"]) for s in stored_shapes(attempt)}
     return [p["label"] for p in attempt_pieces(attempt) if (p["item"].id, p["sub_index"]) not in drawn]
 
@@ -3463,8 +3499,14 @@ def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None =
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     fill = ImageDraw.Draw(overlay)
     lines = []
+    curves = []  # back arcs of curved sofas
     for shape in shapes:
         rgb = SHAPE_COLOURS[shape["colour"]]
+        if shape["kind"] == "curved":
+            outline, back = curved_outline(shape["points"])
+            fill.polygon([(x * width, y * height) for x, y in outline], fill=(*rgb, GUIDE_FILL_ALPHA))
+            curves.append([(x * width, y * height) for x, y in back])
+            continue
         for part, corners in enumerate(shape_parts(shape["kind"], shape["points"])):
             pixels = [(x * width, y * height) for x, y in corners]
             fill.polygon(pixels, fill=(*rgb, GUIDE_FILL_ALPHA))
@@ -3477,6 +3519,10 @@ def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None =
     for start, end in lines:
         draw.line([start, end], fill=(0, 0, 0, 255), width=GUIDE_LINE_PX)
         for x, y in (start, end):  # round ends
+            draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+    for back in curves:
+        draw.line(back, fill=(0, 0, 0, 255), width=GUIDE_LINE_PX, joint="curve")
+        for x, y in (back[0], back[-1]):  # round ends
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
 
     # labels: sizes relative to a 1536 px wide photo
@@ -3498,8 +3544,9 @@ def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None =
             label("LOUNGE", sum(x for x, _ in lounge) / 4 * width, sum(y for _, y in lounge) / 4 * height, small, 5 * unit)
         tag = (tags or {}).get((shape["item_id"], shape["sub_index"]))
         if tag:
-            xs = [x for x, _ in shape["points"]]
-            top = min(y for _, y in shape["points"]) * height
+            drawn = curved_outline(shape["points"])[0] if shape["kind"] == "curved" else shape["points"]
+            xs = [x for x, _ in drawn]
+            top = min(y for _, y in drawn) * height
             label(tag, (min(xs) + max(xs)) / 2 * width, top - 26 * unit, big, 8 * unit)
     return guide.convert("RGB")
 
@@ -3509,6 +3556,8 @@ def shape_piece_name(item: Item, label: str, kind: str) -> str:
         return "L-shaped sofa"
     if kind == "corner":
         return "corner sofa"
+    if kind == "curved":
+        return "curved sofa"
     seats = sofa_seat_count(item.category, label)
     if seats is not None:
         return sofa_seat_description(seats)
@@ -3595,6 +3644,27 @@ def corner_sofa_sentence(shape: dict, aspect: float) -> str:
     )
 
 
+def curved_sofa_sentence(shape: dict, aspect: float) -> str:
+    """A curved sofa: its back follows the curved line, and which way its two
+    ends point — from the middle of the back arc toward the middle of the two
+    short ends, in photo pixels. Always computed from the current points, so
+    bending and both Flips change it."""
+    p0, p1, p2, p3, p4 = shape["points"]
+    ends_x = (p0[0] + p1[0] + p2[0] + p3[0]) / 4
+    ends_y = (p0[1] + p1[1] + p2[1] + p3[1]) / 4
+    dx, dy = (ends_x - p4[0]) * aspect, ends_y - p4[1]
+    if abs(dx) > abs(dy):
+        toward = "toward the left" if dx < 0 else "toward the right"
+    else:
+        toward = "toward the camera" if dy > 0 else "toward the back"
+    return (
+        "Its back follows the curved thick black line, and the whole sofa — back, seat and front edge — curves the same "
+        f"way as the shape. Its two ends point {toward}. It is one continuous curved sofa: no corner, no straight "
+        "sections, no chaise. If the photograph shows a straight sofa, rebuild it as this curved sofa in the same "
+        "design: same cushions, arms, legs, material and colour."
+    )
+
+
 def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape."""
@@ -3614,9 +3684,13 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
         )
         text = (
             f"{piece['tag']} ({colour.lower()} shape): one {shape_piece_name(item, piece['label'], shape['kind'])} "
-            f"{source}. Build it exactly on the {colour.lower()} shape, covering the same floor area, at the same size, "
-            "with its back along the thick black line, flat against the wall."
+            f"{source}. Build it exactly on the {colour.lower()} shape, covering the same floor area, at the same size"
         )
+        if shape["kind"] == "curved":
+            text += ". " + curved_sofa_sentence(shape, aspect)
+            paragraphs.append(text)
+            continue
+        text += ", with its back along the thick black line, flat against the wall."
         if shape["kind"] == "L":
             text += " " + l_lounge_sentence(shape, aspect)
             text += (

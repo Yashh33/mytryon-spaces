@@ -22,11 +22,11 @@ export const COLOUR_HEX = Object.fromEntries(SHAPE_COLOURS.map((c) => [c.name, c
 // the edge of each part of a two-part shape that it shares with the other part
 export const SHARED_EDGE = { 0: 2, 1: 3 };
 
-/** The shape a piece is drawn with; null for a curved sofa (not supported). */
+/** The shape a piece is drawn with. */
 export function pieceKind(subShape) {
   if (subShape === "L") return "L";
   if (subShape === "corner") return "corner";
-  if (subShape === "curved") return null;
+  if (subShape === "curved") return "curved";
   return "rect";
 }
 
@@ -35,6 +35,7 @@ export function pieceKind(subShape) {
 export function typeLabel(category, label, kind) {
   if (kind === "L") return "L-SHAPE";
   if (kind === "corner") return "CORNER SOFA";
+  if (kind === "curved") return "CURVED SOFA";
   const m = category === "Sofa" ? /^(\d+)-seater$/.exec(label || "") : null;
   const seats = m ? Number(m[1]) : null;
   if (category === "Chair" || seats === 1) return "ARMCHAIR";
@@ -82,6 +83,7 @@ function intersect(a, b, c, d) {
  * line p1-p2 — so the two parts always stay joined along q-p4. */
 export function shapeParts(kind, points) {
   if (kind === "rect") return [points.slice(0, 4)];
+  if (kind === "curved") return []; // a curved band has no 4-corner parts: see curvedOutline
   const [p0, p1, p2, p3, p4, p5] = points;
   const q = intersect(p5, p4, p1, p2) || [(p1[0] + p2[0]) / 2, (p4[1] + p5[1]) / 2];
   return [
@@ -93,6 +95,7 @@ export function shapeParts(kind, points) {
 /** May this edge of this part carry the backrest? Never the lounge, never
  * the edge where two parts meet. */
 export function backrestAllowed(shape, part, edge) {
+  if (shape.kind === "curved") return false; // always its back arc
   if (shape.kind === "L" && shape.lounge === part) return false;
   if (shape.kind !== "rect" && SHARED_EDGE[part] === edge) return false;
   return true;
@@ -115,6 +118,11 @@ export function newShape(piece, index) {
   if (piece.kind === "rect") {
     return { ...base, points: [at(0.37, 0.58), at(0.63, 0.58), at(0.63, 0.72), at(0.37, 0.72)], backrest: [0], lounge: null };
   }
+  if (piece.kind === "curved") {
+    // back arc away from the camera, its ends coming forward toward the camera
+    const points = [at(0.3, 0.64), at(0.7, 0.64), at(0.64, 0.72), at(0.36, 0.72), at(0.5, 0.52)];
+    return { ...base, points, backrest: [0], lounge: null };
+  }
   const points = [at(0.3, 0.52), at(0.7, 0.52), at(0.7, 0.82), at(0.58, 0.82), at(0.58, 0.64), at(0.3, 0.64)];
   // part 1's own outside edge (q-p2) carries a corner sofa's second backrest
   return piece.kind === "L" ? { ...base, points, backrest: [0, null], lounge: 1 } : { ...base, points, backrest: [0, 0], lounge: null };
@@ -131,6 +139,84 @@ export function moveShape(shape, origPoints, dx, dy) {
 
 export function moveCorner(shape, index, x, y) {
   return { ...shape, points: shape.points.map((p, i) => (i === index ? [round5(clampIn(x)), round5(clampIn(y))] : p)) };
+}
+
+// ---- a curved sofa -------------------------------------------------------------
+// Five points: p0, p1 the back arc's ends, p2, p3 the front arc's ends (p2
+// beside p1, p3 beside p0), p4 the middle of the back arc. Each arc is a
+// quadratic curve through its ends and its middle; the front arc's middle is
+// p4 moved as far as the front ends sit from the back ends, so the seat keeps
+// its depth. Dots on p0..p3; the bend handle is p4. Mirrors curved_outline in
+// main.py, which draws the same band on the guide image.
+
+export const CURVE_STEPS = 48;
+const BEND_MIN = 0.02; // the flattest bend: the back arc's middle this share of its width off the straight line
+const BEND_MAX = 0.6; // the deepest bend
+
+function arc(a, middle, b, steps) {
+  const c = [2 * middle[0] - (a[0] + b[0]) / 2, 2 * middle[1] - (a[1] + b[1]) / 2];
+  const out = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const u = 1 - t;
+    out.push([u * u * a[0] + 2 * u * t * c[0] + t * t * b[0], u * u * a[1] + 2 * u * t * c[1] + t * t * b[1]]);
+  }
+  return out;
+}
+
+/** A curved sofa's band: { outline, back } point lists (fractions of the photo). */
+export function curvedOutline(points, steps = CURVE_STEPS) {
+  const [p0, p1, p2, p3, p4] = points;
+  const shift = [(p2[0] + p3[0]) / 2 - (p0[0] + p1[0]) / 2, (p2[1] + p3[1]) / 2 - (p0[1] + p1[1]) / 2];
+  const back = arc(p0, p4, p1, steps);
+  const front = arc(p2, [p4[0] + shift[0], p4[1] + shift[1]], p3, steps); // p2 -> p3, so the outline runs round
+  return { outline: [...back, ...front], back };
+}
+
+/** The back arc's chord in photo pixels: middle, unit normal, length, and how
+ * far p4 sits off the chord along that normal. */
+function bendOf(points, aspect) {
+  const P = points.map(([x, y]) => [x * aspect, y]);
+  const [p0, p1, , , p4] = P;
+  const mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+  const len = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  if (len < 1e-6) return null;
+  const normal = [-(p1[1] - p0[1]) / len, (p1[0] - p0[0]) / len];
+  const sag = (p4[0] - mid[0]) * normal[0] + (p4[1] - mid[1]) * normal[1];
+  return { mid, normal, len, sag };
+}
+
+function placeBend(points, sag, aspect) {
+  const b = bendOf(points, aspect);
+  if (!b) return null;
+  const p4 = [(b.mid[0] + b.normal[0] * sag) / aspect, b.mid[1] + b.normal[1] * sag];
+  const out = [...points.slice(0, 4), p4];
+  if (out.some(([x, y]) => outside(x) || outside(y))) return null;
+  return out.map(([x, y]) => [round5(clampIn(x)), round5(clampIn(y))]);
+}
+
+/** `origPoints` (a curved sofa) with its bend handle dragged to (x, y): the
+ * back arc's middle moves straight out from the chord, between almost
+ * straight and a deep curve, staying on the side it was on. Null when it
+ * would leave the photo. */
+export function bendCurve(origPoints, x, y, aspect) {
+  const b = bendOf(origPoints, aspect);
+  if (!b) return null;
+  const side = b.sag < 0 ? -1 : 1;
+  const want = ((x * aspect - b.mid[0]) * b.normal[0] + (y - b.mid[1]) * b.normal[1]) * side;
+  const sag = side * Math.min(BEND_MAX * b.len, Math.max(BEND_MIN * b.len, want));
+  return placeBend(origPoints, sag, aspect);
+}
+
+/** `origPoints` (a curved sofa) with corner `index` (0..3) moved to (x, y);
+ * the bend follows, keeping its depth for the back arc's new width. */
+export function moveCurvedCorner(origPoints, index, x, y, aspect) {
+  const before = bendOf(origPoints, aspect);
+  if (!before) return null;
+  const moved = origPoints.map((p, i) => (i === index ? [clampIn(x), clampIn(y)] : p));
+  const after = bendOf(moved, aspect);
+  if (!after) return null;
+  return placeBend(moved, (before.sag / before.len) * after.len, aspect);
 }
 
 // ---- an L-shape's (or corner sofa's) corners -------------------------------
@@ -151,6 +237,7 @@ export function isTwoPart(shape) {
 
 /** The corner indexes that get a dot when the shape is selected. */
 export function cornerDots(shape) {
+  if (shape.kind === "curved") return [0, 1, 2, 3]; // p4 is the bend handle
   return isTwoPart(shape) ? OUTER_DOTS : shape.points.map((_, i) => i);
 }
 

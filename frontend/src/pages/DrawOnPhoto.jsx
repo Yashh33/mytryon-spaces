@@ -10,12 +10,15 @@ import { useAdjustMode } from "../adjustMode.js";
 import {
   COLOUR_HEX,
   backrestAllowed,
+  bendCurve,
   centroid,
   cornerDots,
+  curvedOutline,
   flipShape,
   flipShapeVertical,
   isTwoPart,
   moveCorner,
+  moveCurvedCorner,
   moveLCorner,
   moveShape,
   newShape,
@@ -36,6 +39,7 @@ const CORNER_R = 8;
 const RESIZE_SIZE = 32;
 const ROTATE_R = 17;
 const TILT_W = 26;
+const BEND_R = 14;
 const TILT_H = 38;
 const HANDLE_GAP = 14; // handles sit this far outside the shape
 const ROTATE_STICK = 30;
@@ -65,8 +69,10 @@ function GuideLabel({ text, at, font, W, H }) {
  * whole shape from its centre, the round handle turns it (snapping to quarter
  * turns), the up/down handle tilts it (up lays it flatter on the floor, like
  * a rug seen in perspective); two fingers pinch to resize and twist to turn.
- * Corner dots are for fine-tuning (an L shows only its outer corners: the
- * inner ones follow); tapping an edge puts the backrest (black line) there.
+ * Corner dots are for fine-tuning (an L or corner sofa shows only its outer
+ * corners: the inner ones follow; a curved sofa its 4 corners plus a bend
+ * handle in the middle of its back arc); tapping an edge puts the backrest
+ * (black line) there — a curved sofa's backrest is always its back arc.
  * Shapes never leave the photo. Saved on the attempt as corner points. */
 export default function DrawOnPhoto() {
   const { id } = useParams();
@@ -229,9 +235,17 @@ export default function DrawOnPhoto() {
         // an L or corner sofa moves as one piece: its inner corners follow the outer dot
         const points = moveLCorner(d.orig, d.index, at[0], at[1], aspect);
         if (points) setShapePoints(d.key, points);
+      } else if (shape?.kind === "curved") {
+        // the bend follows the corner, keeping its depth
+        const points = moveCurvedCorner(d.orig, d.index, at[0], at[1], aspect);
+        if (points) setShapePoints(d.key, points);
       } else {
         setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveCorner(s, d.index, at[0], at[1]) : s)));
       }
+    } else if (d.role === "bend") {
+      // a curved sofa: stronger or flatter, the front arc following
+      const points = bendCurve(d.orig, at[0], at[1], aspect);
+      if (points) setShapePoints(d.key, points);
     } else if (d.role === "tilt") {
       // up lays the shape flatter, down stands it back up toward the view from above
       const points = tiltPoints(d.orig, tiltFactor(at[1] - d.start[1]), aspect);
@@ -294,34 +308,22 @@ export default function DrawOnPhoto() {
     update(shapes.map((s) => (keyOf(s) === key ? fn(s) : s)));
   }
 
-  async function useFloorPlan() {
-    try {
-      await api.put(`/api/attempts/${id}/placement-mode`, { json: { mode: "plan" } });
-      navigate(`/attempt/${id}/place${adjust.query ? `?${adjust.query}` : ""}`);
-    } catch (err) {
-      toast(err.message);
-    }
-  }
-
   if (!attempt && !error) return <div className="screen"><Loading /></div>;
   if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
 
   const pieces = piecesOf(attempt.items);
   const byKey = Object.fromEntries(shapes.map((s) => [keyOf(s), s]));
-  const curved = pieces.filter((p) => !p.kind);
-  const missing = pieces.filter((p) => p.kind && !byKey[p.key]);
-  const ready = pieces.length > 0 && curved.length === 0 && missing.length === 0;
+  const missing = pieces.filter((p) => !byKey[p.key]);
+  const ready = pieces.length > 0 && missing.length === 0;
   const W = size?.w || 1;
   const H = size?.h || 1;
   const px = ([x, y]) => [x * W, y * H];
-  const status = curved.length
-    ? "Curved sofas: please use Floor plan"
-    : missing.length
-      ? `${missing.length} ${missing.length === 1 ? "piece" : "pieces"} still to draw`
-      : saveState === "saving"
-        ? "Saving…"
-        : saveState === "error"
-          ? "Not saved — check the connection"
+  const status = missing.length
+    ? `${missing.length} ${missing.length === 1 ? "piece" : "pieces"} still to draw`
+    : saveState === "saving"
+      ? "Saving…"
+      : saveState === "error"
+        ? "Not saved — check the connection"
           : "All pieces drawn";
   const selectedShape = selected ? byKey[selected] : null;
   const tagByKey = Object.fromEntries(pieces.map((p) => [p.key, p.tag]));
@@ -394,6 +396,27 @@ export default function DrawOnPhoto() {
                 const hex = COLOUR_HEX[s.colour];
                 const parts = shapeParts(s.kind, s.points);
                 const isSelected = key === selected;
+                if (s.kind === "curved") {
+                  const { outline, back } = curvedOutline(s.points);
+                  return (
+                    <g key={key} className={"draw-shape" + (isSelected ? " selected" : "")}>
+                      <polygon
+                        data-role="move"
+                        data-key={key}
+                        points={outline.map((p) => px(p).join(",")).join(" ")}
+                        fill={hex}
+                        fillOpacity={0.45}
+                        stroke={hex}
+                        strokeWidth={(isSelected ? 3 : 1.5) * scale}
+                        strokeLinejoin="round"
+                      />
+                      <polyline
+                        points={back.map((p) => px(p).join(",")).join(" ")}
+                        fill="none" stroke="#000" strokeWidth={9 * scale} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"
+                      />
+                    </g>
+                  );
+                }
                 return (
                   <g key={key} className={"draw-shape" + (isSelected ? " selected" : "")}>
                     {parts.map((corners, part) => (
@@ -445,8 +468,9 @@ export default function DrawOnPhoto() {
               {/* the labels the guide image carries (main.py draw_guide_image), above every shape */}
               {shapes.map((s) => {
                 const tag = tagByKey[keyOf(s)];
-                const xs = s.points.map((p) => p[0]);
-                const top = Math.min(...s.points.map((p) => p[1]));
+                const drawn = s.kind === "curved" ? curvedOutline(s.points).outline : s.points;
+                const xs = drawn.map((p) => p[0]);
+                const top = Math.min(...drawn.map((p) => p[1]));
                 const lounge = s.kind === "L" && s.lounge != null ? centroid(shapeParts(s.kind, s.points)[s.lounge]) : null;
                 return (
                   <g key={`tag-${keyOf(s)}`} pointerEvents="none">
@@ -496,6 +520,19 @@ export default function DrawOnPhoto() {
                             ↕
                           </text>
                         </g>
+                        {selectedShape.kind === "curved"
+                          ? (() => {
+                              const [bx, by] = px(selectedShape.points[4]);
+                              return (
+                                <g className="draw-bend">
+                                  <circle data-role="bend" data-key={key} cx={bx} cy={by} r={BEND_R * scale} fill="#fff" stroke={hex} strokeWidth={3 * scale} />
+                                  <text x={bx} y={by} fontSize={16 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                                    ⌒
+                                  </text>
+                                </g>
+                              );
+                            })()
+                          : null}
                         {cornerDots(selectedShape).map((index) => {
                           const [cx, cy] = px(selectedShape.points[index]);
                           return (
@@ -535,7 +572,7 @@ export default function DrawOnPhoto() {
                     Flip left ↔ right
                   </button>
                 ) : null}
-                {isTwoPart(selectedShape) ? (
+                {selectedShape.kind !== "rect" ? (
                   <button type="button" className="btn btn-ghost btn-small" onClick={() => changeShape(selected, flipShapeVertical)}>
                     Flip up ↕ down
                   </button>
@@ -553,11 +590,8 @@ export default function DrawOnPhoto() {
               <div key={p.key} className={"draw-piece" + (p.key === selected ? " selected" : "")}>
                 {p.photo_url ? <img src={p.photo_url} alt="" /> : <span className="draw-piece-img" />}
                 <span className="draw-swatch" style={{ background: COLOUR_HEX[p.colour] }} title={p.colour} />
-                <span className="draw-piece-name">
-                  {p.name}
-                  {!p.kind ? <span className="draw-piece-note">Curved sofas: please use Floor plan</span> : null}
-                </span>
-                {!p.kind ? null : byKey[p.key] ? (
+                <span className="draw-piece-name">{p.name}</span>
+                {byKey[p.key] ? (
                   <button type="button" className="btn btn-ghost btn-small" onClick={() => setSelected(p.key)}>
                     Edit
                   </button>
@@ -569,11 +603,6 @@ export default function DrawOnPhoto() {
               </div>
             ))}
           </div>
-          {curved.length ? (
-            <button type="button" className="btn btn-ghost" style={{ marginTop: 12 }} onClick={useFloorPlan}>
-              Use the floor plan instead
-            </button>
-          ) : null}
         </div>
       </div>
 

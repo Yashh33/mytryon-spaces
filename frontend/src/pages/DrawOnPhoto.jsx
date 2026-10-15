@@ -611,7 +611,7 @@ export default function DrawOnPhoto() {
         status={status}
         primaryLabel="Next"
         primaryDisabled={!ready || saveState === "saving"}
-        onPrimary={() => navigate(`/attempt/${id}/finish${adjust.query ? `?${adjust.query}` : ""}`)}
+        onPrimary={() => navigate(`/attempt/${id}/preview${adjust.query ? `?${adjust.query}` : ""}`)}
       />
     </div>
   );

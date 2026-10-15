@@ -22,6 +22,7 @@ import AdminPrompt from "./pages/AdminPrompt.jsx";
 import AdminActivity from "./pages/AdminActivity.jsx";
 import PlacementChoice from "./pages/PlacementChoice.jsx";
 import DrawOnPhoto from "./pages/DrawOnPhoto.jsx";
+import GuidePreview from "./pages/GuidePreview.jsx";
 import DebugGeneration from "./pages/DebugGeneration.jsx";
 import AdminUsage from "./pages/AdminUsage.jsx";
 import Account from "./pages/Account.jsx";
@@ -123,6 +124,16 @@ export default function App() {
               <RequireAuth>
                 <AuthedLayout>
                   <DrawOnPhoto />
+                </AuthedLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/attempt/:id/preview"
+            element={
+              <RequireAuth>
+                <AuthedLayout>
+                  <GuidePreview />
                 </AuthedLayout>
               </RequireAuth>
             }

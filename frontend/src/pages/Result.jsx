@@ -6,6 +6,9 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { FixSheet } from "../components/FixSheet.jsx";
 import { roomLookLabel } from "../utils.js";
+import { SafeImg } from "../components/SafeImg.jsx";
+import { DebugPanel } from "../components/DebugPanel.jsx";
+import { useAuth } from "../auth.jsx";
 
 export default function Result() {
   const { id } = useParams();
@@ -21,6 +24,9 @@ export default function Result() {
   const [showFix, setShowFix] = useState(false);
   const [fixing, setFixing] = useState(false);
   const [fixThis, setFixThis] = useState(false); // the shop's "fix_this" switch
+  const [showDebugSwitch, setShowDebugSwitch] = useState(false); // the shop's "show_debug" switch
+  const [debugOpen, setDebugOpen] = useState(false);
+  const { user } = useAuth();
 
   async function load() {
     setError(null);
@@ -28,6 +34,7 @@ export default function Result() {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
       setFixThis(Boolean(data.features?.fix_this));
+      setShowDebugSwitch(Boolean(data.features?.show_debug));
       setShowingAfter(true);
       setShownId(null);
       const roomData = await api.get(`/api/rooms/${data.attempt.room.id}`);
@@ -190,7 +197,7 @@ export default function Result() {
                 setShowingAfter(true);
               }}
             >
-              <img src={v.image_url} alt="" />
+              <SafeImg src={v.image_url} />
               <span>{v.parent_render_id ? "Fix" : `Picture ${i + 1}`}</span>
             </button>
           ))}
@@ -237,6 +244,14 @@ export default function Result() {
           </button>
         </div>
         {fixThis && deepFix ? <div className="fix-hint">For bigger changes, use Adjust &amp; try again.</div> : null}
+        {(showDebugSwitch || user?.role === "superadmin") && shown ? (
+          <>
+            <button type="button" className="btn btn-ghost" onClick={() => setDebugOpen((v) => !v)}>
+              {debugOpen ? "Hide debug" : "Debug"}
+            </button>
+            {debugOpen ? <DebugPanel renderId={shown.id} /> : null}
+          </>
+        ) : null}
         <button
           type="button"
           className="btn btn-ghost btn-star"

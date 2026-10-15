@@ -3256,11 +3256,12 @@ PREVIOUS_SHAPES_FINAL_CHECKS = [
 ]
 # the edge of each part of a two-part shape that is shared with the other part
 SHARED_EDGE = {0: 2, 1: 3}
-# "flat" (the default): each shape is a see-through coloured patch on the
-# floor. "boxes": each shape's outline is raised into a see-through box about
-# seat height (see draw_box_guide). Admin -> Prompt; applies to new renders.
+# "boxes" (the default): each shape's outline is raised into a see-through
+# box about seat height (see draw_box_guide). "flat": each shape is a
+# see-through coloured patch on the floor. Admin -> Prompt; new renders only.
 GUIDE_STYLE_KEY = "guide_style"
 GUIDE_STYLES = ("flat", "boxes")
+DEFAULT_GUIDE_STYLE = "boxes"
 BOX_HEIGHT_FT = 1.4  # about seat height
 BOX_HORIZON = 0.40  # the horizon, as a share of the photo's height, for raising near points more than far ones
 BOX_TOP_ALPHA = 89  # about 35% opacity
@@ -3279,8 +3280,8 @@ BOXES_REMOVAL_WORDS = "remove every coloured box, label and black line completel
 
 
 def get_guide_style(db: Session) -> str:
-    style = get_setting(db, GUIDE_STYLE_KEY, "flat").strip().lower()
-    return style if style in GUIDE_STYLES else "flat"
+    style = get_setting(db, GUIDE_STYLE_KEY, DEFAULT_GUIDE_STYLE).strip().lower()
+    return style if style in GUIDE_STYLES else DEFAULT_GUIDE_STYLE
 
 
 GUIDE_IMAGE_LINE = (
@@ -3640,6 +3641,28 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict
         for x, y in (line[0], line[-1]):  # round ends
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
     return lifts
+
+
+def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
+    """The guide image exactly as the image model gets it: the shapes drawn
+    in the current guide style, then padded like the room photo would be.
+    {"guide": unpadded RGB image, "sent": the image sent, "jpeg": its bytes,
+    "photo_box": where the photo sits in a padded image or None, "style",
+    "size": the output size}. Used by the render job and the preview."""
+    room_path = DATA_ROOT / attempt.room.photo_path
+    style = get_guide_style(db)  # read once: the guide, gap writer and prompt agree
+    pieces = attempt_pieces(attempt)
+    tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in pieces}
+    widths = {(p["item"].id, p["sub_index"]): p["width_ft"] for p in pieces}
+    with Image.open(room_path) as room_image:
+        size = derive_size(room_image.width, room_image.height)
+        guide = draw_guide_image(room_image, shapes, tags, style, widths)
+    sent, photo_box = guide, None
+    if pad_room_photo_enabled(db):
+        sent, photo_box = pad_to_output_ratio(guide, size)
+    buffer = io.BytesIO()
+    sent.save(buffer, format="JPEG", quality=92)
+    return {"guide": guide, "sent": sent, "jpeg": buffer.getvalue(), "photo_box": photo_box, "style": style, "size": size}
 
 
 def draw_guide_image(
@@ -4137,6 +4160,22 @@ async def describe_attempt_items(attempt_id: int) -> None:
     await asyncio.to_thread(work)
 
 
+@app.get("/api/attempts/{attempt_id}/guide-preview")
+def api_guide_preview(attempt_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+    """The guide image exactly as a render would send it now (style, labels,
+    black lines, grey border), built from the saved shapes. No AI call and
+    no credits; built fresh on every request, so it follows every change."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    shapes = stored_shapes(attempt)
+    missing = missing_shape_pieces(attempt)
+    if not shapes or missing:
+        return error_response(
+            400, "shapes_missing", "Draw every piece on the photo first" + (f" (still missing: {', '.join(missing)})." if missing else ".")
+        )
+    built = build_guide(db, attempt, shapes)
+    return Response(content=built["jpeg"], media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 class PlacementModeBody(BaseModel):
     mode: str
 
@@ -4489,27 +4528,18 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         size = derive_size(room_debug["width"], room_debug["height"])
         if shapes:
             # the guide image: drawn on the room photo, padded exactly as the photo would be
-            guide_style = get_guide_style(db)  # read once: this render's guide, gap writer and prompt agree
-            with Image.open(room_path) as room_image:
-                pieces_now = attempt_pieces(attempt)
-                tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in pieces_now}
-                widths = {(p["item"].id, p["sub_index"]): p["width_ft"] for p in pieces_now}
-                guide = draw_guide_image(room_image, shapes, tags, guide_style, widths)
-            sent = guide
-            if pad_room_photo_enabled(db):
-                sent, photo_box = pad_to_output_ratio(guide, size)
+            built = build_guide(db, attempt, shapes)  # the same code as the Preview screen
+            guide, sent, photo_box, guide_style = built["guide"], built["sent"], built["photo_box"], built["style"]
             GUIDES_DIR.mkdir(parents=True, exist_ok=True)
             guide_name = f"{uuid.uuid4().hex}.jpg"
-            buffer = io.BytesIO()
-            sent.save(buffer, format="JPEG", quality=92)
-            (GUIDES_DIR / guide_name).write_bytes(buffer.getvalue())
-            room_file = (guide_name, buffer.getvalue(), "image/jpeg")
+            (GUIDES_DIR / guide_name).write_bytes(built["jpeg"])
+            room_file = (guide_name, built["jpeg"], "image/jpeg")
             room_debug = {
                 "filename": guide_name,
                 "role": "guide",
                 "width": sent.width,
                 "height": sent.height,
-                "size_bytes": len(buffer.getvalue()),
+                "size_bytes": len(built["jpeg"]),
                 "url": f"/media/guides/{guide_name}",
                 "original_width": guide.width,
                 "original_height": guide.height,
@@ -4518,7 +4548,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             }
             # the gap writer reads this same guide image; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
-            gap_info = await resolve_gap_writer(db, attempt, buffer.getvalue(), shapes, photo_box is not None, guide_style)
+            gap_info = await resolve_gap_writer(db, attempt, built["jpeg"], shapes, photo_box is not None, guide_style)
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
@@ -6167,7 +6197,9 @@ def api_admin_shop_usage(
 
 # Per-shop feature switches (shops.features), set by the superadmin on the
 # shop's page. A shop without a key gets the default here.
-SHOP_FEATURE_DEFAULTS = {"fix_this": False, "shape_placement": True}
+# show_debug: a Debug button on the result page for the shop's users (the
+# superadmin always has it), showing what was sent to the image model
+SHOP_FEATURE_DEFAULTS = {"fix_this": False, "shape_placement": True, "show_debug": False}
 
 
 def shop_feature(shop: Shop | None, name: str) -> bool:
@@ -7164,7 +7196,9 @@ def prompt_setting_response(db: Session) -> dict:
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
         "shapes_prompt": value(SHAPES_PROMPT_KEY, DEFAULT_SHAPES_GENERATION_PROMPT),
         "default_shapes_prompt": DEFAULT_SHAPES_GENERATION_PROMPT,
-        "guide_style": next((s for s in GUIDE_STYLES if s == value(GUIDE_STYLE_KEY, "flat").strip().lower()), "flat"),
+        "guide_style": next(
+            (s for s in GUIDE_STYLES if s == value(GUIDE_STYLE_KEY, DEFAULT_GUIDE_STYLE).strip().lower()), DEFAULT_GUIDE_STYLE
+        ),
         "gap_writer_prompt": value(GAP_WRITER_PROMPT_KEY, DEFAULT_GAP_WRITER_PROMPT),
         "default_gap_writer_prompt": DEFAULT_GAP_WRITER_PROMPT,
         "studio_prompt": value(STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT),
@@ -7376,13 +7410,28 @@ def api_admin_reset_prompt(
 # ---------------------------------------------------------------------------
 
 
+def can_view_render_debug(user: User, render: Render, db: Session) -> bool:
+    """The superadmin: any render. Others: only renders of their own shop —
+    an owner any of them; anyone else their own, when the shop's show_debug
+    switch is on."""
+    if user.role == "superadmin":
+        return True
+    room = render.attempt.room if render.attempt else None
+    maker = db.query(User).filter(User.id == room.customer.user_id).first() if room else None
+    if maker is None or maker.shop_id != user.shop_id:
+        return False
+    if user.role == "owner":
+        return True
+    return maker.id == user.id and shop_feature(db.query(Shop).filter(Shop.id == user.shop_id).first(), "show_debug")
+
+
 @app.get("/api/debug/generation/{render_id}")
-def api_debug_generation(
-    render_id: int, owner: User = Depends(require_owner_or_superadmin), db: Session = Depends(get_db)
-) -> JSONResponse:
+def api_debug_generation(render_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     render = db.query(Render).filter(Render.id == render_id).first()
     if render is None:
         return error_response(404, "render_not_found", "That render could not be found.")
+    if not can_view_render_debug(user, render, db):
+        return error_response(403, "debug_not_allowed", "You can't see the details of this picture.")
     debug_row = db.query(GenerationDebug).filter(GenerationDebug.render_id == render_id).first()
     if debug_row is None:
         return error_response(404, "no_debug_data", "No debug data was recorded for this render.")

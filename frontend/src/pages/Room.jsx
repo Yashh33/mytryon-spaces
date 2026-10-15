@@ -7,6 +7,7 @@ import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
 import { StepFooter } from "../components/StepFooter.jsx";
 import { roomLookLabel } from "../utils.js";
+import { SafeImg } from "../components/SafeImg.jsx";
 
 export default function Room() {
   const { id } = useParams();
@@ -71,7 +72,7 @@ export default function Room() {
 
       <div className="room-layout">
         <div className="room-side">
-          <img src={room.photo_url} alt="" style={{ width: "100%", borderRadius: 12, background: "var(--line)" }} />
+          <SafeImg src={room.photo_url} style={{ width: "100%", borderRadius: 12, background: "var(--line)" }} />
           <div className="hint-line" style={{ textAlign: "center" }}>
             ROOM PHOTO &middot; REUSED FOR EVERY ATTEMPT
           </div>
@@ -87,7 +88,7 @@ export default function Room() {
                 className={"card-tile" + (a.is_picked ? " picked" : "")}
               >
                 {a.is_picked ? <div className="pick-star">&#9733;</div> : null}
-                <img className="thumb" src={a.latest_render ? a.latest_render.image_url : room.photo_url} alt="" loading="lazy" />
+                <SafeImg className="thumb" src={a.latest_render ? a.latest_render.image_url : room.photo_url} loading="lazy" />
                 <div className="meta">
                   <div className="title">{a.latest_render ? `Attempt ${numberById.get(a.id)}` : "Draft"}</div>
                   <div className="sub">

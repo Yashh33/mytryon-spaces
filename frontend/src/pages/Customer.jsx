@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { ErrorBlock, RoomCardSkeleton } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { formatShortDate } from "../utils.js";
+import { SafeImg } from "../components/SafeImg.jsx";
 
 export default function Customer() {
   const { id } = useParams();
@@ -95,7 +96,7 @@ export default function Customer() {
           ) : rooms.length ? (
             rooms.map((r) => (
               <Link key={r.id} to={`/room/${r.id}`} className="room-card">
-                <img className="thumb" src={r.thumbnail_url} alt="" loading="lazy" />
+                <SafeImg className="thumb" src={r.thumbnail_url} loading="lazy" />
                 <div className="body">
                   <div className="info">
                     <div className="title">{r.room_type}</div>

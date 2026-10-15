@@ -83,6 +83,20 @@ export default function SuperShop() {
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 4 }}>
         Off: salesmen go straight to the floor plan, without the choice.
       </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontSize: 14, minHeight: 44, marginTop: 8 }}>
+        <input
+          type="checkbox"
+          checked={Boolean(shop.features?.show_debug)}
+          disabled={savingFeature}
+          onChange={(e) => setFeature("show_debug", e.target.checked)}
+          style={{ width: 20, height: 20 }}
+        />
+        Debug button — what was sent to the AI, on the result page
+      </label>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 4 }}>
+        On: the shop&apos;s users see a Debug button below Adjust &amp; try again (the images, prompt and gap writer lines of
+        their own pictures). The superadmin always has it.
+      </div>
 
       <div className="section-label" style={{ marginTop: 22 }}>Manage</div>
       <div className="row-list">

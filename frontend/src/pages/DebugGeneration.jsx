@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { formatBytes } from "../utils.js";
+import { SafeImg } from "../components/SafeImg.jsx";
 
 /** Owner-only: exactly what one render was made from — the images, the
  * final prompt, and what the placement writer was given, wrote and whether
@@ -52,12 +53,12 @@ export default function DebugGeneration() {
 
       <div className="debug-images">
         <figure>
-          <img src={data.output_image_url} alt="" />
+          <SafeImg src={data.output_image_url} />
           <figcaption>Result</figcaption>
         </figure>
         {sent.map((img, i) => (
           <figure key={img.url + i}>
-            <img src={img.url} alt="" />
+            <SafeImg src={img.url} />
             <figcaption>
               Image {i + 1} &middot; {img.role}
               {img.role === "guide" ? ` (${GUIDE_STYLE_LABEL[img.guide_style || "flat"] || img.guide_style})` : ""} &middot; {img.width}&times;
@@ -117,7 +118,7 @@ export default function DebugGeneration() {
           {plan ? (
             <div className="debug-images">
               <figure>
-                <img src={plan.url} alt="" />
+                <SafeImg src={plan.url} />
                 <figcaption>
                   Plan PNG &middot; sent to the writer only, never to the image model &middot; {plan.width}&times;{plan.height}
                 </figcaption>

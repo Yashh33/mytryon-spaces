@@ -31,7 +31,7 @@ export default function AdminPrompt() {
   const [writerPrompt, setWriterPrompt] = useState("");
   const [shapesPrompt, setShapesPrompt] = useState("");
   const [gapWriterPrompt, setGapWriterPrompt] = useState("");
-  const [guideStyle, setGuideStyle] = useState("flat");
+  const [guideStyle, setGuideStyle] = useState("boxes");
   const [studioPrompt, setStudioPrompt] = useState("");
   const [studioEditPrompt, setStudioEditPrompt] = useState("");
   const [studioLookPrompt, setStudioLookPrompt] = useState("");
@@ -55,7 +55,7 @@ export default function AdminPrompt() {
     setWriterPrompt(res.placement_writer_prompt);
     setShapesPrompt(res.shapes_prompt);
     setGapWriterPrompt(res.gap_writer_prompt);
-    setGuideStyle(res.guide_style || "flat");
+    setGuideStyle(res.guide_style || "boxes");
     setStudioPrompt(res.studio_prompt);
     setStudioEditPrompt(res.studio_edit_prompt);
     setStudioLookPrompt(res.studio_look_prompt);

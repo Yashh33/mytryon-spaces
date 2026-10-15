@@ -1183,3 +1183,16 @@ h2 { font-size: 19px; }
   white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.5;
   background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 0;
 }
+
+/* an image whose file isn't on this server (e.g. made on a laptop) */
+.img-missing { display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px; min-height: 64px; background: var(--line); color: var(--muted); font-size: 12px; font-weight: 600; border-radius: 10px; box-sizing: border-box; }
+
+/* Draw on photo -> Preview: the guide image the AI will get, fitted to the screen */
+.guide-preview { display: block; border-radius: 12px; overflow: hidden; background: #1d1b18; }
+.guide-preview img { display: block; width: 100%; height: auto; max-height: calc(100vh - 260px); object-fit: contain; }
+
+/* result page Debug panel */
+.debug-panel { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fff; text-align: left; }
+.debug-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; font-weight: 700; }
+.debug-panel .debug-images figure { width: 130px; }
+.debug-prompt { max-height: 320px; overflow: auto; }

@@ -8,6 +8,9 @@ import { formatBytes } from "../utils.js";
 /** Owner-only: exactly what one render was made from — the images, the
  * final prompt, and what the placement writer was given, wrote and whether
  * its section was used. Reached from /debug/latest. */
+// renders made before the switch have no style recorded: they were flat
+const GUIDE_STYLE_LABEL = { flat: "flat shapes", boxes: "3D boxes" };
+
 export default function DebugGeneration() {
   const { renderId } = useParams();
   const [data, setData] = useState(null);
@@ -56,7 +59,9 @@ export default function DebugGeneration() {
           <figure key={img.url + i}>
             <img src={img.url} alt="" />
             <figcaption>
-              Image {i + 1} &middot; {img.role} &middot; {img.width}&times;{img.height} &middot; {formatBytes(img.size_bytes)}
+              Image {i + 1} &middot; {img.role}
+              {img.role === "guide" ? ` (${GUIDE_STYLE_LABEL[img.guide_style || "flat"] || img.guide_style})` : ""} &middot; {img.width}&times;
+              {img.height} &middot; {formatBytes(img.size_bytes)}
             </figcaption>
           </figure>
         ))}
@@ -90,7 +95,8 @@ export default function DebugGeneration() {
       ) : data.placement_mode === "shapes" && !writer ? (
         <div className="muted" style={{ fontSize: 13 }}>
           Draw on photo: the furniture was drawn on the photo, so the floor plan and the placement writer were not used. Image 1
-          above (role &quot;guide&quot;) is the room photo with the shapes, exactly as sent.
+          above (role &quot;guide&quot;) is the room photo with the shapes, exactly as sent. Guide style:{" "}
+          <strong>{GUIDE_STYLE_LABEL[sent.find((img) => img.role === "guide")?.guide_style || "flat"]}</strong>.
         </div>
       ) : !writer ? (
         <div className="muted" style={{ fontSize: 13 }}>Not recorded for this render (made before the writer existed, or placement was skipped).</div>

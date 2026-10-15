@@ -3256,6 +3256,33 @@ PREVIOUS_SHAPES_FINAL_CHECKS = [
 ]
 # the edge of each part of a two-part shape that is shared with the other part
 SHARED_EDGE = {0: 2, 1: 3}
+# "flat" (the default): each shape is a see-through coloured patch on the
+# floor. "boxes": each shape's outline is raised into a see-through box about
+# seat height (see draw_box_guide). Admin -> Prompt; applies to new renders.
+GUIDE_STYLE_KEY = "guide_style"
+GUIDE_STYLES = ("flat", "boxes")
+BOX_HEIGHT_FT = 1.4  # about seat height
+BOX_HORIZON = 0.40  # the horizon, as a share of the photo's height, for raising near points more than far ones
+BOX_TOP_ALPHA = 89  # about 35% opacity
+BOX_SIDE_ALPHA = 56  # about 22%
+BOX_OUTLINE_PX = 3
+BOX_FALLBACK_WIDTH_FT = 6.0  # a piece with no width recorded
+# the first sentence about Image 1, and the removal sentence's words, for boxes
+GUIDE_BOXES_LINE = (
+    "Image 1 is the room photograph with numbered see-through coloured boxes standing on the floor. Each box shows "
+    "ONLY where a piece stands, which way it faces and roughly how big it is; its height is about seat height. The "
+    "boxes are plain on purpose: their colour and square shape say nothing about the design, arms, cushions, colour "
+    "or material. The thick black line along the top of a box marks the backrest side."
+)
+FLAT_REMOVAL_WORDS = "remove all coloured guide shapes, labels and black lines completely"
+BOXES_REMOVAL_WORDS = "remove every coloured box, label and black line completely"
+
+
+def get_guide_style(db: Session) -> str:
+    style = get_setting(db, GUIDE_STYLE_KEY, "flat").strip().lower()
+    return style if style in GUIDE_STYLES else "flat"
+
+
 GUIDE_IMAGE_LINE = (
     "Image 1 is the room photograph with coloured guide shapes drawn on the floor; each thick black line marks "
     "where a sofa's back goes."
@@ -3394,6 +3421,7 @@ def attempt_pieces(attempt: Attempt) -> list[dict]:
                     "sub_index": sub["sub_index"],
                     "label": label,
                     "kind": kind,
+                    "width_ft": sub.get("width_ft"),
                     "tag": f"{len(pieces) + 1} · {shape_type_label(item, label, kind)}",
                 }
             )
@@ -3501,16 +3529,138 @@ def _guide_font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None = None) -> Image.Image:
-    """The room photo with every shape filled in its colour at about 45%
-    opacity, a GUIDE_LINE_PX black line on each backrest edge, a white
-    label above each shape ("1 · L-SHAPE", from `tags` by (item_id,
-    sub_index)) and a small LOUNGE label on an L's lounge. The draw screen
-    shows the same labels (frontend/src/pages/DrawOnPhoto.jsx)."""
+def _darker(rgb: tuple) -> tuple:
+    return tuple(round(c * 0.6) for c in rgb)
+
+
+def _box_outline(shape: dict) -> tuple[list, list, list, list]:
+    """A shape's floor outline for a box, as (outline, backs, corners, ruler),
+    all in photo fractions: the closed outline; each backrest line (a
+    polyline); the outline indexes that get a vertical edge; and the back
+    line pixels per foot are measured along."""
+    kind, points = shape["kind"], shape["points"]
+    if kind == "curved":
+        outline, back = curved_outline(points)
+        half = len(outline) // 2
+        return outline, [back], [0, half - 1, half, len(outline) - 1], back
+    if kind == "rect":
+        outline = [tuple(p) for p in points[:4]]
+        edge = shape["backrest"][0]
+        back = [outline[edge], outline[(edge + 1) % 4]]
+        return outline, [back], list(range(4)), back
+    # L or corner sofa: one six-corner outline; a back line per part that has one
+    outline = [tuple(p) for p in points]
+    parts = shape_parts(kind, points)
+    backs = [
+        [parts[part][edge], parts[part][(edge + 1) % 4]]
+        for part, edge in enumerate(shape["backrest"])
+        if edge is not None
+    ]
+    return outline, backs, list(range(6)), max(backs, key=lambda b: math.dist(b[0], b[1]))
+
+
+def _box_lift(ruler_px: list, width_ft: float | None, photo_height: int):
+    """How far (pixels) to raise a floor point at height y in the photo:
+    BOX_HEIGHT_FT at the scale measured along the back line (its length in
+    pixels / the piece's width in feet), more for points nearer the camera
+    and less for farther ones, in proportion to their distance below the
+    horizon (BOX_HORIZON of the photo's height); never below 0."""
+    length = sum(math.dist(a, b) for a, b in zip(ruler_px, ruler_px[1:]))
+    px_per_ft = length / (width_ft if width_ft and width_ft > 0 else BOX_FALLBACK_WIDTH_FT)
+    base = BOX_HEIGHT_FT * px_per_ft
+    horizon = BOX_HORIZON * photo_height
+    back_y = sum(y for _, y in ruler_px) / len(ruler_px)
+    if back_y - horizon < 1:  # back line at or above the horizon: no perspective to go by
+        return lambda y: base
+    return lambda y: max(0.0, base * (y - horizon) / (back_y - horizon))
+
+
+def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict:
+    """Draws every shape onto `guide` (RGBA, in place) as a see-through box:
+    its floor outline is the bottom, every point raised straight up (see
+    _box_lift) is the top. Far boxes first; within a box the far sides, the
+    top (BOX_TOP_ALPHA), then the near sides (BOX_SIDE_ALPHA), a
+    BOX_OUTLINE_PX outline of every edge in a darker shade, and last the
+    black backrest line along the TOP back edge. Returns each shape's lift
+    function by (item_id, sub_index), for placing its labels."""
+    from PIL import ImageDraw
+
+    width, height = guide.size
+    draw = ImageDraw.Draw(guide)
+
+    def paint(polygon: list, rgba: tuple) -> None:
+        # each face blends on its own, so overlapping faces stay see-through
+        x0 = max(0, math.floor(min(x for x, _ in polygon)))
+        y0 = max(0, math.floor(min(y for _, y in polygon)))
+        x1 = min(width, math.ceil(max(x for x, _ in polygon)) + 1)
+        y1 = min(height, math.ceil(max(y for _, y in polygon)) + 1)
+        if x1 <= x0 or y1 <= y0:
+            return
+        layer = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).polygon([(x - x0, y - y0) for x, y in polygon], fill=rgba)
+        guide.alpha_composite(layer, dest=(x0, y0))
+
+    boxes = []
+    for shape in shapes:
+        outline, backs, corners, ruler = _box_outline(shape)
+        to_px = lambda pts: [(x * width, y * height) for x, y in pts]  # noqa: E731
+        lift = _box_lift(to_px(ruler), widths.get((shape["item_id"], shape["sub_index"])), height)
+        bottom = to_px(outline)
+        top = [(x, y - lift(y)) for x, y in bottom]
+        boxes.append((shape, bottom, top, corners, [[(x, y - lift(y)) for x, y in to_px(b)] for b in backs], lift))
+    boxes.sort(key=lambda b: max(y for _, y in b[1]))  # farthest (highest in the photo) first
+
+    lifts, back_lines = {}, []
+    for shape, bottom, top, corners, backs, lift in boxes:
+        rgb = SHAPE_COLOURS[shape["colour"]]
+        n = len(bottom)
+        sides = sorted(
+            ((bottom[i][1] + bottom[(i + 1) % n][1]) / 2, [bottom[i], bottom[(i + 1) % n], top[(i + 1) % n], top[i]])
+            for i in range(n)
+        )
+        middle = sum(depth for depth, _ in sides) / n
+        for depth, face in sides:
+            if depth < middle:
+                paint(face, (*rgb, BOX_SIDE_ALPHA))
+        paint(top, (*rgb, BOX_TOP_ALPHA))
+        for depth, face in sides:
+            if depth >= middle:
+                paint(face, (*rgb, BOX_SIDE_ALPHA))
+        edge = (*_darker(rgb), 255)
+        draw.line(bottom + [bottom[0]], fill=edge, width=BOX_OUTLINE_PX, joint="curve")
+        draw.line(top + [top[0]], fill=edge, width=BOX_OUTLINE_PX, joint="curve")
+        for i in corners:
+            draw.line([bottom[i], top[i]], fill=edge, width=BOX_OUTLINE_PX)
+        back_lines.extend(backs)
+        lifts[(shape["item_id"], shape["sub_index"])] = lift
+
+    radius = GUIDE_LINE_PX / 2
+    for line in back_lines:
+        draw.line(line, fill=(0, 0, 0, 255), width=GUIDE_LINE_PX, joint="curve")
+        for x, y in (line[0], line[-1]):  # round ends
+            draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+    return lifts
+
+
+def draw_guide_image(
+    photo: Image.Image, shapes: list[dict], tags: dict | None = None, style: str = "flat", widths: dict | None = None
+) -> Image.Image:
+    """The room photo with every shape drawn on it: "flat", each shape filled
+    in its colour at about 45% opacity with a GUIDE_LINE_PX black line on each
+    backrest edge; "boxes", each shape raised into a see-through box (see
+    draw_box_guide, `widths` = each piece's width in feet by (item_id,
+    sub_index)). Then a white label above each shape (or box) ("1 · L-SHAPE",
+    from `tags` by (item_id, sub_index)) and a small LOUNGE label on an L's
+    lounge. The draw screen shows the same labels (DrawOnPhoto.jsx)."""
     from PIL import ImageDraw
 
     base = photo.convert("RGBA")
     width, height = base.size
+    if style == "boxes":
+        guide = base
+        lifts = draw_box_guide(guide, shapes, widths or {})
+        draw = ImageDraw.Draw(guide)
+        return _draw_guide_labels(guide, draw, shapes, tags, lifts)
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     fill = ImageDraw.Draw(overlay)
     lines = []
@@ -3539,7 +3689,13 @@ def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None =
         draw.line(back, fill=(0, 0, 0, 255), width=GUIDE_LINE_PX, joint="curve")
         for x, y in (back[0], back[-1]):  # round ends
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+    return _draw_guide_labels(guide, draw, shapes, tags, None)
 
+
+def _draw_guide_labels(guide: Image.Image, draw, shapes: list[dict], tags: dict | None, lifts: dict | None) -> Image.Image:
+    """The white labels: the piece's tag above its shape, LOUNGE on an L's
+    lounge. With `lifts` (boxes) both sit on the top of the box."""
+    width, height = guide.size
     # labels: sizes relative to a 1536 px wide photo
     unit = width / 1536
     big, small = _guide_font(max(round(24 * unit), 12)), _guide_font(max(round(16 * unit), 10))
@@ -3553,16 +3709,18 @@ def draw_guide_image(photo: Image.Image, shapes: list[dict], tags: dict | None =
         draw.text((x0 + pad - box[0], y0 + pad - box[1]), text, font=font, fill=(17, 17, 17, 255))
 
     for shape in shapes:
+        lift = (lifts or {}).get((shape["item_id"], shape["sub_index"]), lambda y: 0.0)
+        raise_px = lambda pts: [(x * width, y * height - lift(y * height)) for x, y in pts]  # noqa: E731
         parts = shape_parts(shape["kind"], shape["points"])
         if shape["kind"] == "L" and shape["lounge"] is not None:
-            lounge = parts[shape["lounge"]]
-            label("LOUNGE", sum(x for x, _ in lounge) / 4 * width, sum(y for _, y in lounge) / 4 * height, small, 5 * unit)
+            lounge = raise_px(parts[shape["lounge"]])
+            label("LOUNGE", sum(x for x, _ in lounge) / 4, sum(y for _, y in lounge) / 4, small, 5 * unit)
         tag = (tags or {}).get((shape["item_id"], shape["sub_index"]))
         if tag:
-            drawn = curved_outline(shape["points"])[0] if shape["kind"] == "curved" else shape["points"]
+            drawn = raise_px(curved_outline(shape["points"])[0] if shape["kind"] == "curved" else shape["points"])
             xs = [x for x, _ in drawn]
-            top = min(y for _, y in drawn) * height
-            label(tag, (min(xs) + max(xs)) / 2 * width, top - 26 * unit, big, 8 * unit)
+            top = min(y for _, y in drawn)
+            label(tag, (min(xs) + max(xs)) / 2, top - 26 * unit, big, 8 * unit)
     return guide.convert("RGB")
 
 
@@ -3727,14 +3885,19 @@ def build_shapes_prompt(
     feet: bool = False,
     aspect: float = 1.0,
     open_floor: list[str] | None = None,
+    guide_style: str = "flat",
 ) -> str:
     """The shapes pipeline's prompt: {{SHAPES}} and {{OPEN_FLOOR}} filled
     here, everything else (image list, fabric section, look, decor, lighting,
     the showroom's note) exactly as the floor-plan pipeline fills it.
     `aspect` is the room photo's width / height (the shapes' corners are
     fractions of it). `open_floor` is the gap writer's lines; without them
-    the section is left out."""
+    the section is left out. With guide_style "boxes", the sentence about
+    Image 1 and the removal sentence speak of boxes (swapped here, so the
+    saved prompt is never changed)."""
     filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect))
+    if guide_style == "boxes":
+        filled = filled.replace(FLAT_REMOVAL_WORDS, BOXES_REMOVAL_WORDS)
     section = OPEN_FLOOR_HEADING + "\n" + "\n".join(open_floor) if open_floor else ""
     if OPEN_FLOOR_TOKEN in filled:
         filled = filled.replace(OPEN_FLOOR_TOKEN, section)
@@ -3748,7 +3911,7 @@ def build_shapes_prompt(
         filled, attempt.room, attempt.items, attempt.room_treatment, attempt.lighting, True, "", attempt.note, feet, room_padded
     )
     # Image 1 is the guide image, not the bare room photo
-    return prompt.replace("Image 1 is a room.", GUIDE_IMAGE_LINE, 1)
+    return prompt.replace("Image 1 is a room.", GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE, 1)
 
 
 # ---- GAP WRITER ---------------------------------------------------------------
@@ -3782,14 +3945,18 @@ def get_gap_writer_prompt(db: Session) -> str:
     return get_setting(db, GAP_WRITER_PROMPT_KEY, DEFAULT_GAP_WRITER_PROMPT)
 
 
-def gap_writer_key(room: Room, shapes: list[dict], tags: list[str], padded: bool, prompt: str, model: str) -> str:
+def gap_writer_key(
+    room: Room, shapes: list[dict], tags: list[str], padded: bool, prompt: str, model: str, guide_style: str = "flat"
+) -> str:
     """What the gap writer's answer depends on: the photo, every shape as
     drawn (by its label, not its item id, so an Adjust copy matches), the
-    padding, the prompt and the model."""
+    padding, the guide style (it reads the same guide image), the prompt and
+    the model."""
     drawn = [
         [tag, s["kind"], s["points"], s["backrest"], s["lounge"]] for tag, s in zip(tags, shapes)
     ]
-    payload = json.dumps([room.photo_path, drawn, padded, prompt, model], sort_keys=True, ensure_ascii=False)
+    parts = [room.photo_path, drawn, padded, prompt, model] + ([guide_style] if guide_style != "flat" else [])
+    payload = json.dumps(parts, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -3857,14 +4024,16 @@ def find_reusable_gap_result(db: Session, room_id: int, key: str) -> tuple[int, 
     return None
 
 
-async def resolve_gap_writer(db: Session, attempt: Attempt, guide: bytes, shapes: list[dict], padded: bool) -> dict:
+async def resolve_gap_writer(
+    db: Session, attempt: Attempt, guide: bytes, shapes: list[dict], padded: bool, guide_style: str = "flat"
+) -> dict:
     """The gap writer's result for this render, reused or fresh. Never raises:
     a failure comes back with no lines and a reason."""
     order = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
     tags = [order[(s["item_id"], s["sub_index"])] for s in shapes]
     prompt = get_gap_writer_prompt(db)
     model = get_active_vision_model(db)
-    key = gap_writer_key(attempt.room, shapes, tags, padded, prompt, model)
+    key = gap_writer_key(attempt.room, shapes, tags, padded, prompt, model, guide_style)
     info = {"key": key, "model": model, "lines": [], "output": None, "usage": None, "elapsed_s": None, "reason": None}
     try:
         reusable = find_reusable_gap_result(db, attempt.room_id, key)
@@ -4320,9 +4489,12 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         size = derive_size(room_debug["width"], room_debug["height"])
         if shapes:
             # the guide image: drawn on the room photo, padded exactly as the photo would be
+            guide_style = get_guide_style(db)  # read once: this render's guide, gap writer and prompt agree
             with Image.open(room_path) as room_image:
-                tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
-                guide = draw_guide_image(room_image, shapes, tags)
+                pieces_now = attempt_pieces(attempt)
+                tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in pieces_now}
+                widths = {(p["item"].id, p["sub_index"]): p["width_ft"] for p in pieces_now}
+                guide = draw_guide_image(room_image, shapes, tags, guide_style, widths)
             sent = guide
             if pad_room_photo_enabled(db):
                 sent, photo_box = pad_to_output_ratio(guide, size)
@@ -4342,10 +4514,11 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 "original_width": guide.width,
                 "original_height": guide.height,
                 "padded": photo_box is not None,
+                "guide_style": guide_style,
             }
             # the gap writer reads this same guide image; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
-            gap_info = await resolve_gap_writer(db, attempt, buffer.getvalue(), shapes, photo_box is not None)
+            gap_info = await resolve_gap_writer(db, attempt, buffer.getvalue(), shapes, photo_box is not None, guide_style)
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
@@ -4375,6 +4548,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 feet_in_prompt(db),
                 guide.width / guide.height,
                 gap_info["lines"] if gap_info else None,
+                guide_style,
             )
         else:
             prompt = build_prompt(
@@ -6950,6 +7124,7 @@ def api_studio_delete(
 
 PROMPT_PAGE_KEYS = [
     SHAPES_PROMPT_KEY,
+    GUIDE_STYLE_KEY,
     GAP_WRITER_PROMPT_KEY,
     PROMPT_SETTING_KEY,
     VISION_PROMPT_SETTING_KEY,
@@ -6989,6 +7164,7 @@ def prompt_setting_response(db: Session) -> dict:
         "default_placement_writer_prompt": DEFAULT_PLACEMENT_WRITER_PROMPT,
         "shapes_prompt": value(SHAPES_PROMPT_KEY, DEFAULT_SHAPES_GENERATION_PROMPT),
         "default_shapes_prompt": DEFAULT_SHAPES_GENERATION_PROMPT,
+        "guide_style": next((s for s in GUIDE_STYLES if s == value(GUIDE_STYLE_KEY, "flat").strip().lower()), "flat"),
         "gap_writer_prompt": value(GAP_WRITER_PROMPT_KEY, DEFAULT_GAP_WRITER_PROMPT),
         "default_gap_writer_prompt": DEFAULT_GAP_WRITER_PROMPT,
         "studio_prompt": value(STUDIO_PROMPT_KEY, DEFAULT_STUDIO_PROMPT),
@@ -7082,6 +7258,7 @@ class PromptBody(BaseModel):
     placement_writer_prompt: str | None = None
     shapes_prompt: str | None = None
     gap_writer_prompt: str | None = None
+    guide_style: str | None = None
     studio_prompt: str | None = None
     studio_edit_prompt: str | None = None
     studio_look_prompt: str | None = None
@@ -7110,6 +7287,8 @@ def api_admin_save_prompt(
         return error_response(
             400, "shapes_prompt_missing_shapes", f"The draw-on-photo prompt must contain {SHAPES_TOKEN} where the shapes go."
         )
+    if body.guide_style is not None and body.guide_style not in GUIDE_STYLES:
+        return error_response(400, "invalid_guide_style", "Choose flat shapes or 3D boxes for the draw-on-photo guide.")
     if body.gap_writer_prompt is not None and not body.gap_writer_prompt.strip():
         return error_response(400, "empty_gap_writer_prompt", "The gap writer prompt can't be empty.")
     if body.placement_writer_prompt is not None and WRITER_PIECES_TOKEN not in body.placement_writer_prompt:
@@ -7161,6 +7340,8 @@ def api_admin_save_prompt(
         set_setting(db, PLACEMENT_WRITER_PROMPT_KEY, body.placement_writer_prompt)
     if body.shapes_prompt is not None:
         set_setting(db, SHAPES_PROMPT_KEY, body.shapes_prompt)
+    if body.guide_style is not None and body.guide_style != get_guide_style(db):
+        set_setting(db, GUIDE_STYLE_KEY, body.guide_style)  # saved only once it differs from what is in use
     if body.gap_writer_prompt is not None and body.gap_writer_prompt != get_gap_writer_prompt(db):
         set_setting(db, GAP_WRITER_PROMPT_KEY, body.gap_writer_prompt)  # saved only once it differs from what is in use
     if body.studio_prompt is not None:

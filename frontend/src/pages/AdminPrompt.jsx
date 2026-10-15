@@ -31,6 +31,7 @@ export default function AdminPrompt() {
   const [writerPrompt, setWriterPrompt] = useState("");
   const [shapesPrompt, setShapesPrompt] = useState("");
   const [gapWriterPrompt, setGapWriterPrompt] = useState("");
+  const [guideStyle, setGuideStyle] = useState("flat");
   const [studioPrompt, setStudioPrompt] = useState("");
   const [studioEditPrompt, setStudioEditPrompt] = useState("");
   const [studioLookPrompt, setStudioLookPrompt] = useState("");
@@ -54,6 +55,7 @@ export default function AdminPrompt() {
     setWriterPrompt(res.placement_writer_prompt);
     setShapesPrompt(res.shapes_prompt);
     setGapWriterPrompt(res.gap_writer_prompt);
+    setGuideStyle(res.guide_style || "flat");
     setStudioPrompt(res.studio_prompt);
     setStudioEditPrompt(res.studio_edit_prompt);
     setStudioLookPrompt(res.studio_look_prompt);
@@ -91,6 +93,7 @@ export default function AdminPrompt() {
         placement_writer_prompt: writerPrompt,
         shapes_prompt: shapesPrompt,
         gap_writer_prompt: gapWriterPrompt,
+        guide_style: guideStyle,
         studio_prompt: studioPrompt,
         studio_edit_prompt: studioEditPrompt,
         studio_look_prompt: studioLookPrompt,
@@ -188,6 +191,23 @@ export default function AdminPrompt() {
         <button type="button" className="link-btn" onClick={() => setShapesPrompt(data.default_shapes_prompt)}>
           Put back the built-in draw-on-photo prompt
         </button>
+      </div>
+
+      <div className="section-label" style={{ marginTop: 26 }}>Draw on photo guide</div>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        How the drawn pieces appear on the guide image sent to the image model (and the gap writer). 3D boxes raises each
+        drawn shape into a see-through box about seat height; the salesman still draws flat shapes. New renders only.
+      </div>
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 12 }}>
+        {[
+          ["flat", "Flat shapes"],
+          ["boxes", "3D boxes"],
+        ].map(([value, label]) => (
+          <label key={value} style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 14, minHeight: 44 }}>
+            <input type="radio" name="guide-style" value={value} checked={guideStyle === value} onChange={() => setGuideStyle(value)} style={{ width: 20, height: 20 }} />
+            {label}
+          </label>
+        ))}
       </div>
 
       <div className="section-label" style={{ marginTop: 26 }}>Draw on photo (Beta) – gap writer</div>

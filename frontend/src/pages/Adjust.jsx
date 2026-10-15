@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
-import { IMAGE_ACCEPT, debugLog, normalizeToJpeg, roomLookLabel } from "../utils.js";
+import { IMAGE_ACCEPT, debugLog, normalizeToJpeg, photoUploadError, roomLookLabel } from "../utils.js";
 
 /** "Adjust & try again" for a finished attempt (the source). Opening this
  * screen creates nothing: it shows the source's values. The copy to work on
@@ -114,7 +114,7 @@ export default function Adjust() {
       toast("Room photo updated.");
     } catch (err) {
       debugLog(`upload FAIL ${err.message}`);
-      toast(err.message);
+      toast(photoUploadError(err));
     } finally {
       setUploadingPhoto(false);
     }

@@ -9,6 +9,7 @@ import { StepFooter } from "../components/StepFooter.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
+import { photoUploadError } from "../utils.js";
 
 const ROOM_TREATMENTS = [
   { value: "keep", label: "Keep room as it is", desc: "Same walls, floor and decor – only the furniture is added" },
@@ -284,7 +285,7 @@ export default function Finish() {
       const data = await api.post(`/api/attempts/${id}/items/${item.id}/finish`, { form });
       if (saveSeq.current[item.id] === seq) replaceItem(data.item);
     } catch (err) {
-      toast(err.message);
+      toast(photoUploadError(err));
       if (saveSeq.current[item.id] === seq) replaceItem(item);
     } finally {
       setSaving((s) => ({ ...s, [item.id]: (s[item.id] || 1) - 1 }));

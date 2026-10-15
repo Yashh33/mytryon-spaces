@@ -7,7 +7,7 @@ import { TopBar } from "../components/TopBar.jsx";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { ErrorBlock, Loading } from "../components/StateBlock.jsx";
-import { debugLog, withQuery } from "../utils.js";
+import { debugLog, photoUploadError, withQuery } from "../utils.js";
 
 const LOOKS = [
   { value: "warm", label: "Warm" },
@@ -125,8 +125,8 @@ export default function NewVisualisation() {
       debugLog(`studio job ${res.job_id} image ${res.id}`);
       setJob({ jobId: res.job_id, previewUrl });
     } catch (err) {
-      // includes the server's not-enough-credits message (402)
-      toast(err.message);
+      // includes the server's not-enough-credits message (402); a refused photo says so
+      toast(photoUploadError(err));
       setPendingLook(null);
     } finally {
       setStarting(false);

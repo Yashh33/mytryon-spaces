@@ -313,7 +313,7 @@ IMAGE_OUTPUT_RATE_PER_M = 30.0
 
 # ---------------------------------------------------------------------------
 
-MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # per photo, as sent (an iPhone original can be 10+ MB)
 MAX_IMAGE_DIMENSION = 1536
 MAX_ITEMS_PER_ATTEMPT = 4
 GENERATION_RETRIES = 2  # in addition to the first attempt
@@ -1231,27 +1231,38 @@ class UploadValidationError(Exception):
         self.message = message
 
 
-HEIF_MIME_TYPES = {"image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"}
-HEIF_EXTENSIONS = (".heic", ".heif")
+PHOTO_TYPES_TEXT = "JPEG, PNG, WebP or iPhone HEIC"
 
 
-def _is_heif_upload(upload: UploadFile) -> bool:
-    content_type = (upload.content_type or "").lower()
-    filename = (upload.filename or "").lower()
-    return content_type in HEIF_MIME_TYPES or filename.endswith(HEIF_EXTENSIONS)
+def _looks_like_image(data: bytes) -> bool:
+    """Judged by the bytes, not the name or type the browser sent (iOS can
+    send a HEIC photo as "application/octet-stream" with no extension).
+    Pillow reads the header only; HEIC/HEIF through pillow-heif."""
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            return bool(image.format)
+    except Exception:
+        return bool(pillow_heif.is_supported(data))
 
 
 async def read_validated_upload(upload: UploadFile) -> bytes:
-    content_type = (upload.content_type or "").lower()
-    # Some browsers send HEIC with an empty or octet-stream type, so fall
-    # back to the file extension for those.
-    if not (content_type.startswith("image/") or _is_heif_upload(upload)):
-        raise UploadValidationError(400, "invalid_type", "That doesn't look like a photo. Please choose an image.")
     data = await upload.read()
     if len(data) == 0:
-        raise UploadValidationError(400, "empty_upload", "That photo looks empty. Please try another.")
+        raise UploadValidationError(400, "empty_upload", "That photo arrived empty. Please choose it again.")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise UploadValidationError(400, "too_large", "That photo is too large. Please use one under 12MB.")
+        raise UploadValidationError(
+            400,
+            "too_large",
+            f"That photo is {len(data) / (1024 * 1024):.1f} MB; the limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB per "
+            "photo. Please choose a smaller photo.",
+        )
+    if not _looks_like_image(data):
+        sent = upload.content_type or "no type"
+        raise UploadValidationError(
+            400,
+            "invalid_type",
+            f"That file isn't a photo we can read ({sent}). Please choose a {PHOTO_TYPES_TEXT} photo.",
+        )
     return data
 
 
@@ -1283,14 +1294,18 @@ def load_and_downscale(data: bytes) -> Image.Image:
         image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
     except Exception:
-        raise UploadValidationError(400, "unreadable_image", "We couldn't read that photo. Please try another.")
+        raise UploadValidationError(
+            400, "unreadable_image", f"We couldn't open that photo. Please choose a {PHOTO_TYPES_TEXT} photo."
+        )
     image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.LANCZOS)
     return image
 
 
 async def save_validated_upload(upload: UploadFile, dest_dir: Path) -> str:
-    """Validates, downscales to MAX_IMAGE_DIMENSION and saves to dest_dir.
-    Returns the path relative to DATA_ROOT."""
+    """Validates (by content), converts HEIC/HEIF to JPEG, turns it upright
+    (EXIF), downscales to MAX_IMAGE_DIMENSION and saves it to dest_dir as a
+    .jpg. Every upload in the app goes through here. Returns the path
+    relative to DATA_ROOT."""
     data = convert_heif_to_jpeg(await read_validated_upload(upload))
     image = load_and_downscale(data)
     filename = f"{uuid.uuid4().hex}.jpg"

@@ -5,7 +5,10 @@ export function UploadBox({ file, existingUrl, onChange, required = false, label
   const inputId = useId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [noPreview, setNoPreview] = useState(false); // e.g. a HEIC sent as it is, which this browser can't show
   const objectUrl = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
+
+  useEffect(() => setNoPreview(false), [file, existingUrl]);
 
   useEffect(() => {
     return () => {
@@ -42,7 +45,11 @@ export function UploadBox({ file, existingUrl, onChange, required = false, label
           <div className="upload-empty">Preparing photo…</div>
         ) : previewUrl ? (
           <>
-            <img src={previewUrl} alt="" />
+            {noPreview ? (
+              <div className="upload-empty">Photo ready (no preview in this browser)</div>
+            ) : (
+              <img src={previewUrl} alt="" onError={() => setNoPreview(true)} />
+            )}
             <div className="upload-change">Change photo</div>
           </>
         ) : (

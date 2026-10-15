@@ -34,14 +34,22 @@ async function request(method, path, { json, form } = {}) {
   }
 
   let data = null;
+  let body = "";
   try {
-    data = await res.json();
+    body = await res.text();
+    data = body ? JSON.parse(body) : null;
   } catch {
     data = null;
   }
 
   if (!res.ok) {
-    const message = (data && (data.message || data.detail)) || "Something went wrong. Please try again.";
+    let message = data && (data.message || data.detail);
+    if (!message && res.status === 413) message = "The photo is too large for the server to accept. Please choose a smaller photo.";
+    if (!message) {
+      // not our JSON (e.g. a proxy's error page): say what came back
+      const text = body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+      message = `Something went wrong (error ${res.status}${text ? `: ${text}` : ""}). Please try again.`;
+    }
     throw new ApiError(message, res.status, data && data.error);
   }
   return data;

@@ -1,8 +1,7 @@
-const MAX_UPLOAD_DIMENSION = 1600;
-const TARGET_BYTES = 600 * 1024;
-const QUALITIES = [0.82, 0.75, 0.68, 0.6];
-const READ_ERROR = "Couldn't read this photo. Try another photo or take a screenshot of it.";
+const MAX_UPLOAD_DIMENSION = 2560; // longest side of the JPEG sent; never enlarged
+const JPEG_QUALITY = 0.9;
 
+// every photo input: a narrow list (".jpg,.png") makes iOS misbehave
 export const IMAGE_ACCEPT = "image/*";
 
 // ---- ?debug=1 on-screen log -------------------------------------------------
@@ -36,11 +35,6 @@ export function debugLog(msg) {
 }
 
 // ---- image normalisation ----------------------------------------------------
-function isHeic(file) {
-  const type = (file.type || "").toLowerCase();
-  const name = (file.name || "").toLowerCase();
-  return type === "image/heic" || type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif") || !type;
-}
 
 async function decodeViaBitmap(blob) {
   const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
@@ -87,28 +81,20 @@ function canvasToBlob(canvas, quality) {
   return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
 }
 
-/** Always returns a NEW image/jpeg File (longest edge <= 1600px, ~600 KB) or
- * throws — it never hands back the original file. iPhone HEIC is decoded by
- * the browser when it can, otherwise converted with heic2any (lazy chunk). */
+/** The photo to upload: the chosen file loaded by the browser (Safari on an
+ * iPhone reads HEIC this way), turned upright from its EXIF orientation,
+ * shrunk so its longest side is at most 2560 px (never enlarged) and saved
+ * as a .jpg at quality 0.9. If the browser can't read the file at all, the
+ * original file comes back unchanged: the server reads HEIC/HEIF itself.
+ * Never throws. */
 export async function normalizeToJpeg(file) {
   debugLog(`onChange fired ${file.name} ${file.type || "no type"} ${Math.round(file.size / 1024)}KB`);
-  let result = await tryDecode(file);
-  if (!result && isHeic(file)) {
-    try {
-      const { default: heic2any } = await import("heic2any");
-      let converted = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.9 });
-      if (Array.isArray(converted)) converted = converted[0];
-      result = await tryDecode(converted);
-      if (result) result.via = "heic2any";
-    } catch {
-      result = null;
-    }
-  }
+  const result = await tryDecode(file);
   if (!result) {
-    debugLog("decode FAIL");
-    throw new Error(READ_ERROR);
+    debugLog("decode FAIL: sending the original file");
+    return file;
   }
-  debugLog(`decode OK via ${result.via}`);
+  debugLog(`decode OK via ${result.via} ${result.decoded.width}x${result.decoded.height}`);
 
   const { decoded } = result;
   try {
@@ -117,25 +103,32 @@ export async function normalizeToJpeg(file) {
     canvas.width = Math.max(1, Math.round(decoded.width * scale));
     canvas.height = Math.max(1, Math.round(decoded.height * scale));
     canvas.getContext("2d").drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
-
-    let blob = null;
-    let used = QUALITIES[0];
-    for (const q of QUALITIES) {
-      blob = await canvasToBlob(canvas, q);
-      used = q;
-      if (!blob) break;
-      if (blob.size <= TARGET_BYTES) break;
-    }
+    const blob = await canvasToBlob(canvas, JPEG_QUALITY);
     if (!blob) {
-      debugLog("decode FAIL");
-      throw new Error(READ_ERROR);
+      debugLog("encode FAIL: sending the original file");
+      return file;
     }
-    debugLog(`compressed ${Math.round(blob.size / 1024)}KB at q${used}`);
+    debugLog(`jpeg ${canvas.width}x${canvas.height} ${Math.round(blob.size / 1024)}KB`);
     const name = (file.name || "photo").replace(/\.[^.]*$/, "") + ".jpg";
     return new File([blob], name, { type: "image/jpeg" });
+  } catch {
+    debugLog("canvas FAIL: sending the original file");
+    return file;
   } finally {
     decoded.release();
   }
+}
+
+// errors that mean the photo itself was refused or never arrived
+const PHOTO_ERRORS = new Set(["invalid_type", "empty_upload", "too_large", "heic_conversion_failed", "unreadable_image", "network_error"]);
+
+/** The message to show when a request that sent a photo failed: the
+ * server's own words, saying the photo didn't upload when that is what
+ * went wrong (other failures, e.g. not enough credits, are shown as they are). */
+export function photoUploadError(err) {
+  const message = err?.message || "Something went wrong.";
+  if (PHOTO_ERRORS.has(err?.error) || err?.status === 413) return `The photo didn't upload: ${message}`;
+  return message;
 }
 
 export const downscaleImage = normalizeToJpeg;

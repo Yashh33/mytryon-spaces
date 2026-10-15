@@ -5,7 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
-import { debugLog } from "../utils.js";
+import { debugLog, photoUploadError } from "../utils.js";
 
 const ROOM_TYPES = ["Living room", "Bedroom", "Dining", "Balcony"];
 
@@ -30,7 +30,7 @@ export default function RoomNew() {
       navigate(`/room/${data.room.id}`);
     } catch (err) {
       debugLog(`upload FAIL ${err.message}`);
-      toast(err.message);
+      toast(photoUploadError(err));
       setSubmitting(false);
     }
   }

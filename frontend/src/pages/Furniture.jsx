@@ -9,7 +9,7 @@ import { StepFooter } from "../components/StepFooter.jsx";
 import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
-import { debugLog } from "../utils.js";
+import { debugLog, photoUploadError } from "../utils.js";
 import { BottomSheet } from "../components/BottomSheet.jsx";
 import { RoomPlanView } from "../components/RoomPlanView.jsx";
 import { cornerFigure, curvedFigure, lFigure, straightFigure } from "../placement.js";
@@ -264,7 +264,7 @@ export default function Furniture() {
       setCount(1);
     } catch (err) {
       debugLog(`upload FAIL ${err.message}`);
-      toast(err.message);
+      toast(photoUploadError(err));
     } finally {
       setAdding(false);
     }

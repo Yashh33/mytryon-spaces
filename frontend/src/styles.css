@@ -443,8 +443,6 @@ h2 { font-size: 19px; }
 .choice-card:disabled { opacity: 0.6; }
 .choice-title { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; }
 .choice-sub { font-size: 13px; color: var(--muted); }
-.draw-layout { display: grid; gap: 16px; }
-@media (min-width: 900px) { .draw-layout { grid-template-columns: minmax(0, 1fr) 320px; align-items: start; } }
 .draw-photo { position: relative; width: 100%; border-radius: 12px; overflow: hidden; background: var(--line); user-select: none; }
 .draw-photo img { display: block; width: 100%; height: auto; pointer-events: none; }
 .draw-svg { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
@@ -462,17 +460,8 @@ h2 { font-size: 19px; }
 .draw-handles text { font-family: var(--sans); font-weight: 700; user-select: none; }
 .draw-edge-hit { stroke: transparent; cursor: pointer; stroke-linecap: round; }
 .draw-tag { fill: #111; font-family: var(--sans); font-weight: 600; user-select: none; }
-.draw-selected { border: 1px solid var(--orange); border-radius: 12px; padding: 12px; margin-bottom: 14px; background: #fff; }
-.draw-selected-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; margin-bottom: 10px; }
-.draw-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .btn-danger-ghost { background: #fff; border: 1px solid #F3C7C3; color: #B42318; }
-.draw-pieces { display: flex; flex-direction: column; gap: 8px; }
-.draw-piece { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; background: #fff; }
-.draw-piece.selected { border-color: var(--orange); }
-.draw-piece img, .draw-piece-img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; background: var(--line); flex-shrink: 0; }
 .draw-swatch { width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0,0,0,0.15); }
-.draw-piece-name { flex: 1; font-weight: 700; font-size: 13.5px; display: flex; flex-direction: column; gap: 2px; }
-.draw-piece-note { font-weight: 500; font-size: 12px; color: #B42318; }
 /* Live activity */
 .activity-list { border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .activity-row { display: flex; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--line); align-items: flex-start; }
@@ -1197,3 +1186,33 @@ h2 { font-size: 19px; }
 .debug-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; font-weight: 700; }
 .debug-panel .debug-images figure { width: 130px; }
 .debug-prompt { max-height: 320px; overflow: auto; }
+
+/* Draw on photo: full screen, bottom toolbar, pieces tray, number chips */
+.draw-wrap.fs { position: fixed; inset: 0; z-index: 1000; background: #111; display: flex; flex-direction: column; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
+.draw-fs-top { display: flex; justify-content: space-between; gap: 8px; padding: 8px; }
+.draw-stage { position: relative; }
+.draw-wrap.fs .draw-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.draw-wrap.fs .draw-photo { border-radius: 0; flex-shrink: 0; }
+.draw-wrap.fs .draw-photo img { width: 100%; height: 100%; }
+.draw-rotate-hint { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.75); color: #fff; font-size: 13px; font-weight: 700; padding: 7px 12px; border-radius: 9px; pointer-events: none; white-space: nowrap; }
+.draw-number { fill: #fff; font-family: var(--sans); font-weight: 800; user-select: none; }
+.draw-toolbar { position: sticky; bottom: 84px; z-index: 21; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; padding: 8px; background: rgba(255,255,255,0.97); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 6px 20px rgba(0,0,0,0.12); }
+.draw-wrap.fs .draw-toolbar { position: static; margin: 6px 8px 0; }
+.draw-toolbar-name { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 14px; flex-basis: 100%; }
+.draw-toolbar-group { display: flex; align-items: center; gap: 4px; }
+.draw-toolbar-group span { font-size: 12px; font-weight: 700; color: var(--muted); margin-right: 2px; }
+.draw-toolbar button { min-width: 44px; min-height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font-size: 15px; font-weight: 800; cursor: pointer; }
+.draw-toolbar button:active { background: var(--line); }
+.draw-toolbar .draw-toolbar-wide { font-size: 13px; }
+.draw-toolbar .draw-toolbar-delete { color: #B42318; border-color: #F3C4BF; font-size: 13px; margin-left: auto; }
+.draw-tray-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+.draw-wrap.fs .draw-tray-row { margin: 6px 8px 8px; }
+.draw-tray { display: flex; gap: 8px; overflow-x: auto; flex: 1 1 260px; min-width: 0; padding-bottom: 2px; }
+.draw-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 22px; background: #fff; color: var(--ink); font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer; flex-shrink: 0; }
+.draw-chip.selected { border-color: var(--orange); box-shadow: 0 0 0 1px var(--orange); }
+.draw-chip:not(.placed) { border-style: dashed; }
+.draw-chip-tick { color: #12A150; font-weight: 900; }
+.draw-tray-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.draw-show-buttons { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; min-height: 44px; }
+.draw-wrap.fs .draw-show-buttons { color: #fff; }
+.draw-show-buttons input { width: 18px; height: 18px; }

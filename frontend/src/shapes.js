@@ -58,6 +58,7 @@ export function piecesOf(items) {
         item_id: item.id,
         sub_index: sub.sub_index,
         name: `${item.category} · ${label}`,
+        label,
         photo_url: item.photo_url,
         kind,
         type: typeLabel(item.category, label, kind),
@@ -511,4 +512,24 @@ export function turnOnFloor(origPoints, kind, deg, aspect, widthFt) {
   }
   if (out.some(([x, y]) => outside(x) || outside(y))) return null;
   return out.map(([x, y]) => [round5(x), round5(y)]);
+}
+
+/** The sign that makes a positive floor turn swing the sofa's FRONT toward
+ * the right of the picture. A turn of +deg is clockwise seen from above, which
+ * swings a front that faces the camera to the left, so such a sofa needs -1;
+ * one whose front faces away from the camera (its back line below its
+ * middle) needs +1. */
+export function floorTurnSign(shape) {
+  const { kind, points } = shape;
+  let back;
+  if (kind === "curved") back = [points[4]];
+  else
+    back = shapeParts(kind, points).flatMap((corners, part) => {
+      const edge = shape.backrest?.[part];
+      return edge == null ? [] : [corners[edge], corners[(edge + 1) % 4]];
+    });
+  if (!back.length) return -1;
+  const backY = back.reduce((sum, p) => sum + p[1], 0) / back.length;
+  const middleY = points.reduce((sum, p) => sum + p[1], 0) / points.length;
+  return backY <= middleY ? -1 : 1;
 }

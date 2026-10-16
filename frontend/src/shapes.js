@@ -113,7 +113,7 @@ const round5 = (v) => Math.round(v * 100000) / 100000;
 /** A new shape for a piece, dropped in the lower middle of the photo (the
  * floor), offset a little per piece so shapes don't land on each other. The
  * backrest starts on the edge farthest from the camera (the top edge). */
-export function newShape(piece, index) {
+export function newShape(piece, index, aspect = 1.5) {
   const dx = ((index % 3) - 1) * 0.12;
   const dy = (index % 2) * 0.05;
   const at = (x, y) => [round5(clampIn(x + dx)), round5(clampIn(y + dy))];
@@ -122,8 +122,18 @@ export function newShape(piece, index) {
     return { ...base, points: [at(0.37, 0.58), at(0.63, 0.58), at(0.63, 0.72), at(0.37, 0.72)], backrest: [0], lounge: null };
   }
   if (piece.kind === "curved") {
-    // back arc away from the camera, its ends coming forward toward the camera
-    const points = [at(0.3, 0.64), at(0.7, 0.64), at(0.64, 0.72), at(0.36, 0.72), at(0.5, 0.52)];
+    // centred across the photo a little below the middle, backrest on the far
+    // side, ends coming toward the camera, with a gentle curve (30% of the deepest bend)
+    const [half, backY, frontY, inset] = [0.22, 0.62, 0.71, 0.04];
+    const sag = 0.3 * BEND_MAX * (2 * half * aspect); // photo-height units, toward the back
+    const c = (x, y) => [round5(clampIn(x)), round5(clampIn(y))];
+    const points = [
+      c(0.5 - half, backY),
+      c(0.5 + half, backY),
+      c(0.5 + half - inset, frontY),
+      c(0.5 - half + inset, frontY),
+      c(0.5, backY - sag),
+    ];
     return { ...base, points, backrest: [0], lounge: null };
   }
   const points = [at(0.3, 0.52), at(0.7, 0.52), at(0.7, 0.82), at(0.58, 0.82), at(0.58, 0.64), at(0.3, 0.64)];
@@ -561,4 +571,56 @@ export function moveLoungeToOtherEnd(shape, aspect) {
   }
   if (out.some(([x, y]) => outside(x) || outside(y))) return null;
   return out.map(([x, y]) => [round5(x), round5(y)]);
+}
+
+// ---- every point on the photo ------------------------------------------------------
+// A shape fits when every point of it is at least EDGE inside the photo: its
+// corners, the whole of a curved sofa's two arcs (sampled along the curve)
+// and, with the 3D box guide, the raised top of its box — raised as main.py's
+// _box_lift does: BOX_HEIGHT_FT at the scale of its back line (its length /
+// the piece's width), more near the camera and less far away, by the
+// distance below a horizon at BOX_HORIZON of the photo's height.
+
+export const BOX_HEIGHT_FT = 1.4;
+const BOX_HORIZON = 0.4;
+const BOX_FALLBACK_WIDTH_FT = 6;
+
+/** The floor outline a box is built on and the back line its scale is measured along. */
+function boxOutline(shape, aspect) {
+  const { kind, points } = shape;
+  if (kind === "curved") {
+    const { outline, back } = curvedOutline(points);
+    return { outline, ruler: back };
+  }
+  if (kind === "rect") {
+    const e = shape.backrest?.[0] ?? 0;
+    return { outline: points.slice(0, 4), ruler: [points[e], points[(e + 1) % 4]] };
+  }
+  const backs = shapeParts(kind, points).flatMap((corners, part) => {
+    const e = shape.backrest?.[part];
+    return e == null ? [] : [[corners[e], corners[(e + 1) % 4]]];
+  });
+  const length = ([a, b]) => Math.hypot((b[0] - a[0]) * aspect, b[1] - a[1]);
+  const ruler = backs.length ? backs.reduce((best, b) => (length(b) > length(best) ? b : best)) : [points[0], points[1]];
+  return { outline: points, ruler };
+}
+
+/** How far (photo-height fractions) a floor point at height y is raised for its box top. */
+function boxLift(ruler, aspect, widthFt) {
+  let length = 0;
+  for (let i = 1; i < ruler.length; i++) length += Math.hypot((ruler[i][0] - ruler[i - 1][0]) * aspect, ruler[i][1] - ruler[i - 1][1]);
+  const base = BOX_HEIGHT_FT * (length / (widthFt > 0 ? widthFt : BOX_FALLBACK_WIDTH_FT));
+  const backY = ruler.reduce((sum, p) => sum + p[1], 0) / ruler.length;
+  if (backY - BOX_HORIZON < 1e-3) return () => base; // back line at or above the horizon
+  return (y) => Math.max(0, (base * (y - BOX_HORIZON)) / (backY - BOX_HORIZON));
+}
+
+/** Does `shape` with these `points` fit on the photo with the EDGE margin —
+ * its whole outline and, with `boxes`, its raised box top too? */
+export function shapeFits(shape, points, aspect, widthFt, boxes) {
+  const { outline, ruler } = boxOutline({ ...shape, points }, aspect);
+  if (outline.some(([x, y]) => outside(x) || outside(y))) return false;
+  if (!boxes) return true;
+  const lift = boxLift(ruler, aspect, widthFt);
+  return outline.every(([, y]) => y - lift(y) >= EDGE - 1e-6);
 }

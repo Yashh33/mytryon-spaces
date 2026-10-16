@@ -20,6 +20,7 @@ import {
   moveShape,
   newShape,
   piecesOf,
+  shapeFits,
   shapeCentre,
   shapeParts,
   snapAngle,
@@ -108,6 +109,7 @@ export default function DrawOnPhoto() {
   const [size, setSize] = useState(null); // the photo's natural { w, h }
   const [scale, setScale] = useState(1); // photo pixels per screen pixel
   const [saveState, setSaveState] = useState("saved"); // "saved" | "saving" | "error"
+  const [guideStyle, setGuideStyle] = useState("boxes"); // with boxes, each box's raised top must stay on the photo too
   const [undoCount, setUndoCount] = useState(0);
   const [showButtons, setShowButtons] = useState(readShowButtons);
   const [fullscreen, setFullscreen] = useState(false);
@@ -131,6 +133,7 @@ export default function DrawOnPhoto() {
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
+      setGuideStyle(data.guide_style || "boxes");
       // a shape's colour follows its piece's place in the list
       const colours = Object.fromEntries(piecesOf(data.attempt.items).map((p) => [p.key, p.colour]));
       const saved = (data.attempt.shapes?.shapes || []).map((s) => ({ ...s, colour: colours[keyOf(s)] || s.colour }));
@@ -299,7 +302,20 @@ export default function DrawOnPhoto() {
     return { deg: (Math.atan2(dy, dx) * 180) / Math.PI, dist: Math.hypot(dx, dy) };
   }
 
+  /** Would `shape` with these `points` stay on the photo (2% margin) — every
+   * corner, a curved sofa's whole arcs, and the raised top of its 3D box? */
+  function fitsOnPhoto(shape, points) {
+    return Boolean(points) && shapeFits(shape, points, aspect, widthFtOf(keyOf(shape)), guideStyle === "boxes");
+  }
+
+  /** New points for a shape; any that would leave the photo are ignored, so
+   * every move, resize, turn, tilt and bend stops at the last valid position.
+   * A shape saved before this check that pokes out already may still move,
+   * so it can be brought back onto the photo. */
   function setShapePoints(key, points) {
+    const shape = shapesRef.current.find((s) => keyOf(s) === key);
+    if (!shape || !points) return;
+    if (!fitsOnPhoto(shape, points) && fitsOnPhoto(shape, shape.points)) return;
     setShapes((prev) => prev.map((s) => (keyOf(s) === key ? { ...s, points } : s)));
   }
 
@@ -405,7 +421,8 @@ export default function DrawOnPhoto() {
       if (points) setShapePoints(d.key, points); // a turn that won't fit stops at the last one that did
     } else {
       // "move" or a drag that began on an edge: the whole shape follows
-      setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveShape(s, d.orig, at[0] - d.start[0], at[1] - d.start[1]) : s)));
+      const shape = shapesRef.current.find((s) => keyOf(s) === d.key);
+      if (shape) setShapePoints(d.key, moveShape(shape, d.orig, at[0] - d.start[0], at[1] - d.start[1]).points);
     }
   }
 
@@ -444,7 +461,13 @@ export default function DrawOnPhoto() {
   }
 
   function addShape(piece, index) {
-    const shape = newShape(piece, index);
+    let shape = newShape(piece, index, aspect);
+    // make it smaller until all of it (and its box top) is on the photo
+    for (let i = 0; i < 12 && !fitsOnPhoto(shape, shape.points); i++) {
+      const smaller = transformPoints(shape.points, 0.9, 0, aspect);
+      if (!smaller) break;
+      shape = { ...shape, points: smaller };
+    }
     update([...shapes.filter((s) => keyOf(s) !== piece.key), shape]);
     setSelected(piece.key);
   }
@@ -455,20 +478,19 @@ export default function DrawOnPhoto() {
   }
 
   function changeShape(key, fn) {
-    update(shapes.map((s) => (keyOf(s) === key ? fn(s) : s)));
+    const shape = shapes.find((s) => keyOf(s) === key);
+    const next = shape ? fn(shape) : null;
+    if (!next || !fitsOnPhoto(shape, next.points)) return; // a flip that won't fit doesn't happen
+    update(shapes.map((s) => (keyOf(s) === key ? next : s)));
   }
 
   /** One toolbar step on the selected shape's points; nothing happens (and
-   * nothing is remembered for Undo) when the step won't fit on the photo —
-   * with `failMessage`, the salesman is told why. */
-  function step(fn, failMessage = null) {
+   * nothing is remembered for Undo) when the step won't fit on the photo. */
+  function step(fn) {
     const shape = shapesRef.current.find((s) => keyOf(s) === selected);
     if (!shape) return;
     const points = fn(shape);
-    if (!points) {
-      if (failMessage) toast(failMessage);
-      return;
-    }
+    if (!fitsOnPhoto(shape, points)) return;
     update(shapesRef.current.map((s) => (keyOf(s) === selected ? { ...s, points } : s)));
   }
 
@@ -550,7 +572,7 @@ export default function DrawOnPhoto() {
             type="button"
             className="draw-toolbar-wide"
             onClick={() =>
-              step((s) => moveLoungeToOtherEnd(s, aspect), "There's no room for the lounge at the other end — move the sofa first.")
+              step((s) => moveLoungeToOtherEnd(s, aspect))
             }
           >
             Move lounge to other end

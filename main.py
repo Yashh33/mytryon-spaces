@@ -4016,9 +4016,9 @@ def shape_facts(attempt: Attempt, shapes: list[dict], aspect: float, writer: dic
     """What the prompt says about each shape's wall, by its label, with the
     sentence it leads to: the gap writer's wall (`writer`, by label) where it
     gave one, otherwise the geometry. The end of an L / corner sofa is always
-    worked out from the shape. Rectangles without a wall from the writer have
-    none (their sentence says "flat against the wall"); curved sofas are not
-    listed."""
+    worked out from the shape, and so is a curved sofa's bow. Rectangles
+    without a wall from the writer have none (their sentence says "flat
+    against the wall")."""
     tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
     out = {}
     for shape in shapes:
@@ -4030,6 +4030,9 @@ def shape_facts(attempt: Attempt, shapes: list[dict], aspect: float, writer: dic
         elif shape["kind"] == "corner":
             f = two_part_facts(shape, aspect, given.get("wall"))
             out[tag] = {**f, "sentence": corner_sofa_sentence(f)}
+        elif shape["kind"] == "curved":
+            f = curved_facts(shape, aspect, given.get("wall"))
+            out[tag] = {**f, "sentence": curved_sofa_sentence(f)}
         elif shape["kind"] == "rect":
             wall = given.get("wall")
             out[tag] = {
@@ -4040,24 +4043,46 @@ def shape_facts(attempt: Attempt, shapes: list[dict], aspect: float, writer: dic
     return out
 
 
-def curved_sofa_sentence(shape: dict, aspect: float) -> str:
-    """A curved sofa: its back follows the curved line, and which way its two
-    ends point — from the middle of the back arc toward the middle of the two
-    short ends, in photo pixels. Always computed from the current points, so
-    bending and both Flips change it."""
-    p0, p1, p2, p3, p4 = shape["points"]
-    ends_x = (p0[0] + p1[0] + p2[0] + p3[0]) / 4
-    ends_y = (p0[1] + p1[1] + p2[1] + p3[1]) / 4
-    dx, dy = (ends_x - p4[0]) * aspect, ends_y - p4[1]
-    if abs(dx) > abs(dy):
-        toward = "toward the left" if dx < 0 else "toward the right"
+def curved_facts(shape: dict, aspect: float, wall: str | None = None) -> dict:
+    """A curved sofa's wall and which way it bows. `wall` (BACK / LEFT / RIGHT
+    / NONE) is the gap writer's; without it, the black-line rule on the back
+    arc's ends. Bow: whether the middle of the back arc (p4) lies toward the
+    wall from the line between its two ends ("toward the wall": the ends come
+    forward into the room) or away from it ("away from the wall": the middle
+    bulges into the room). Computed from the current points on every render,
+    so bending and flips change it."""
+    p0, p1, _p2, _p3, p4 = shape["points"]
+    wall_source = "gap writer" if wall else "code"
+    if not wall:
+        wall = _wall_of([(p0[0] * aspect, p0[1]), (p1[0] * aspect, p1[1])], aspect)
+    off_x = (p4[0] - (p0[0] + p1[0]) / 2) * aspect  # the arc's middle, from the middle of its ends
+    off_y = p4[1] - (p0[1] + p1[1]) / 2
+    toward_wall = {"BACK": -off_y, "LEFT": -off_x, "RIGHT": off_x, "NONE": -off_y}[wall]  # positive: toward the wall
+    return {"wall": wall, "wall_source": wall_source, "bow": "toward the wall" if toward_wall >= 0 else "away from the wall"}
+
+
+def curved_sofa_sentence(f: dict) -> str:
+    """A curved sofa by its wall and bow (`f` from curved_facts): the back
+    close to its wall and both ends coming forward into the room, or the
+    middle bulging into the room and the ends curving back to the wall."""
+    wall = f["wall"]
+    into = {"BACK": "toward the camera", "LEFT": "toward the right side of the room", "RIGHT": "toward the left side of the room"}
+    if wall == "NONE":
+        layout = "Its curved back follows the thick black line; both ends curve forward toward the camera."
+    elif f["bow"] == "toward the wall":
+        layout = (
+            f"Its curved back follows the thick black line, with its middle close to the {wall} wall. Both ends of the "
+            f"sofa curve forward into the room, {into[wall]}, so the seats face the middle of the room."
+        )
     else:
-        toward = "toward the camera" if dy > 0 else "toward the back"
+        layout = (
+            f"Its curved back follows the thick black line, with its middle bulging out into the room, away from the "
+            f"{wall} wall. Both ends of the sofa curve back toward the {wall} wall."
+        )
     return (
-        "Its back follows the curved thick black line, and the whole sofa — back, seat and front edge — curves the same "
-        f"way as the shape. Its two ends point {toward}. It is one continuous curved sofa: no corner, no straight "
-        "sections, no chaise. If the photograph shows a straight sofa, rebuild it as this curved sofa in the same "
-        "design: same cushions, arms, legs, material and colour."
+        f"{layout} It is one continuous curved sofa: no corner, no straight sections, no chaise. If the photograph "
+        "shows a straight sofa, rebuild it as this curved sofa in the same design: same cushions, arms, legs, material "
+        "and colour."
     )
 
 
@@ -4088,7 +4113,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
             f"{source}. Build it exactly on the {colour.lower()} shape, covering the same floor area, at the same size"
         )
         if shape["kind"] == "curved":
-            text += ". " + curved_sofa_sentence(shape, aspect)
+            text += ". " + curved_sofa_sentence(facts.get(piece["tag"]) or curved_facts(shape, aspect))
             paragraphs.append(text)
             continue
         f = facts.get(piece["tag"]) or {}
@@ -4178,6 +4203,14 @@ GAP_LINE_MAX_CHARS = 500
 # what the gap writer is asked about each shape's wall and lounge (also added
 # to a saved, edited gap writer prompt when this came in)
 GAP_WALL_PARAGRAPH = (
+    "For each shape, say which wall its thick black line (its back) stands against, as seen in the photo: BACK (the "
+    "wall facing the camera), LEFT, RIGHT, or no wall. In wide-angle photos the side walls can look only slightly "
+    "slanted — judge by where the line meets the walls and corners, not by its angle. For a CURVED SOFA, give the wall "
+    "its curved black line is nearest to or runs along. Walls covered with newspaper or plastic are walls or panels, "
+    "not windows."
+)
+# the wall paragraph before curved sofas were named in it, for adding that to a saved gap writer prompt
+GAP_WALL_PARAGRAPH_BEFORE_CURVED = (
     "For each shape, say which wall its thick black line (its back) stands against, as seen in the photo: BACK (the "
     "wall facing the camera), LEFT, RIGHT, or no wall. In wide-angle photos the side walls can look only slightly "
     "slanted — judge by where the line meets the walls and corners, not by its angle. Walls covered with newspaper "
@@ -5828,7 +5861,9 @@ def api_get_attempt(
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
     shop = db.query(Shop).filter(Shop.id == user.shop_id).first() if user.shop_id else None
-    return JSONResponse(content={"attempt": attempt_detail(attempt), "features": shop_features(shop)})
+    return JSONResponse(
+        content={"attempt": attempt_detail(attempt), "features": shop_features(shop), "guide_style": get_guide_style(db)}
+    )
 
 
 @app.post("/api/attempts/{attempt_id}/items")

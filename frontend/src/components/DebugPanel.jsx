@@ -63,6 +63,7 @@ export function DebugPanel({ renderId }) {
                 const lines = [`${f.tag}`, `  wall: ${wallWords(f.wall)} (from ${f.wall_source || "code"})`];
                 if (f.end) lines.push(`  end: ${f.end} (from the shape)`);
                 if (f.corner_wall) lines.push(`  shorter part along: ${wallWords(f.corner_wall)}`);
+                if (f.bow) lines.push(`  curve bows: ${f.bow} (from the shape)`);
                 if (f.sentence) lines.push(`  sentence: ${f.sentence}`);
                 return lines.join("\n");
               })

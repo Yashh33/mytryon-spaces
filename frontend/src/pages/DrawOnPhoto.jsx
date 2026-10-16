@@ -21,13 +21,13 @@ import {
   moveCorner,
   moveCurvedCorner,
   moveLCorner,
+  moveLoungeToOtherEnd,
   moveShape,
   newShape,
   piecesOf,
   shapeCentre,
   shapeParts,
   snapAngle,
-  swapLounge,
   tiltFactor,
   tiltPoints,
   transformPoints,
@@ -478,12 +478,16 @@ export default function DrawOnPhoto() {
   }
 
   /** One toolbar step on the selected shape's points; nothing happens (and
-   * nothing is remembered for Undo) when the step won't fit on the photo. */
-  function step(fn) {
+   * nothing is remembered for Undo) when the step won't fit on the photo —
+   * with `failMessage`, the salesman is told why. */
+  function step(fn, failMessage = null) {
     const shape = shapesRef.current.find((s) => keyOf(s) === selected);
     if (!shape) return;
     const points = fn(shape);
-    if (!points) return;
+    if (!points) {
+      if (failMessage) toast(failMessage);
+      return;
+    }
     update(shapesRef.current.map((s) => (keyOf(s) === selected ? { ...s, points } : s)));
   }
 
@@ -561,8 +565,14 @@ export default function DrawOnPhoto() {
           </div>
         ) : null}
         {selectedShape.kind === "L" ? (
-          <button type="button" className="draw-toolbar-wide" onClick={() => changeShape(selected, swapLounge)}>
-            Other part is the lounge
+          <button
+            type="button"
+            className="draw-toolbar-wide"
+            onClick={() =>
+              step((s) => moveLoungeToOtherEnd(s, aspect), "There's no room for the lounge at the other end — move the sofa first.")
+            }
+          >
+            Move lounge to other end
           </button>
         ) : null}
         <button type="button" className="draw-toolbar-delete" onClick={() => removeShape(selected)}>
@@ -627,11 +637,11 @@ export default function DrawOnPhoto() {
       <div ref={wrapRef} className={"draw-wrap" + (fullscreen ? " fs" : "")}>
         {fullscreen ? (
           <div className="draw-fs-top">
-            <button type="button" className="btn btn-primary btn-small" onClick={exitFullscreen}>
-              Done
-            </button>
-            <button type="button" className="btn btn-ghost btn-small" disabled={!undoCount} onClick={undo}>
+            <button type="button" className="draw-fs-btn" disabled={!undoCount} onClick={undo}>
               Undo
+            </button>
+            <button type="button" className="draw-fs-btn draw-fs-done" onClick={exitFullscreen}>
+              Done
             </button>
           </div>
         ) : null}

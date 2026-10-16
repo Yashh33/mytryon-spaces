@@ -533,3 +533,32 @@ export function floorTurnSign(shape) {
   const middleY = points.reduce((sum, p) => sum + p[1], 0) / points.length;
   return backY <= middleY ? -1 : 1;
 }
+
+/** An L's corner points with its lounge moved to the other end of its long
+ * part, on the same side: the whole L mirrored along the long part's own
+ * length in the floor's perspective (a projective mirror of the long part's
+ * quad onto itself), so the long part stays exactly where it is and its
+ * back line stays on the same wall edge. Null when the lounge won't fit on
+ * the photo there (or the shape isn't an L). */
+export function moveLoungeToOtherEnd(shape, aspect) {
+  if (shape.kind !== "L" || shape.lounge == null) return null;
+  const long = shapeParts("L", shape.points)[1 - shape.lounge];
+  const len = (a, b) => Math.hypot((b[0] - a[0]) * aspect, b[1] - a[1]);
+  // u runs along the long part's length, v across it
+  const lengthwise = len(long[0], long[1]) + len(long[2], long[3]) >= len(long[1], long[2]) + len(long[3], long[0]);
+  const quad = lengthwise ? long : [long[1], long[2], long[3], long[0]];
+  const square = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const toSquare = homography(quad, square);
+  const toPhoto = homography(square, quad);
+  if (!toSquare || !toPhoto) return null;
+  const floorSide = Math.sign(applyHw(toPhoto, 0.5, 0.5)[2]);
+  const out = [];
+  for (const [x, y] of shape.points) {
+    const [u, v] = applyHw(toSquare, x, y);
+    const back = applyHw(toPhoto, 1 - u, v);
+    if (Math.sign(back[2]) !== floorSide || !Number.isFinite(back[0]) || !Number.isFinite(back[1])) return null;
+    out.push([back[0], back[1]]);
+  }
+  if (out.some(([x, y]) => outside(x) || outside(y))) return null;
+  return out.map(([x, y]) => [round5(x), round5(y)]);
+}

@@ -55,14 +55,16 @@ export function DebugPanel({ renderId }) {
 
       {guide?.shape_facts?.length ? (
         <>
-          <div className="debug-label">L / corner sofas, as worked out from the shapes</div>
+          <div className="debug-label">Walls and lounge directions used in the prompt</div>
           <pre className="debug-pre">
             {guide.shape_facts
-              .map(
-                (f) =>
-                  `${f.tag}: back against the ${f.wall} wall; joins at ${f.end}, runs ${f.direction}${f.along || ""}` +
-                  (f.second_wall ? `; the shorter part's back against the ${f.second_wall} wall` : "")
-              )
+              .map((f) => {
+                const wallWords = (w) => (w === "NONE" ? "no wall" : `${w} wall`);
+                let line = `${f.tag}: back against: ${wallWords(f.wall)} (from ${f.wall_source || "code"})`;
+                if (f.direction) line += `; joins at ${f.end}, runs ${f.direction}${f.along || ""} (from ${f.direction_source || "code"})`;
+                if (f.second_wall) line += `; shorter part against: ${wallWords(f.second_wall)} (from code)`;
+                return line;
+              })
               .join("\n")}
           </pre>
         </>

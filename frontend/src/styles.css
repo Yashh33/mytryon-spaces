@@ -1216,3 +1216,11 @@ h2 { font-size: 19px; }
 .draw-show-buttons { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; min-height: 44px; }
 .draw-wrap.fs .draw-show-buttons { color: #fff; }
 .draw-show-buttons input { width: 18px; height: 18px; }
+/* the full-screen bar: Undo left, Done right, both clear on the dark background */
+.draw-fs-top { align-items: center; }
+.draw-fs-btn { min-height: 44px; min-width: 76px; padding: 0 16px; border: 2px solid #fff; border-radius: 10px; background: transparent; color: #fff; font-size: 15px; font-weight: 800; cursor: pointer; }
+.draw-fs-btn:disabled { opacity: 0.35; cursor: default; }
+.draw-fs-done { background: #fff; color: #111; }
+/* the toolbar and pieces tray always fit on screen in full screen, clear of a phone's home bar */
+.draw-wrap.fs { height: 100vh; height: 100dvh; padding-bottom: max(10px, env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
+.draw-wrap.fs .draw-toolbar, .draw-wrap.fs .draw-tray-row { flex-shrink: 0; }

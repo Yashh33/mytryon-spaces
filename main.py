@@ -3843,7 +3843,7 @@ def _back_line(corners: list, edge: int | None) -> list:
     return [corners[edge], corners[(edge + 1) % 4]]
 
 
-def two_part_facts(shape: dict, aspect: float) -> dict:
+def two_part_facts(shape: dict, aspect: float, wall: str | None = None, direction: str | None = None) -> dict:
     """Where an L's lounge (or a corner sofa's shorter part) is, read off the
     shape as drawn, in photo pixels (x scaled by the photo's width/height
     `aspect`): the wall the long part's back is against; which end of the long
@@ -3851,8 +3851,10 @@ def two_part_facts(shape: dict, aspect: float) -> dict:
     wall / nearer the camera on a side wall); and the way the second part runs,
     from the inner corner where it joins the long part to its tip (the middle
     of its far short edge). A corner sofa's second part also has its own wall.
-    Computed from the current corners on every render, so turns, flips and
-    moves always change it."""
+    `wall` (BACK / LEFT / RIGHT / NONE) and `direction` (words after "runs")
+    are the gap writer's, used instead of the geometry when given; each
+    fact says where it came from. Computed from the current corners on every
+    render, so turns, flips and moves always change it."""
     parts = [[(x * aspect, y) for x, y in part] for part in shape_parts(shape["kind"], shape["points"])]
     if shape["kind"] == "L":
         second = shape["lounge"]
@@ -3870,11 +3872,13 @@ def two_part_facts(shape: dict, aspect: float) -> dict:
         ]
 
     tip = max(short_edge_middles(other_part), key=lambda m: math.dist(m, inner))
-    direction = _direction_words(tip[0] - inner[0], tip[1] - inner[1])
+    direction_source = "gap writer" if direction else "code"
+    direction = direction or _direction_words(tip[0] - inner[0], tip[1] - inner[1])
 
-    wall = _wall_of(_back_line(long_part, shape["backrest"][1 - second]), aspect)
+    wall_source = "gap writer" if wall else "code"
+    wall = wall or _wall_of(_back_line(long_part, shape["backrest"][1 - second]), aspect)
     attached, other = sorted(short_edge_middles(long_part), key=lambda m: math.dist(m, inner))
-    if wall == "BACK":
+    if wall in ("BACK", "NONE"):
         end = "LEFT" if attached[0] < other[0] else "RIGHT"
         end_words = f"the {end} end of the long part"
         other_words = f"the {'RIGHT' if end == 'LEFT' else 'LEFT'} end"
@@ -3884,47 +3888,71 @@ def two_part_facts(shape: dict, aspect: float) -> dict:
         end_words = "the end nearer the back wall" if at_back else "the end nearer the camera"
         other_words = "nearer the camera" if at_back else "nearer the back wall"
         # running across the picture from the back end of a side-wall sofa: along the back wall
-        along = ", along the back wall" if at_back and direction.startswith(("toward the left", "toward the right")) else ""
-    facts = {"wall": wall, "end": end_words, "other_end": other_words, "direction": direction, "along": along}
+        along = (
+            ", along the back wall"
+            if direction_source == "code" and at_back and direction.startswith(("toward the left", "toward the right"))
+            else ""
+        )
+    facts = {
+        "wall": wall,
+        "wall_source": wall_source,
+        "end": end_words,
+        "other_end": other_words,
+        "direction": direction,
+        "direction_source": direction_source,
+        "along": along,
+    }
     if shape["kind"] == "corner":
         facts["second_wall"] = _wall_of(_back_line(other_part, shape["backrest"][second]), aspect)
     return facts
 
 
-def l_lounge_sentence(shape: dict, aspect: float) -> str:
+def _against_words(wall: str, part: str = "Its long part") -> str:
+    if wall == "NONE":
+        return f"{part} stands free of the walls, its back along the thick black line."
+    return f"{part} has its back against the {wall} wall along the thick black line."
+
+
+def l_lounge_sentence(f: dict) -> str:
     """Which wall the L's long part is against, which end its lounge is at and
-    which way the lounge runs (see two_part_facts)."""
-    f = two_part_facts(shape, aspect)
+    which way the lounge runs (`f` from two_part_facts)."""
     return (
-        f"Its long part has its back against the {f['wall']} wall along the thick black line. Its lounge is at "
+        f"{_against_words(f['wall'])} Its lounge is at "
         f"{f['end']} and runs {f['direction']}{f['along']}. Its single arm is at the other end, {f['other_end']}. "
         "Do not swap these ends."
     )
 
 
-def corner_sofa_sentence(shape: dict, aspect: float) -> str:
+def corner_sofa_sentence(f: dict) -> str:
     """A corner sofa: the wall each part's back is against, which end of the
-    long part the shorter part joins and which way it runs (see
+    long part the shorter part joins and which way it runs (`f` from
     two_part_facts), both parts with a backrest."""
-    f = two_part_facts(shape, aspect)
+    long_back = "stands free of the walls" if f["wall"] == "NONE" else f"has its back against the {f['wall']} wall"
+    short_back = "free of the walls" if f["second_wall"] == "NONE" else f"against the {f['second_wall']} wall"
     return (
         "It is a corner sofa with two seating parts that meet at the corner, BOTH with a full backrest: the long part "
-        f"has its back against the {f['wall']} wall along its black line, and the shorter part is at {f['end']}, "
-        f"running {f['direction']}, with its own backrest against the {f['second_wall']} wall along its black line. "
+        f"{long_back} along its black line, and the shorter part is at {f['end']}, "
+        f"running {f['direction']}, with its own backrest {short_back} along its black line. "
         "There is no open chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the "
         "photograph shows a straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, "
         "legs, material and colour."
     )
 
 
-def shape_facts_for_debug(attempt: Attempt, shapes: list[dict], aspect: float) -> list[dict]:
-    """The computed wall / end / direction of every L and corner sofa, by its
-    label, for the Debug panel."""
+def shape_facts(attempt: Attempt, shapes: list[dict], aspect: float, writer: dict | None = None) -> dict:
+    """What the prompt says about each shape's wall (and an L's / corner
+    sofa's direction), by its label: the gap writer's words (`writer`, by
+    label) where it gave them, otherwise the geometry. Rectangles without a
+    wall from the writer have none (their sentence says "flat against the wall")."""
     tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
-    out = []
+    out = {}
     for shape in shapes:
+        tag = tags.get((shape["item_id"], shape["sub_index"]))
+        given = (writer or {}).get(tag) or {}
         if shape["kind"] in ("L", "corner"):
-            out.append({"tag": tags.get((shape["item_id"], shape["sub_index"])), **two_part_facts(shape, aspect)})
+            out[tag] = two_part_facts(shape, aspect, given.get("wall"), given.get("lounge"))
+        elif given.get("wall"):
+            out[tag] = {"wall": given["wall"], "wall_source": "gap writer"}
     return out
 
 
@@ -3949,9 +3977,14 @@ def curved_sofa_sentence(shape: dict, aspect: float) -> str:
     )
 
 
-def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0) -> str:
+def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0, facts: dict | None = None) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
-    photo's Image number and how to build it on its shape."""
+    photo's Image number and how to build it on its shape. `facts` (from
+    shape_facts, by label) say which wall each back is against and which way
+    an L's lounge / a corner sofa's shorter part runs; worked out here from the
+    shape when not given."""
+    if facts is None:
+        facts = shape_facts(attempt, shapes, aspect)
     pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
     section = finish_section_name(attempt.items)
     paragraphs = []
@@ -3974,16 +4007,22 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
             text += ". " + curved_sofa_sentence(shape, aspect)
             paragraphs.append(text)
             continue
-        text += ", with its back along the thick black line, flat against the wall."
+        f = facts.get(piece["tag"]) or {}
+        if shape["kind"] == "rect" and f.get("wall") == "NONE":
+            text += ", with its back along the thick black line, standing free of the walls."
+        elif shape["kind"] == "rect" and f.get("wall"):
+            text += f", with its back along the thick black line, flat against the {f['wall']} wall."
+        else:
+            text += ", with its back along the thick black line, flat against the wall."
         if shape["kind"] == "L":
-            text += " " + l_lounge_sentence(shape, aspect)
+            text += " " + l_lounge_sentence(f or two_part_facts(shape, aspect))
             text += (
                 " The part of the shape marked LOUNGE, with no black line, is an open chaise lounge with no backrest and no arm at its "
                 "tip. The sofa has one arm only, at the end of the long run away from the lounge. If the photograph "
                 "shows a straight sofa, rebuild it as this L in the same design."
             )
         elif shape["kind"] == "corner":
-            text += " " + corner_sofa_sentence(shape, aspect)
+            text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect))
         paragraphs.append(text)
     return "\n\n".join(paragraphs)
 
@@ -3997,6 +4036,7 @@ def build_shapes_prompt(
     aspect: float = 1.0,
     open_floor: list[str] | None = None,
     guide_style: str = "flat",
+    facts: dict | None = None,
 ) -> str:
     """The shapes pipeline's prompt: {{SHAPES}} and {{OPEN_FLOOR}} filled
     here, everything else (image list, fabric section, look, decor, lighting,
@@ -4006,7 +4046,7 @@ def build_shapes_prompt(
     the section is left out. With guide_style "boxes", the sentence about
     Image 1 and the removal sentence speak of boxes (swapped here, so the
     saved prompt is never changed)."""
-    filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect))
+    filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect, facts))
     if guide_style == "boxes":
         filled = filled.replace(FLAT_REMOVAL_WORDS, BOXES_REMOVAL_WORDS)
     thing = "box" if guide_style == "boxes" else "shape"
@@ -4056,17 +4096,46 @@ def build_shapes_prompt(
 GAP_WRITER_PROMPT_KEY = "gap_writer_prompt"
 GAP_WRITER_TIMEOUT_S = 60
 GAP_LINE_MAX_CHARS = 500
-DEFAULT_GAP_WRITER_PROMPT = """\
-This photo of a room has coloured shapes drawn on the floor, each with a white label like "1 · L-SHAPE" or "2 · 3-SEATER". Each shape shows exactly where a sofa will stand. The thick black line marks the sofa's back. A part marked LOUNGE is an open chaise.
-
-For each labelled shape, write 1–2 short sentences, in plain words, about the OPEN FLOOR around it — so an image editor keeps those gaps:
-- What each end of the shape is near, and whether there is open floor between that end and the nearest wall, corner, door, window or other shape. Say roughly how big the gap is in simple terms (for example "about half a seat wide", "about an arm's length", "a narrow gap", or "touches the wall").
-- Name only things you can clearly see in the photo (a wall, a corner, a doorway, a window, another shape). Never guess or invent a door or window.
-- Use LEFT / RIGHT as seen in the picture.
-- Do not describe the camera, the room style, or the sofa design. Do not repeat which end the lounge is on.
-
-Reply with only one line per shape, in label order, each line starting with the label exactly as written on the photo, for example:
-1 · L-SHAPE: Its left end stops about half a seat before the left corner of the back wall, with open floor between them; the doorway on the left wall stays fully clear. Its lounge tip stops a narrow gap short of the big window on the right."""
+# what the gap writer is asked about each shape's wall and lounge (also added
+# to a saved, edited gap writer prompt when this came in)
+GAP_WALL_PARAGRAPH = (
+    "For each shape, say which wall its thick black line (its back) stands against, as seen in the photo: BACK (the "
+    "wall facing the camera), LEFT, RIGHT, or no wall. In wide-angle photos the side walls can look only slightly "
+    "slanted — judge by where the line meets the walls and corners, not by its angle. For an L-shape, say which way "
+    "its LOUNGE part points from the long part (toward the camera, toward the back, toward the left, toward the "
+    "right, or a mix); for a corner sofa, which way its shorter part points. Walls covered with newspaper or plastic "
+    "are walls or panels, not windows."
+)
+GAP_REPLY_FORM = (
+    "Reply with only one line per shape, in label order, in this form (the label exactly as written on the photo; "
+    '"lounge: -" for shapes that are not an L-shape or corner sofa):\n'
+    "<label> | against: BACK / LEFT / RIGHT / no wall | lounge: <where the lounge / second part points, in plain "
+    "words> | <open-floor sentence>\n"
+    "For example:"
+)
+DEFAULT_GAP_WRITER_PROMPT = "\n\n".join(
+    [
+        'This photo of a room has coloured shapes drawn on the floor, each with a white label like "1 · L-SHAPE" or '
+        '"2 · 3-SEATER". Each shape shows exactly where a sofa will stand. The thick black line marks the sofa\'s '
+        "back. A part marked LOUNGE is an open chaise.",
+        GAP_WALL_PARAGRAPH,
+        "For each labelled shape, write 1–2 short sentences, in plain words, about the OPEN FLOOR around it — so an "
+        "image editor keeps those gaps:\n"
+        "- What each end of the shape is near, and whether there is open floor between that end and the nearest wall, "
+        "corner, door, window or other shape. Say roughly how big the gap is in simple terms (for example \"about half "
+        "a seat wide\", \"about an arm's length\", \"a narrow gap\", or \"touches the wall\").\n"
+        "- Name only things you can clearly see in the photo (a wall, a corner, a doorway, a window, another shape). "
+        "Never guess or invent a door or window.\n"
+        "- Use LEFT / RIGHT as seen in the picture.\n"
+        "- Do not describe the camera, the room style, or the sofa design. Do not repeat which end the lounge is on.",
+        GAP_REPLY_FORM + "\n"
+        "1 · L-SHAPE | against: BACK | lounge: toward the camera | Its left end stops about half a seat before the left "
+        "corner of the back wall, with open floor between them; the doorway on the left wall stays fully clear. Its "
+        "lounge tip stops a narrow gap short of the big window on the right.\n"
+        "2 · 3-SEATER | against: LEFT | lounge: - | Its far end stops about one seat short of the back corner, and that "
+        "floor stays empty.",
+    ]
+)
 
 
 def get_gap_writer_prompt(db: Session) -> str:
@@ -4088,24 +4157,62 @@ def gap_writer_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def parse_gap_lines(output: str, tags: list[str]) -> list[str]:
-    """One "TAG: text" line per shape the writer answered for, in label order.
-    Bullets, bold and a slightly different dot in the label are tolerated."""
+GAP_WALLS = {"BACK": "BACK", "LEFT": "LEFT", "RIGHT": "RIGHT"}
+
+
+def _gap_wall(text: str) -> str | None:
+    """BACK / LEFT / RIGHT / NONE (no wall) from the writer's words; None if unclear."""
+    words = text.upper()
+    if re.search(r"\bNO\b|\bNONE\b|\bFREE\b", words):
+        return "NONE"
+    found = [wall for wall in GAP_WALLS if re.search(rf"\b{wall}\b", words)]
+    return found[0] if len(found) == 1 else None
+
+
+def _gap_direction(text: str) -> str | None:
+    """The writer's lounge direction, as words that follow "runs" ("toward the right")."""
+    words = " ".join(text.replace("**", "").split()).strip(" .")
+    words = re.sub(r"^(it\s+)?(points|runs|goes|extends|faces)\s+", "", words, flags=re.IGNORECASE)
+    if not words or words in ("-", "—", "n/a", "none"):
+        return None
+    return words[:80]
+
+
+def parse_gap_reply(output: str, tags: list[str]) -> tuple[list[str], dict]:
+    """The writer's reply, one line per shape: "<label> | against: ... |
+    lounge: ... | <open-floor sentence>" (a plain "<label>: sentence" line is
+    read too). Returns the OPEN FLOOR lines ("TAG: sentence", in label order)
+    and, by label, the wall (BACK / LEFT / RIGHT / NONE) and lounge direction
+    it gave. Bullets, bold and a slightly different dot in the label are
+    tolerated."""
     lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
-    found = []
+    open_floor, facts = [], {}
     for tag in tags:
         tokens = re.findall(r"[A-Za-z0-9]+", tag)
         pattern = re.compile(
-            r"^[\s\-\*•>#]*" + r"[^A-Za-z0-9]*".join(map(re.escape, tokens)) + r"[\s\*]*[:\-–—]\s*(.+)$", re.IGNORECASE
+            r"^[\s\-\*•>#]*" + r"[^A-Za-z0-9]*".join(map(re.escape, tokens)) + r"[\s\*]*[:\-–—|]\s*(.+)$", re.IGNORECASE
         )
         for line in lines:
             match = pattern.match(line)
-            if match:
-                text = " ".join(match.group(1).replace("**", "").split())[:GAP_LINE_MAX_CHARS]
-                if text:
-                    found.append(f"{tag}: {text}")
-                break
-    return found
+            if not match:
+                continue
+            wall = lounge = None
+            rest = []
+            for part in (piece.strip() for piece in match.group(1).split("|")):
+                label, _, value = part.partition(":")
+                if label.strip().lower() == "against":
+                    wall = _gap_wall(value)
+                elif label.strip().lower() == "lounge":
+                    lounge = _gap_direction(value)
+                elif part:
+                    rest.append(part)
+            sentence = " ".join(" ".join(rest).replace("**", "").split())[:GAP_LINE_MAX_CHARS]
+            if sentence:
+                open_floor.append(f"{tag}: {sentence}")
+            if wall or lounge:
+                facts[tag] = {"wall": wall, "lounge": lounge}
+            break
+    return open_floor, facts
 
 
 def call_gap_writer(image: bytes, prompt: str, model: str) -> dict:
@@ -4170,7 +4277,11 @@ async def resolve_gap_writer(
         reusable = None
     if reusable:
         render_id, gap = reusable
-        return {**info, **{k: gap.get(k) for k in ("lines", "output", "usage", "elapsed_s")}, "reused_from_render": render_id}
+        return {
+            **info,
+            **{k: gap.get(k) for k in ("lines", "facts", "output", "usage", "elapsed_s")},
+            "reused_from_render": render_id,
+        }
     try:
         result = await asyncio.wait_for(asyncio.to_thread(call_gap_writer, guide, prompt, model), GAP_WRITER_TIMEOUT_S)
     except asyncio.TimeoutError:
@@ -4179,11 +4290,12 @@ async def resolve_gap_writer(
     except Exception as exc:
         logger.exception("gap writer failed attempt_id=%s", attempt.id)
         return {**info, "reason": f"failed: {exc.__class__.__name__}"}
-    lines = parse_gap_lines(result["output"], tags)
+    lines, facts = parse_gap_reply(result["output"], tags)
     return {
         **info,
         **result,
         "lines": lines,
+        "facts": facts,  # by label: {"wall", "lounge"} as the writer gave them
         "spent": result["usage"],  # this render's own call, logged with its spend
         "reason": None if lines else "no line started with a shape's label",
     }
@@ -4650,12 +4762,13 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 "original_height": guide.height,
                 "padded": photo_box is not None,
                 "guide_style": guide_style,
-                # what the L / corner sentences say, for the Debug panel
-                "shape_facts": shape_facts_for_debug(attempt, shapes, guide.width / guide.height),
             }
             # the gap writer reads this same guide image; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
             gap_info = await resolve_gap_writer(db, attempt, built["jpeg"], shapes, photo_box is not None, guide_style)
+            # each shape's wall and lounge direction: the gap writer's, or worked out from the shape
+            facts_used = shape_facts(attempt, shapes, guide.width / guide.height, gap_info.get("facts"))
+            room_debug["shape_facts"] = [{"tag": tag, **f} for tag, f in facts_used.items()]  # for the Debug panel
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
@@ -4686,6 +4799,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 guide.width / guide.height,
                 gap_info["lines"] if gap_info else None,
                 guide_style,
+                facts_used,
             )
         else:
             prompt = build_prompt(

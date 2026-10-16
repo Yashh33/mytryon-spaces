@@ -2599,11 +2599,13 @@ def build_prompt(
     note: str | None = None,
     feet: bool = False,
     room_padded: bool = False,
+    look_text: str | None = None,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
     replaces the generated facts in {{PLACEMENT}}. `feet` is the
     feet_in_prompt setting. `room_padded`: the room photo is being sent with
-    grey borders (see pad_to_output_ratio)."""
+    grey borders (see pad_to_output_ratio). `look_text`, when given, is used
+    instead of the look's ROOM_TREATMENT_TEXT (Draw on photo only)."""
     pieces = build_pieces_text(items, feet)
     image_manifest = build_image_manifest(items, feet, room_padded)
     config_notes = build_config_notes(items, feet)
@@ -2611,7 +2613,9 @@ def build_prompt(
     room_layout_text = build_room_layout_text(room.layout_json, features=placement_text is None)
     if placement_text is None:
         placement_text = build_placement_text(items, room.layout_json, ignore_placement, feet)
-    room_treatment_text = ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
+    room_treatment_text = (
+        look_text if look_text is not None else ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
+    )
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
     decor = decor_text(room_treatment)
     if "{{DECOR}}" not in template:
@@ -3277,6 +3281,50 @@ GUIDE_BOXES_LINE = (
 )
 FLAT_REMOVAL_WORDS = "remove all coloured guide shapes, labels and black lines completely"
 BOXES_REMOVAL_WORDS = "remove every coloured box, label and black line completely"
+
+
+# Draw on photo, when the look restyles the room (any look but "keep"): built
+# into the prompt at render time, so the saved prompt is never changed.
+# "{thing}" is "box" or "shape", as the guide image shows the pieces.
+SHAPES_STYLING_RULES = (
+    "STYLING RULES — the furniture comes first. The styling below may change only paint colours, flooring finish, "
+    "lighting, curtains and small decor. It must never move, resize, turn, reshape or redesign any sofa: every sofa "
+    "stays exactly where its {thing} is, with exactly its shape, size, number of seats, arms and design from its own "
+    "photograph. A straight sofa stays straight; never make it curved. Never rebuild, panel or clad the wall behind a "
+    "sofa."
+)
+KEEP_EVERYTHING_SENTENCE = (
+    "Keep everything else exactly the same. Preserve the walls, doorways, windows, floor, ceiling and room proportions "
+    "precisely as they appear. Change nothing except adding the furniture."
+)
+KEEP_STRUCTURE_SENTENCE = (
+    "Keep the room's structure exactly the same: the walls, doorways, windows, floor area, ceiling and room "
+    "proportions stay precisely as they appear. Only the finishes and decor described below may change."
+)
+# for every look: added to the final check line
+SHAPES_FINAL_CHECK_PLACE = "every sofa is exactly where its {thing} is and keeps the design of its own photograph"
+# the look texts as Draw on photo uses them: no feature wall (it rebuilt the wall behind a sofa)
+LOOK_FEATURE_WALL_OPTION = (
+    "a feature wall with panelling or stone/marble texture on a wall that is free of furniture and windows, if one "
+    "is available; "
+)
+SHAPES_ROOM_TREATMENT_TEXT = {look: text.replace(LOOK_FEATURE_WALL_OPTION, "") for look, text in ROOM_TREATMENT_TEXT.items()}
+
+
+def _add_to_final_check(text: str, words: str) -> str:
+    """`words` added to the prompt's "Final check:" line (after "the camera has
+    not moved;" when it says so); unchanged if there is no such line."""
+    start = text.find("Final check:")
+    if start < 0:
+        return text
+    end = text.find("\n", start)
+    end = len(text) if end < 0 else end
+    line = text[start:end]
+    if words in line:
+        return text
+    anchor = "the camera has not moved;" if "the camera has not moved;" in line else "Final check:"
+    cut = start + line.index(anchor) + len(anchor)
+    return text[:cut] + f" {words};" + text[cut:]
 
 
 def get_guide_style(db: Session) -> str:
@@ -3961,6 +4009,13 @@ def build_shapes_prompt(
     filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect))
     if guide_style == "boxes":
         filled = filled.replace(FLAT_REMOVAL_WORDS, BOXES_REMOVAL_WORDS)
+    thing = "box" if guide_style == "boxes" else "shape"
+    look = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
+    if look != "keep":
+        # the look restyles the room: the furniture and the room's structure must not change with it
+        filled = filled.replace(KEEP_EVERYTHING_SENTENCE, KEEP_STRUCTURE_SENTENCE)
+        filled = filled.replace("{{ROOM_TREATMENT}}", SHAPES_STYLING_RULES.format(thing=thing) + "\n\n{{ROOM_TREATMENT}}", 1)
+    filled = _add_to_final_check(filled, SHAPES_FINAL_CHECK_PLACE.format(thing=thing))
     section = OPEN_FLOOR_HEADING + "\n" + "\n".join(open_floor) if open_floor else ""
     if OPEN_FLOOR_TOKEN in filled:
         filled = filled.replace(OPEN_FLOOR_TOKEN, section)
@@ -3971,7 +4026,17 @@ def build_shapes_prompt(
         if match:
             filled = filled[: match.end()].rstrip("\r\n") + "\n\n" + section + "\n\n" + filled[match.end() :].lstrip("\r\n")
     prompt = build_prompt(
-        filled, attempt.room, attempt.items, attempt.room_treatment, attempt.lighting, True, "", attempt.note, feet, room_padded
+        filled,
+        attempt.room,
+        attempt.items,
+        attempt.room_treatment,
+        attempt.lighting,
+        True,
+        "",
+        attempt.note,
+        feet,
+        room_padded,
+        look_text=SHAPES_ROOM_TREATMENT_TEXT[look],
     )
     # Image 1 is the guide image, not the bare room photo
     return prompt.replace("Image 1 is a room.", GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE, 1)

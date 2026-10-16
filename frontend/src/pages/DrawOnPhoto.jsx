@@ -12,15 +12,10 @@ import {
   backrestAllowed,
   bendCurve,
   centroid,
-  cornerDots,
   curvedOutline,
   flipShape,
   flipShapeVertical,
   floorTurnSign,
-  isTwoPart,
-  moveCorner,
-  moveCurvedCorner,
-  moveLCorner,
   moveLoungeToOtherEnd,
   moveShape,
   newShape,
@@ -38,7 +33,6 @@ import {
 const SAVE_DELAY_MS = 400;
 const TAP_SLOP_PX = 5; // a finger may wander this far and still count as a tap
 // on-screen sizes (CSS px), turned into photo pixels with `scale`
-const CORNER_R = 8;
 const RESIZE_SIZE = 32;
 const ROTATE_R = 17;
 const TILT_W = 26;
@@ -95,9 +89,9 @@ function SmallTag({ text, at, font, W, H }) {
  * whole shape from its centre, the round handle spins it on the screen
  * (snapping to quarter turns), the handle below turns it on the floor, the
  * up/down handle tilts it (up lays it flatter on the floor); two fingers
- * pinch to resize and twist to turn it on the floor. Corner dots fine-tune
- * (an L or corner sofa shows only its outer corners; a curved sofa its 4
- * corners plus a bend handle); tapping an edge puts the backrest (black line)
+ * pinch to resize and twist to turn it on the floor; a curved sofa has a
+ * bend handle. No corner dots: a shape keeps its proportions (it is never
+ * stretched from a corner). Tapping an edge puts the backrest (black line)
  * there. A bottom toolbar does the same in steps, Undo goes back, and Full
  * screen shows the photo edge to edge. Shapes never leave the photo. Saved
  * on the attempt as corner points. The draw screen shows only a number on
@@ -388,20 +382,7 @@ export default function DrawOnPhoto() {
     d.moved = true;
     if (d.role === "empty") return;
     const at = toPhoto(e.clientX, e.clientY);
-    if (d.role === "corner") {
-      const shape = shapesRef.current.find((s) => keyOf(s) === d.key);
-      if (shape && isTwoPart(shape)) {
-        // an L or corner sofa moves as one piece: its inner corners follow the outer dot
-        const points = moveLCorner(d.orig, d.index, at[0], at[1], aspect);
-        if (points) setShapePoints(d.key, points);
-      } else if (shape?.kind === "curved") {
-        // the bend follows the corner, keeping its depth
-        const points = moveCurvedCorner(d.orig, d.index, at[0], at[1], aspect);
-        if (points) setShapePoints(d.key, points);
-      } else {
-        setShapes((prev) => prev.map((s) => (keyOf(s) === d.key ? moveCorner(s, d.index, at[0], at[1]) : s)));
-      }
-    } else if (d.role === "bend") {
+    if (d.role === "bend") {
       // a curved sofa: stronger or flatter, the front arc following
       const points = bendCurve(d.orig, at[0], at[1], aspect);
       if (points) setShapePoints(d.key, points);
@@ -821,19 +802,6 @@ export default function DrawOnPhoto() {
                                 );
                               })()
                             : null}
-                          {cornerDots(selectedShape).map((index) => {
-                            const [cx, cy] = px(selectedShape.points[index]);
-                            return (
-                              <circle
-                                key={`c${index}`}
-                                data-role="corner" data-key={key} data-index={index}
-                                cx={cx} cy={cy} r={CORNER_R * scale}
-                                className="draw-handle"
-                                stroke={hex}
-                                strokeWidth={2.5 * scale}
-                              />
-                            );
-                          })}
                         </g>
                       );
                     })()

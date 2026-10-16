@@ -184,7 +184,6 @@ export default function Generating() {
                   <span>
                     {it.category} &middot; {it.type}
                   </span>
-                  <span className="w">{it.width_ft}ft</span>
                 </div>
               ))}
             </div>

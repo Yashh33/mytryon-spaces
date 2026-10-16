@@ -105,6 +105,13 @@ export default function Place() {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
       setBlocks(itemsToBlocks(data.attempt.items));
+      // the room is read only for the floor plan: start the reader now if it hasn't run (a layout already read is reused)
+      if (["not_started", "pending"].includes(data.attempt.room.layout_status)) {
+        api
+          .post(`/api/rooms/${data.attempt.room.id}/layout/start`)
+          .then((res) => setAttempt((prev) => (prev ? { ...prev, room: { ...prev.room, ...res.room } } : prev)))
+          .catch(() => {}); // could not start it: opening this screen again tries again
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -521,7 +528,7 @@ export default function Place() {
             ))}
           </div>
 
-          {room.layout_status !== "pending" ? (
+          {!["pending", "not_started"].includes(room.layout_status) ? (
             <div className="place-add-row">
               <button type="button" className="btn btn-ghost btn-small" onClick={() => setShowAddFeature(true)}>
                 + Add feature

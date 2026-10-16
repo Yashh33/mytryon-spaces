@@ -525,7 +525,8 @@ class Room(Base):
     # only, never sent to the image model (testing showed doing so makes
     # the render worse).
     layout_json = Column(JSONB, nullable=True)
-    layout_status = Column(String, nullable=False, default="pending", server_default="pending")  # pending|ready|failed
+    # not_started (a new photo: the room reader runs only for the floor plan) | pending | ready | failed
+    layout_status = Column(String, nullable=False, default="pending", server_default="pending")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     attempts = relationship("Attempt", backref="room", cascade="all, delete-orphan", order_by="Attempt.id")
@@ -1438,10 +1439,38 @@ def get_active_vision_model(db: Session) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Vision layout — fired in the background on room-photo upload, never
-# awaited by the upload response. A salesman input aid only, never sent to
-# the image generation model.
+# Vision layout (the room reader) — for the floor plan only. A new room photo
+# is marked "not_started"; the reader starts when the salesman chooses the
+# floor plan (placement-mode "plan") or the floor plan screen opens (POST
+# /api/rooms/{id}/layout/start), in the background. Draw on photo never
+# calls or waits for it. A salesman input aid only, never sent to the image
+# generation model.
 # ---------------------------------------------------------------------------
+
+ROOM_READERS_RUNNING: set[int] = set()  # room ids whose reader is running in this process
+
+
+def start_room_reader(room: Room, db: Session) -> str:
+    """Starts the room reader for `room` unless it isn't needed: a layout
+    already read ("ready") or one that failed ("failed": the salesman draws by
+    hand, as before) is kept, and a reader already running isn't doubled.
+    Must be called from the event loop (an async endpoint)."""
+    if room.layout_status in ("ready", "failed"):
+        return room.layout_status
+    if room.id in ROOM_READERS_RUNNING:
+        return "running"
+    room.layout_status = "pending"
+    db.commit()
+    ROOM_READERS_RUNNING.add(room.id)
+
+    async def run() -> None:
+        try:
+            await run_vision_job(room.id)
+        finally:
+            ROOM_READERS_RUNNING.discard(room.id)
+
+    asyncio.create_task(run())
+    return "started"
 
 
 async def run_vision_job(room_id: int) -> None:
@@ -4487,7 +4516,7 @@ def api_set_item_description(
 
 
 @app.put("/api/attempts/{attempt_id}/placement-mode")
-def api_set_placement_mode(
+async def api_set_placement_mode(
     attempt_id: int, body: PlacementModeBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
@@ -4499,6 +4528,8 @@ def api_set_placement_mode(
             return error_response(403, "feature_off", "Drawing on the photo isn't switched on for this showroom.")
     attempt.placement_mode = body.mode
     db.commit()
+    if body.mode == "plan":
+        start_room_reader(attempt.room, db)  # the floor plan needs the room read; Draw on photo never does
     db.refresh(attempt)
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
@@ -5615,11 +5646,11 @@ async def api_create_room(
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
 
-    room = Room(customer_id=customer.id, room_type=room_type, photo_path=photo_path)
+    # the room reader waits until the floor plan is chosen (start_room_reader)
+    room = Room(customer_id=customer.id, room_type=room_type, photo_path=photo_path, layout_status="not_started")
     db.add(room)
     db.commit()
     db.refresh(room)
-    asyncio.create_task(run_vision_job(room.id))
     return JSONResponse(content={"room": room_summary(room)})
 
 
@@ -5644,11 +5675,20 @@ async def api_update_room_photo(
         return error_response(exc.status_code, exc.error, exc.message)
     room.photo_path = photo_path
     room.layout_json = None
-    room.layout_status = "pending"
+    room.layout_status = "not_started"  # read again only when the floor plan is used (start_room_reader)
     db.commit()
     db.refresh(room)
-    asyncio.create_task(run_vision_job(room.id))
     return JSONResponse(content={"room": room_detail(room)})
+
+
+@app.post("/api/rooms/{room_id}/layout/start")
+async def api_start_room_reader(room_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    """The floor plan screen opened: read the room now if it hasn't been
+    (an existing layout is reused). Never used by Draw on photo."""
+    room = get_owned_room(room_id, user, db)
+    status = start_room_reader(room, db)
+    db.refresh(room)
+    return JSONResponse(content={"room": room_detail(room), "reader": status})
 
 
 @app.get("/api/rooms/{room_id}")

@@ -93,7 +93,7 @@ function PieceCard({ item, saving, onSave }) {
             {item.category} &middot; {item.type}
           </div>
           <div className="sub mono muted">
-            {item.width_ft} ft{saving ? " · Saving…" : ""}
+            {saving ? "Saving…" : ""}
           </div>
         </div>
         {anythingSet ? (
@@ -414,7 +414,7 @@ export default function Finish() {
           {attempt.items.map((it) => (
             <div key={it.id}>
               <span>
-                {it.category} &middot; {it.type} &middot; {it.width_ft}ft
+                {it.category} &middot; {it.type}
               </span>
               <span className="mono">{finishSummary(it)}</span>
             </div>

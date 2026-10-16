@@ -1,9 +1,9 @@
 import { FloorPlan } from "./FloorPlan.jsx";
 
-/** The pending/failed/ready states shared between the placement screen and
- * the read-only "View room plan" preview on the furniture step. */
+/** The room layout's states on the floor plan screen: still to be read
+ * (not_started / pending), failed or ready. */
 export function RoomPlanView({ room, ...floorPlanProps }) {
-  if (room.layout_status === "pending") {
+  if (room.layout_status === "pending" || room.layout_status === "not_started") {
     return (
       <div className="floor-plan-skeleton">
         <div className="skel" style={{ position: "absolute", inset: 0, borderRadius: 12 }} />

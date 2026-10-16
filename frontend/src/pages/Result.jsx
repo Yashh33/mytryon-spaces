@@ -221,7 +221,6 @@ export default function Result() {
             <span>
               {it.category} &middot; {it.type}
             </span>
-            <span className="mono">{it.width_ft}ft</span>
           </div>
         ))}
       </div>

@@ -10,8 +10,6 @@ import { useAdjustMode } from "../adjustMode.js";
 import { Chip } from "../components/Chip.jsx";
 import { UploadBox } from "../components/UploadBox.jsx";
 import { debugLog, photoUploadError } from "../utils.js";
-import { BottomSheet } from "../components/BottomSheet.jsx";
-import { RoomPlanView } from "../components/RoomPlanView.jsx";
 import { cornerFigure, curvedFigure, lFigure, straightFigure } from "../placement.js";
 
 const OTHER_TYPES = {
@@ -180,10 +178,8 @@ export default function Furniture() {
   const [seats, setSeats] = useState(3);
   const [otherType, setOtherType] = useState("");
   const [count, setCount] = useState(1);
-  const [width, setWidth] = useState("");
   const [photo, setPhoto] = useState(null);
   const [adding, setAdding] = useState(false);
-  const [showPlan, setShowPlan] = useState(false);
 
   async function load() {
     setError(null);
@@ -201,23 +197,6 @@ export default function Furniture() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Poll while the vision layout job is still running, so the "View room
-  // plan" sheet updates live even from this earlier step — the call takes
-  // ~20s and a salesman often reaches this step well before it's ready.
-  useEffect(() => {
-    if (!attempt || attempt.room.layout_status !== "pending") return undefined;
-    const timer = setInterval(async () => {
-      try {
-        const data = await api.get(`/api/rooms/${attempt.room.id}`);
-        setAttempt((prev) => (prev ? { ...prev, room: { ...prev.room, ...data.room } } : prev));
-      } catch {
-        // transient — keep polling
-      }
-    }, 3000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt?.room?.id, attempt?.room?.layout_status]);
-
   async function handleDelete(itemId) {
     try {
       const data = await api.del(`/api/attempts/${id}/items/${itemId}`);
@@ -230,25 +209,19 @@ export default function Furniture() {
   function pickCard(key) {
     setChoice(key);
     setCount(1);
-    setWidth("");
   }
 
   function pickOther(name) {
     setChoice(name);
     setOtherType(OTHER_TYPES[name][0]);
     setCount(1);
-    setWidth("");
   }
 
   async function handleAdd() {
     if (!photo) return toast("Please add a photo of the piece.");
     if (!choice || total < 1) return toast("Please choose a type first.");
-    const w = parseFloat(width);
-    const useWidth = total === 1 && w > 0;
-    const pieces = Array.from({ length: total }, () => ({
-      type: typeName,
-      width_ft: useWidth ? w : defaultWidth(category, typeName),
-    }));
+    // no width is asked for: every piece gets its type's usual width (the floor plan can still resize it)
+    const pieces = Array.from({ length: total }, () => ({ type: typeName, width_ft: defaultWidth(category, typeName) }));
     setAdding(true);
     const form = new FormData();
     form.append("category", category);
@@ -259,7 +232,6 @@ export default function Furniture() {
       debugLog("upload OK");
       setAttempt(data.attempt);
       setPhoto(null);
-      setWidth("");
       setChoice(null);
       setCount(1);
     } catch (err) {
@@ -306,12 +278,7 @@ export default function Furniture() {
       />
       <div className="eyebrow">Step 2 of 4</div>
       <StepBar current={2} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} placementMode={attempt.placement_mode} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
-        <h1 style={{ marginBottom: 0 }}>Add furniture</h1>
-        <button type="button" className="link-btn" onClick={() => setShowPlan(true)}>
-          View room plan
-        </button>
-      </div>
+      <h1 style={{ marginBottom: 18 }}>Add furniture</h1>
 
       <div className="furn-layout">
         <div className="furn-items">
@@ -322,7 +289,6 @@ export default function Furniture() {
             <div className="title">
               {it.category} &middot; {it.type}
             </div>
-            <div className="width">{it.width_ft}ft wide</div>
             <ItemDescription attemptId={attempt.id} item={it} onSaved={setAttempt} />
           </div>
           <button type="button" className="del" onClick={() => handleDelete(it.id)}>
@@ -404,23 +370,6 @@ export default function Furniture() {
               <div className="count-hint" style={{ textAlign: "left" }}>
                 {attempt.items.length + total} of {MAX_ITEMS} pieces used
               </div>
-              {total === 1 ? (
-                <div className="field" style={{ marginTop: 14 }}>
-                  <label>Width (ft) &ndash; optional</label>
-                  <input
-                    type="number"
-                    min="0.5"
-                    step="0.5"
-                    value={width}
-                    onChange={(e) => setWidth(e.target.value)}
-                    placeholder="e.g. 7"
-                  />
-                </div>
-              ) : (
-                <div className="count-hint" style={{ textAlign: "left" }}>
-                  Sizes are set automatically &ndash; drag the blue dots on the plan to adjust.
-                </div>
-              )}
               <button type="button" className="btn btn-dark" disabled={adding || !photo || total < 1} onClick={handleAdd}>
                 {adding ? "Adding…" : `Add ${total} × ${typeLabel}`}
               </button>
@@ -430,12 +379,6 @@ export default function Furniture() {
       )}
         </div>
       </div>
-
-      {showPlan ? (
-        <BottomSheet title="Room plan" onClose={() => setShowPlan(false)}>
-          <RoomPlanView room={attempt.room} readOnly />
-        </BottomSheet>
-      ) : null}
 
       <StepFooter
         backTo={adjust.backTo || `/room/${attempt.room.id}`}

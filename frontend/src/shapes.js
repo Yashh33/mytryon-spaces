@@ -51,6 +51,7 @@ export function piecesOf(items) {
     const subs = item.sub_pieces && item.sub_pieces.length ? item.sub_pieces : [{ sub_index: 0, label: item.type, shape: item.shape }];
     return subs.map((sub) => {
       const label = subs.length > 1 ? sub.label : item.type;
+      const widthFt = subs.length > 1 ? sub.width_ft : item.width_ft;
       const kind = pieceKind(subs.length > 1 ? sub.shape : item.shape);
       return {
         key: `${item.id}:${sub.sub_index}`,
@@ -60,6 +61,7 @@ export function piecesOf(items) {
         photo_url: item.photo_url,
         kind,
         type: typeLabel(item.category, label, kind),
+        width_ft: widthFt,
       };
     });
   });
@@ -443,4 +445,70 @@ export function tiltPoints(origPoints, k, aspect) {
 
 export function centroid(corners) {
   return [corners.reduce((s, p) => s + p[0], 0) / corners.length, corners.reduce((s, p) => s + p[1], 0) / corners.length];
+}
+
+// ---- turn on the floor ------------------------------------------------------------
+// Turning a sofa as it would turn in the real room (the round handle spins it
+// on the screen instead). The shape's 4 outer corners are taken as a real
+// rectangle lying on the floor — the piece's width in feet by FLOOR_DEPTH_FT,
+// or for an L / corner sofa its outer bounding rectangle, as deep as its
+// drawn proportions suggest — and the perspective transform from that floor
+// rectangle to the photo is worked out. Every point goes onto the floor,
+// turns about the rectangle's centre and comes back through the same
+// transform, so the shape keeps its size on the floor and every edge keeps
+// its number (backrest line and LOUNGE stay put).
+
+export const FLOOR_DEPTH_FT = 3;
+const FALLBACK_WIDTH_FT = 6;
+export const FLOOR_TURN_DEG_PER_WIDTH = 360; // dragging across the whole photo turns it all the way round
+
+/** The 4 corners treated as the floor rectangle, in order round it. */
+function floorQuad(points, kind) {
+  if (kind === "L" || kind === "corner") {
+    const [p0, p1, p2, p3, , p5] = points;
+    // the bounding rectangle's 4th corner: the tip's edge line meets the long run's outer end line
+    const d = intersect(p3, p2, p5, p0) || [p0[0] + p2[0] - p1[0], p0[1] + p2[1] - p1[1]];
+    return [p0, p1, p2, d];
+  }
+  return points.slice(0, 4); // a rectangle's corners; a curved sofa's back ends then front ends
+}
+
+function applyHw(h, x, y) {
+  const w = h[6] * x + h[7] * y + 1;
+  return [(h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w, w];
+}
+
+/** `origPoints` turned by `deg` on the floor (positive = clockwise seen from
+ * above); null when the result would cross the horizon or leave the photo,
+ * so the caller keeps the last shape that worked. */
+export function turnOnFloor(origPoints, kind, deg, aspect, widthFt) {
+  const quad = floorQuad(origPoints, kind);
+  const W = widthFt > 0 ? widthFt : FALLBACK_WIDTH_FT;
+  let D = FLOOR_DEPTH_FT;
+  if (kind === "L" || kind === "corner") {
+    // its bounding rectangle is deeper than a straight sofa: as the drawing's proportions suggest
+    const px = (p) => [p[0] * aspect, p[1]];
+    const back = Math.hypot(...sub(px(quad[1]), px(quad[0])));
+    const side = Math.hypot(...sub(px(quad[2]), px(quad[1])));
+    if (back > 1e-6) D = Math.min(W * 1.2, Math.max(FLOOR_DEPTH_FT, (W * side) / back));
+  }
+  const floor = [[0, 0], [W, 0], [W, D], [0, D]];
+  const toPhoto = homography(floor, quad);
+  const toFloor = homography(quad, floor);
+  if (!toPhoto || !toFloor) return null;
+  const a = (deg * Math.PI) / 180;
+  const [cos, sin] = [Math.cos(a), Math.sin(a)];
+  const centre = [W / 2, D / 2];
+  const floorSide = Math.sign(applyHw(toPhoto, centre[0], centre[1])[2]); // the side of the horizon the floor is on
+  const out = [];
+  for (const [x, y] of origPoints) {
+    const f = applyHw(toFloor, x, y);
+    const dx = f[0] - centre[0];
+    const dy = f[1] - centre[1];
+    const turned = applyHw(toPhoto, centre[0] + dx * cos - dy * sin, centre[1] + dx * sin + dy * cos);
+    if (Math.sign(turned[2]) !== floorSide || !Number.isFinite(turned[0]) || !Number.isFinite(turned[1])) return null;
+    out.push([turned[0], turned[1]]);
+  }
+  if (out.some(([x, y]) => outside(x) || outside(y))) return null;
+  return out.map(([x, y]) => [round5(x), round5(y)]);
 }

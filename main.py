@@ -3762,82 +3762,122 @@ def shape_piece_name(item: Item, label: str, kind: str) -> str:
     return f"{item.category.lower()} ({label})"
 
 
-L_END_LEVEL = 0.02  # ends of a long run within this share of the photo's height count as level
+WALL_LEVEL_DEG = 20  # a black line within this of level is against the back wall
+BOTH_DIRECTIONS = 0.75  # a direction's smaller part at least this share of the larger: both are named
 
 
-def _second_part_geometry(main_part: list, second_part: list, aspect: float) -> tuple[str, str, str]:
-    """Where a two-part shape's second part sits on its main (long) part,
-    read off the corners as drawn (photo pixels: x scaled by the photo's
-    width/height `aspect`): ("LEFT" | "RIGHT" — the end of the main part it
-    is attached to, in the picture; ", the end nearer the camera" | ", the
-    end nearer the back" | "" when the main part lies level; "toward the
-    camera" | "toward the back" | "toward the left" | "toward the right" —
-    the way it runs from the main part)."""
-    main_px = [(x * aspect, y) for x, y in main_part]
-    second_px = [(x * aspect, y) for x, y in second_part]
-    mid = lambda a, b: ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
-    length = lambda a, b: math.hypot(a[0] - b[0], a[1] - b[1])
-    q0, q1, q2, q3 = main_px
-    # the main part's two ends are its two shorter edges
-    if length(q0, q1) + length(q2, q3) >= length(q1, q2) + length(q3, q0):
-        ends = [mid(q1, q2), mid(q3, q0)]
+def _wall_of(line: list, photo_width: float) -> str:
+    """The wall a back is against, from its black line (photo pixels): within
+    WALL_LEVEL_DEG of level, the BACK wall; steeper, the LEFT or RIGHT wall by
+    which half of the picture the line is in."""
+    (x1, y1), (x2, y2) = line[0], line[-1]
+    if math.degrees(math.atan2(abs(y2 - y1), abs(x2 - x1))) <= WALL_LEVEL_DEG:
+        return "BACK"
+    return "LEFT" if (x1 + x2) / 2 < photo_width / 2 else "RIGHT"
+
+
+def _direction_words(dx: float, dy: float) -> str:
+    """A picture direction in words, by its larger part ("toward the right");
+    when the two parts are close, both ("toward the right and slightly toward
+    the camera"). Down the picture is toward the camera."""
+    across = "toward the left" if dx < 0 else "toward the right"
+    depth = "toward the camera" if dy > 0 else "toward the back"
+    big, small = (across, depth) if abs(dx) >= abs(dy) else (depth, across)
+    if max(abs(dx), abs(dy)) > 0 and min(abs(dx), abs(dy)) >= BOTH_DIRECTIONS * max(abs(dx), abs(dy)):
+        return f"{big} and slightly {small}"
+    return big
+
+
+def _back_line(corners: list, edge: int | None) -> list:
+    """A part's black line: its backrest edge, or (none set) its longest edge."""
+    if edge is None:
+        edge = max(range(4), key=lambda i: math.dist(corners[i], corners[(i + 1) % 4]))
+    return [corners[edge], corners[(edge + 1) % 4]]
+
+
+def two_part_facts(shape: dict, aspect: float) -> dict:
+    """Where an L's lounge (or a corner sofa's shorter part) is, read off the
+    shape as drawn, in photo pixels (x scaled by the photo's width/height
+    `aspect`): the wall the long part's back is against; which end of the long
+    part the second part joins (LEFT / RIGHT on the back wall; nearer the back
+    wall / nearer the camera on a side wall); and the way the second part runs,
+    from the inner corner where it joins the long part to its tip (the middle
+    of its far short edge). A corner sofa's second part also has its own wall.
+    Computed from the current corners on every render, so turns, flips and
+    moves always change it."""
+    parts = [[(x * aspect, y) for x, y in part] for part in shape_parts(shape["kind"], shape["points"])]
+    if shape["kind"] == "L":
+        second = shape["lounge"]
+    else:  # corner sofa: the shorter part is the one with the shorter longest edge
+        longest = [max(math.dist(c[i], c[(i + 1) % 4]) for i in range(4)) for c in parts]
+        second = 1 if longest[0] >= longest[1] else 0
+    long_part, other_part = parts[1 - second], parts[second]
+    inner = (shape["points"][4][0] * aspect, shape["points"][4][1])  # p4: where the two parts meet inside the L
+
+    def short_edge_middles(corners: list) -> list:
+        pairs = [(0, 2), (1, 3)]
+        a, b = min(pairs, key=lambda pr: sum(math.dist(corners[i], corners[(i + 1) % 4]) for i in pr))
+        return [
+            ((corners[i][0] + corners[(i + 1) % 4][0]) / 2, (corners[i][1] + corners[(i + 1) % 4][1]) / 2) for i in (a, b)
+        ]
+
+    tip = max(short_edge_middles(other_part), key=lambda m: math.dist(m, inner))
+    direction = _direction_words(tip[0] - inner[0], tip[1] - inner[1])
+
+    wall = _wall_of(_back_line(long_part, shape["backrest"][1 - second]), aspect)
+    attached, other = sorted(short_edge_middles(long_part), key=lambda m: math.dist(m, inner))
+    if wall == "BACK":
+        end = "LEFT" if attached[0] < other[0] else "RIGHT"
+        end_words = f"the {end} end of the long part"
+        other_words = f"the {'RIGHT' if end == 'LEFT' else 'LEFT'} end"
+        along = ""
     else:
-        ends = [mid(q0, q1), mid(q2, q3)]
-    sx = sum(p[0] for p in second_px) / 4
-    sy = sum(p[1] for p in second_px) / 4
-    attached, other = sorted(ends, key=lambda e: length(e, (sx, sy)))
-    side = "LEFT" if attached[0] < other[0] else "RIGHT"
-    # a main part lying level across the picture has neither end nearer: say nothing then
-    if abs(attached[1] - other[1]) < L_END_LEVEL:
-        nearer = ""
-    else:
-        nearer = ", the end nearer the camera" if attached[1] > other[1] else ", the end nearer the back"
-    # from the main part's centre line to the second part's centre
-    ax, ay = other[0] - attached[0], other[1] - attached[1]
-    t = ((sx - attached[0]) * ax + (sy - attached[1]) * ay) / max(ax * ax + ay * ay, 1e-12)
-    dx, dy = sx - (attached[0] + t * ax), sy - (attached[1] + t * ay)
-    if abs(dx) > abs(dy):
-        toward = "toward the left" if dx < 0 else "toward the right"
-    else:
-        toward = "toward the camera" if dy > 0 else "toward the back"
-    return side, nearer, toward
+        at_back = attached[1] < other[1]  # higher in the picture: farther from the camera
+        end_words = "the end nearer the back wall" if at_back else "the end nearer the camera"
+        other_words = "nearer the camera" if at_back else "nearer the back wall"
+        # running across the picture from the back end of a side-wall sofa: along the back wall
+        along = ", along the back wall" if at_back and direction.startswith(("toward the left", "toward the right")) else ""
+    facts = {"wall": wall, "end": end_words, "other_end": other_words, "direction": direction, "along": along}
+    if shape["kind"] == "corner":
+        facts["second_wall"] = _wall_of(_back_line(other_part, shape["backrest"][second]), aspect)
+    return facts
 
 
 def l_lounge_sentence(shape: dict, aspect: float) -> str:
-    """Which end of an L's long run its lounge is on: LEFT or RIGHT end in
-    the picture, whether that end is nearer the camera (lower) or the back
-    (higher), and which way the lounge sticks out. Always computed from the
-    current corners, so both Flips change it."""
-    parts = shape_parts(shape["kind"], shape["points"])
-    side, nearer, toward = _second_part_geometry(parts[1 - shape["lounge"]], parts[shape["lounge"]], aspect)
+    """Which wall the L's long part is against, which end its lounge is at and
+    which way the lounge runs (see two_part_facts)."""
+    f = two_part_facts(shape, aspect)
     return (
-        f"Its lounge is at the {side} end of the long run in the picture{nearer}, and it sticks out "
-        f"{toward}. Its single arm is at the other end, the {'RIGHT' if side == 'LEFT' else 'LEFT'} end. Do not "
-        "swap these ends."
+        f"Its long part has its back against the {f['wall']} wall along the thick black line. Its lounge is at "
+        f"{f['end']} and runs {f['direction']}{f['along']}. Its single arm is at the other end, {f['other_end']}. "
+        "Do not swap these ends."
     )
 
 
 def corner_sofa_sentence(shape: dict, aspect: float) -> str:
-    """A corner sofa: which side its shorter part is on (LEFT / RIGHT in the
-    picture) and which way it runs from the corner, both parts with a
-    backrest. The longer part is the one with the longer longest edge.
-    Always computed from the current corners, so both Flips change it."""
-    parts = shape_parts(shape["kind"], shape["points"])
-
-    def longest_edge(corners: list) -> float:
-        px = [(x * aspect, y) for x, y in corners]
-        return max(math.hypot(px[i][0] - px[(i + 1) % 4][0], px[i][1] - px[(i + 1) % 4][1]) for i in range(4))
-
-    long_index = 0 if longest_edge(parts[0]) >= longest_edge(parts[1]) else 1
-    side, _nearer, toward = _second_part_geometry(parts[long_index], parts[1 - long_index], aspect)
+    """A corner sofa: the wall each part's back is against, which end of the
+    long part the shorter part joins and which way it runs (see
+    two_part_facts), both parts with a backrest."""
+    f = two_part_facts(shape, aspect)
     return (
         "It is a corner sofa with two seating parts that meet at the corner, BOTH with a full backrest: the long part "
-        "has its back against the wall along its black line, and the shorter part is on the "
-        f"{side}, running {toward}, with its own backrest against the wall along its black line. There is no open "
-        "chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the photograph shows a "
-        "straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, legs, material and "
-        "colour."
+        f"has its back against the {f['wall']} wall along its black line, and the shorter part is at {f['end']}, "
+        f"running {f['direction']}, with its own backrest against the {f['second_wall']} wall along its black line. "
+        "There is no open chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the "
+        "photograph shows a straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, "
+        "legs, material and colour."
     )
+
+
+def shape_facts_for_debug(attempt: Attempt, shapes: list[dict], aspect: float) -> list[dict]:
+    """The computed wall / end / direction of every L and corner sofa, by its
+    label, for the Debug panel."""
+    tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
+    out = []
+    for shape in shapes:
+        if shape["kind"] in ("L", "corner"):
+            out.append({"tag": tags.get((shape["item_id"], shape["sub_index"])), **two_part_facts(shape, aspect)})
+    return out
 
 
 def curved_sofa_sentence(shape: dict, aspect: float) -> str:
@@ -4545,6 +4585,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 "original_height": guide.height,
                 "padded": photo_box is not None,
                 "guide_style": guide_style,
+                # what the L / corner sentences say, for the Debug panel
+                "shape_facts": shape_facts_for_debug(attempt, shapes, guide.width / guide.height),
             }
             # the gap writer reads this same guide image; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}

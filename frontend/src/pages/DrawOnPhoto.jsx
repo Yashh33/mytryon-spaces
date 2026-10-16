@@ -30,6 +30,8 @@ import {
   tiltFactor,
   tiltPoints,
   transformPoints,
+  turnOnFloor,
+  FLOOR_TURN_DEG_PER_WIDTH,
 } from "../shapes.js";
 
 const SAVE_DELAY_MS = 400;
@@ -40,6 +42,8 @@ const RESIZE_SIZE = 32;
 const ROTATE_R = 17;
 const TILT_W = 26;
 const BEND_R = 14;
+const FLOOR_TURN_W = 44;
+const FLOOR_TURN_H = 26;
 const TILT_H = 38;
 const HANDLE_GAP = 14; // handles sit this far outside the shape
 const ROTATE_STICK = 30;
@@ -208,6 +212,10 @@ export default function DrawOnPhoto() {
         const centre = shapeCentre(shape.points);
         Object.assign(drag.current, { centre, from: polar(centre, at) });
       }
+      if (t.role === "floorturn") {
+        const piece = piecesOf(attempt.items).find((p) => p.key === key);
+        Object.assign(drag.current, { kind: shape.kind, widthFt: piece?.width_ft });
+      }
     }
   }
 
@@ -246,6 +254,11 @@ export default function DrawOnPhoto() {
       // a curved sofa: stronger or flatter, the front arc following
       const points = bendCurve(d.orig, at[0], at[1], aspect);
       if (points) setShapePoints(d.key, points);
+    } else if (d.role === "floorturn") {
+      // left / right turns the sofa on the floor, as it would turn in the room
+      const deg = snapAngle((at[0] - d.start[0]) * FLOOR_TURN_DEG_PER_WIDTH);
+      const points = turnOnFloor(d.orig, d.kind, deg, aspect, d.widthFt);
+      if (points) setShapePoints(d.key, points); // a turn that won't fit stops at the last one that did
     } else if (d.role === "tilt") {
       // up lays the shape flatter, down stands it back up toward the view from above
       const points = tiltPoints(d.orig, tiltFactor(at[1] - d.start[1]), aspect);
@@ -348,7 +361,9 @@ export default function DrawOnPhoto() {
     const rotate = [keep(midX, rr, W), keep(minY - (ROTATE_STICK + HANDLE_GAP) * scale - rr, rr, H)];
     const [tw, th] = [TILT_W * scale, TILT_H * scale];
     const tilt = [keep(minX - HANDLE_GAP * scale - tw / 2, tw / 2, W), keep((minY + maxY) / 2, th / 2, H)];
-    return { resize, rotate, tilt, stickFrom: [midX, minY], rs, rr, tw, th };
+    const [fw, fh] = [FLOOR_TURN_W * scale, FLOOR_TURN_H * scale];
+    const floorTurn = [keep(midX, fw / 2, W), keep(maxY + HANDLE_GAP * scale + fh / 2, fh / 2, H)];
+    return { resize, rotate, tilt, floorTurn, stickFrom: [midX, minY], rs, rr, tw, th, fw, fh };
   }
 
   return (
@@ -367,9 +382,9 @@ export default function DrawOnPhoto() {
         Draw on photo <span className="beta-tag">Beta</span>
       </h1>
       <div className="hint-line" style={{ marginBottom: 12 }}>
-        Add each piece, then drag it onto the floor. Square handle: resize. Round handle: turn (or pinch and twist with two
-        fingers). Up/down handle: tilt — drag up to lay the shape flatter on the floor. Tap an edge to put the backrest
-        (black line) there.
+        Add each piece, then drag it onto the floor. Square handle: resize. Round handle: turn on the screen (or pinch and
+        twist with two fingers). Handle below: turn on the floor, as in the room — drag left or right. Up/down handle: tilt —
+        drag up to lay the shape flatter on the floor. Tap an edge to put the backrest (black line) there.
       </div>
 
       <div className="draw-layout">
@@ -508,6 +523,16 @@ export default function DrawOnPhoto() {
                           />
                           <text x={h.resize[0]} y={h.resize[1]} fontSize={19 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
                             ⤡
+                          </text>
+                        </g>
+                        <g className="draw-floorturn">
+                          <rect
+                            data-role="floorturn" data-key={key}
+                            x={h.floorTurn[0] - h.fw / 2} y={h.floorTurn[1] - h.fh / 2} width={h.fw} height={h.fh} rx={h.fh / 2}
+                            fill="#fff" stroke={hex} strokeWidth={3 * scale}
+                          />
+                          <text x={h.floorTurn[0]} y={h.floorTurn[1]} fontSize={17 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                            ↶↷
                           </text>
                         </g>
                         <g className="draw-tilt">

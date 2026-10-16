@@ -53,6 +53,21 @@ export function DebugPanel({ renderId }) {
         <span>Time: {data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : "—"}</span>
       </div>
 
+      {guide?.shape_facts?.length ? (
+        <>
+          <div className="debug-label">L / corner sofas, as worked out from the shapes</div>
+          <pre className="debug-pre">
+            {guide.shape_facts
+              .map(
+                (f) =>
+                  `${f.tag}: back against the ${f.wall} wall; joins at ${f.end}, runs ${f.direction}${f.along || ""}` +
+                  (f.second_wall ? `; the shorter part's back against the ${f.second_wall} wall` : "")
+              )
+              .join("\n")}
+          </pre>
+        </>
+      ) : null}
+
       <div className="debug-label">Images sent, in order</div>
       <div className="debug-images">
         {sent.map((img, i) => (

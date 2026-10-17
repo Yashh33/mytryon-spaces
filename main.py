@@ -3301,12 +3301,20 @@ BOX_TOP_ALPHA = 89  # about 35% opacity
 BOX_SIDE_ALPHA = 56  # about 22%
 BOX_OUTLINE_PX = 3
 BOX_FALLBACK_WIDTH_FT = 6.0  # a piece with no width recorded
+# a seating piece's backrest: a thin slab along each black line, taller than the seat
+SLAB_HEIGHT_FT = 2.6
+SLAB_THICKNESS_FT = 0.6
+SLAB_MIN_THICKNESS = 0.006  # of the photo's width: still visible when a back is seen nearly edge-on
+SLAB_TOP_ALPHA = 128  # about 50%
+SLAB_SIDE_ALPHA = 92  # about 36%
+SEATING_CATEGORIES = ("Sofa", "Chair")  # pieces with a backrest slab; tables, beds etc. have none
 # the first sentence about Image 1, and the removal sentence's words, for boxes
 GUIDE_BOXES_LINE = (
     "Image 1 is the room photograph with numbered see-through coloured boxes standing on the floor. Each box shows "
     "ONLY where a piece stands, which way it faces and roughly how big it is; its height is about seat height. The "
     "boxes are plain on purpose: their colour and square shape say nothing about the design, arms, cushions, colour "
-    "or material. The thick black line along the top of a box marks the backrest side."
+    "or material. The taller back part of each box, with the thick black line on top, is the sofa's backrest; a low "
+    "part with no tall back is an open chaise lounge."
 )
 FLAT_REMOVAL_WORDS = "remove all coloured guide shapes, labels and black lines completely"
 BOXES_REMOVAL_WORDS = "remove every coloured box, label and black line completely"
@@ -3320,7 +3328,8 @@ SHAPES_STYLING_RULES = (
     "lighting, curtains and small decor. It must never move, resize, turn, reshape or redesign any sofa: every sofa "
     "stays exactly where its {thing} is, with exactly its shape, size, number of seats, arms and design from its own "
     "photograph. A straight sofa stays straight; never make it curved. Never rebuild, panel or clad the wall behind a "
-    "sofa."
+    "sofa. Never add, build, move or reshape any wall, partition, panel, niche, column or window. Never create a new "
+    "wall to hang art on."
 )
 KEEP_EVERYTHING_SENTENCE = (
     "Keep everything else exactly the same. Preserve the walls, doorways, windows, floor, ceiling and room proportions "
@@ -3332,12 +3341,30 @@ KEEP_STRUCTURE_SENTENCE = (
 )
 # for every look: added to the final check line
 SHAPES_FINAL_CHECK_PLACE = "every sofa is exactly where its {thing} is and keeps the design of its own photograph"
-# the look texts as Draw on photo uses them: no feature wall (it rebuilt the wall behind a sofa)
+# the look texts as Draw on photo uses them: finishes only — no feature wall,
+# statement chandelier or artwork (they rebuilt walls and moved sofas)
 LOOK_FEATURE_WALL_OPTION = (
     "a feature wall with panelling or stone/marble texture on a wall that is free of furniture and windows, if one "
     "is available; "
 )
-SHAPES_ROOM_TREATMENT_TEXT = {look: text.replace(LOOK_FEATURE_WALL_OPTION, "") for look, text in ROOM_TREATMENT_TEXT.items()}
+SHAPES_ROOM_TREATMENT_TEXT = {
+    "keep": ROOM_TREATMENT_TEXT["keep"],
+    "warm": _ROOM_TREATMENT_BASE + (
+        "style the room as a warm, aesthetic, lived-in home by changing only finishes: warm white or soft beige wall "
+        "paint, warm wood tones and warm ceiling lighting (cove or a pendant). The room may include a few of these, "
+        "only where they fit naturally: a textured rug under the front of the seating, a floor lamp, soft linen "
+        "curtains on the existing windows, an indoor plant in an empty corner. Use only what suits this room; fewer "
+        "is better than crowded. Cosy, inviting, magazine-quality."
+    ),
+    "luxury": (
+        "Keeping the walls, windows, doors, flooring area, ceiling and room proportions exactly as photographed, style "
+        "the room as a high-end luxury interior by changing only finishes: deep rich wall tones, a premium floor "
+        "finish, warm cove lighting with hidden LED strips, elegant floor-length drapes on the existing windows, a "
+        "plush large rug and a marble or stone coffee table. At most one indoor plant, only in an empty corner. "
+        "Dramatic, premium, hotel-like."
+    ),
+    "minimal": ROOM_TREATMENT_TEXT["minimal"],
+}
 
 
 def _add_to_final_check(text: str, words: str) -> str:
@@ -3500,6 +3527,7 @@ def attempt_pieces(attempt: Attempt) -> list[dict]:
                     "label": label,
                     "kind": kind,
                     "width_ft": sub.get("width_ft"),
+                    "seating": item.category in SEATING_CATEGORIES,
                     "tag": f"{len(pieces) + 1} · {shape_type_label(item, label, kind)}",
                 }
             )
@@ -3653,18 +3681,55 @@ def _box_lift(ruler_px: list, width_ft: float | None, photo_height: int):
     return lambda y: max(0.0, base * (y - horizon) / (back_y - horizon))
 
 
-def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict:
+def _slab_base(back: list, outline: list, kind: str, lift, min_px: float) -> list:
+    """The floor outline of a backrest slab (photo pixels): the back line, then
+    the same line moved SLAB_THICKNESS_FT into the seat (at the local scale,
+    never thinner than SLAB_MIN_THICKNESS of the photo's width, never more
+    than half way to the front), back to front."""
+    def thickness(y: float) -> float:
+        return lift(y) / BOX_HEIGHT_FT * SLAB_THICKNESS_FT
+
+    inner = []
+    if kind == "curved":  # each back-arc point moves toward its partner on the front arc
+        half = len(outline) // 2
+        for i, (x, y) in enumerate(back):
+            fx, fy = outline[half + (half - 1 - i)]
+            d = math.hypot(fx - x, fy - y) or 1.0
+            t = min(max(thickness(y), min_px), d / 2)
+            inner.append((x + (fx - x) / d * t, y + (fy - y) / d * t))
+    else:  # a straight back moves square to itself, toward the middle of the shape
+        (ax, ay), (bx, by) = back[0], back[-1]
+        cx, cy = sum(x for x, _ in outline) / len(outline), sum(y for _, y in outline) / len(outline)
+        length = math.hypot(bx - ax, by - ay) or 1.0
+        nx, ny = -(by - ay) / length, (bx - ax) / length
+        if (cx - ax) * nx + (cy - ay) * ny < 0:
+            nx, ny = -nx, -ny
+        reach = abs((cx - ax) * nx + (cy - ay) * ny)
+        for x, y in back:
+            t = min(max(thickness(y), min_px), reach)
+            inner.append((x + nx * t, y + ny * t))
+    return list(back) + inner[::-1]
+
+
+
+def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict, seating: set | None = None) -> dict:
     """Draws every shape onto `guide` (RGBA, in place) as a see-through box:
     its floor outline is the bottom, every point raised straight up (see
     _box_lift) is the top. Far boxes first; within a box the far sides, the
-    top (BOX_TOP_ALPHA), then the near sides (BOX_SIDE_ALPHA), a
-    BOX_OUTLINE_PX outline of every edge in a darker shade, and last the
-    black backrest line along the TOP back edge. Returns each shape's lift
-    function by (item_id, sub_index), for placing its labels."""
+    top (BOX_TOP_ALPHA), then the near sides (BOX_SIDE_ALPHA) and a
+    BOX_OUTLINE_PX outline of every edge in a darker shade. A seating piece
+    (by (item_id, sub_index) in `seating`) also gets a backrest slab along
+    each black line — SLAB_HEIGHT_FT tall, SLAB_THICKNESS_FT thick, a bit
+    more opaque — with the black line along the slab's top; an L's lounge
+    has none, a corner sofa has one along both backs. Without a slab the
+    black line runs along the top back edge of the box. Returns each shape's
+    (seat lift, top lift) by (item_id, sub_index), for placing its labels."""
     from PIL import ImageDraw
 
     width, height = guide.size
     draw = ImageDraw.Draw(guide)
+    slab_min_px = SLAB_MIN_THICKNESS * width  # a slab stays visible even seen nearly edge-on
+    slab_scale = SLAB_HEIGHT_FT / BOX_HEIGHT_FT
 
     def paint(polygon: list, rgba: tuple) -> None:
         # each face blends on its own, so overlapping faces stay see-through
@@ -3685,7 +3750,7 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict
         lift = _box_lift(to_px(ruler), widths.get((shape["item_id"], shape["sub_index"])), height)
         bottom = to_px(outline)
         top = [(x, y - lift(y)) for x, y in bottom]
-        boxes.append((shape, bottom, top, corners, [[(x, y - lift(y)) for x, y in to_px(b)] for b in backs], lift))
+        boxes.append((shape, bottom, top, corners, [to_px(b) for b in backs], lift))
     boxes.sort(key=lambda b: max(y for _, y in b[1]))  # farthest (highest in the photo) first
 
     lifts, back_lines = {}, []
@@ -3709,8 +3774,28 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict
         draw.line(top + [top[0]], fill=edge, width=BOX_OUTLINE_PX, joint="curve")
         for i in corners:
             draw.line([bottom[i], top[i]], fill=edge, width=BOX_OUTLINE_PX)
-        back_lines.extend(backs)
-        lifts[(shape["item_id"], shape["sub_index"])] = lift
+        key = (shape["item_id"], shape["sub_index"])
+        if key in (seating or set()):
+            slab_lift = lambda y, lift=lift: lift(y) * slab_scale  # noqa: E731
+            for back in backs:
+                base = _slab_base(back, bottom, shape["kind"], lift, slab_min_px)
+                slab_top = [(x, y - slab_lift(y)) for x, y in base]
+                m = len(base)
+                faces = sorted(
+                    ((base[i][1] + base[(i + 1) % m][1]) / 2, [base[i], base[(i + 1) % m], slab_top[(i + 1) % m], slab_top[i]])
+                    for i in range(m)
+                )
+                for _depth, face in faces:
+                    paint(face, (*rgb, SLAB_SIDE_ALPHA))
+                paint(slab_top, (*rgb, SLAB_TOP_ALPHA))
+                draw.line(slab_top + [slab_top[0]], fill=edge, width=BOX_OUTLINE_PX, joint="curve")
+                for i in (0, len(back) - 1, len(back), m - 1):  # the slab's four upright corners
+                    draw.line([base[i], slab_top[i]], fill=edge, width=BOX_OUTLINE_PX)
+                back_lines.append([(x, y - slab_lift(y)) for x, y in back])
+            lifts[key] = (lift, slab_lift)
+        else:
+            back_lines.extend([(x, y - lift(y)) for x, y in back] for back in backs)
+            lifts[key] = (lift, lift)
 
     radius = GUIDE_LINE_PX / 2
     for line in back_lines:
@@ -3731,9 +3816,10 @@ def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
     pieces = attempt_pieces(attempt)
     tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in pieces}
     widths = {(p["item"].id, p["sub_index"]): p["width_ft"] for p in pieces}
+    seating = {(p["item"].id, p["sub_index"]) for p in pieces if p["seating"]}
     with Image.open(room_path) as room_image:
         size = derive_size(room_image.width, room_image.height)
-        guide = draw_guide_image(room_image, shapes, tags, style, widths)
+        guide = draw_guide_image(room_image, shapes, tags, style, widths, seating)
     sent, photo_box = guide, None
     if pad_room_photo_enabled(db):
         sent, photo_box = pad_to_output_ratio(guide, size)
@@ -3743,7 +3829,12 @@ def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
 
 
 def draw_guide_image(
-    photo: Image.Image, shapes: list[dict], tags: dict | None = None, style: str = "flat", widths: dict | None = None
+    photo: Image.Image,
+    shapes: list[dict],
+    tags: dict | None = None,
+    style: str = "flat",
+    widths: dict | None = None,
+    seating: set | None = None,
 ) -> Image.Image:
     """The room photo with every shape drawn on it: "flat", each shape filled
     in its colour at about 45% opacity with a GUIDE_LINE_PX black line on each
@@ -3758,7 +3849,7 @@ def draw_guide_image(
     width, height = base.size
     if style == "boxes":
         guide = base
-        lifts = draw_box_guide(guide, shapes, widths or {})
+        lifts = draw_box_guide(guide, shapes, widths or {}, seating)
         draw = ImageDraw.Draw(guide)
         return _draw_guide_labels(guide, draw, shapes, tags, lifts)
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -3809,11 +3900,11 @@ def _draw_guide_labels(guide: Image.Image, draw, shapes: list[dict], tags: dict 
         draw.text((x0 + pad - box[0], y0 + pad - box[1]), text, font=font, fill=(17, 17, 17, 255))
 
     for shape in shapes:
-        lift = (lifts or {}).get((shape["item_id"], shape["sub_index"]), lambda y: 0.0)
-        raise_px = lambda pts: [(x * width, y * height - lift(y * height)) for x, y in pts]  # noqa: E731
+        seat_lift, top_lift = (lifts or {}).get((shape["item_id"], shape["sub_index"]), (lambda y: 0.0, lambda y: 0.0))
+        raise_px = lambda pts, lift=top_lift: [(x * width, y * height - lift(y * height)) for x, y in pts]  # noqa: E731
         parts = shape_parts(shape["kind"], shape["points"])
         if shape["kind"] == "L" and shape["lounge"] is not None:
-            lounge = raise_px(parts[shape["lounge"]])
+            lounge = raise_px(parts[shape["lounge"]], seat_lift)  # the lounge is low: no slab
             label("LOUNGE", sum(x for x, _ in lounge) / 4, sum(y for _, y in lounge) / 4, small, 5 * unit)
         tag = (tags or {}).get((shape["item_id"], shape["sub_index"]))
         if tag:
@@ -3999,7 +4090,9 @@ def corner_sofa_sentence(f: dict) -> str:
         f"{layout} "
         "There is no open chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the "
         "photograph shows a straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, "
-        "legs, material and colour."
+        "legs, material and colour. The corner seat joins both parts. The shorter part along the "
+        f"{f['corner_wall']} wall has the same tall backrest as the long part, exactly like the tall back shown in the "
+        "box. Arms: one at the far end of the long part and one at the far end of the shorter part."
     )
 
 
@@ -4896,6 +4989,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             # each shape's wall and lounge direction: the gap writer's, or worked out from the shape
             facts_used = shape_facts(attempt, shapes, guide.width / guide.height, gap_info.get("facts"))
             room_debug["shape_facts"] = [{"tag": tag, **f} for tag, f in facts_used.items()]  # for the Debug panel
+            look_used = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
+            room_debug["look"] = {"key": look_used, "text": SHAPES_ROOM_TREATMENT_TEXT[look_used]}
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:

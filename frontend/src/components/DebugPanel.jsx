@@ -53,6 +53,13 @@ export function DebugPanel({ renderId }) {
         <span>Time: {data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : "—"}</span>
       </div>
 
+      {guide?.look ? (
+        <>
+          <div className="debug-label">Room look used ({guide.look.key})</div>
+          <pre className="debug-pre">{guide.look.text}</pre>
+        </>
+      ) : null}
+
       {guide?.shape_facts?.length ? (
         <>
           <div className="debug-label">Walls, ends and the sentence used in the prompt</div>

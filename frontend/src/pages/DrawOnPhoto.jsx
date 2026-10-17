@@ -305,7 +305,8 @@ export default function DrawOnPhoto() {
   /** Would `shape` with these `points` stay on the photo (2% margin) — every
    * corner, a curved sofa's whole arcs, and the raised top of its 3D box? */
   function fitsOnPhoto(shape, points) {
-    return Boolean(points) && shapeFits(shape, points, aspect, widthFtOf(keyOf(shape)), guideStyle === "boxes");
+    const piece = attempt ? piecesOf(attempt.items).find((p) => p.key === keyOf(shape)) : null;
+    return Boolean(points) && shapeFits(shape, points, aspect, piece?.width_ft, guideStyle === "boxes", piece?.seating ?? true);
   }
 
   /** New points for a shape; any that would leave the photo are ignored, so

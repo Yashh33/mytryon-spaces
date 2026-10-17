@@ -108,6 +108,14 @@ export function DebugPanel({ renderId }) {
           <pre className="debug-pre">
             {gap.lines?.length ? gap.lines.join("\n") : `Left out — ${gap.reason || "no lines"}`}
           </pre>
+          {gap.cleaned?.length ? (
+            <>
+              <div className="debug-label">Gap writer lines cleaned (chaise / lounge words on a piece that has none)</div>
+              <pre className="debug-pre">
+                {gap.cleaned.map((c) => `${c.tag}\n  original: ${c.original}\n  cleaned:  ${c.cleaned}`).join("\n\n")}
+              </pre>
+            </>
+          ) : null}
         </>
       ) : null}
     </div>

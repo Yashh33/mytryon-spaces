@@ -4110,6 +4110,15 @@ def curved_sofa_sentence(f: dict) -> str:
     )
 
 
+# the parts each type has, closing its paragraph (the gap writer gets the same rules: GAP_SOFA_TYPES)
+SHAPE_TYPE_LINES = {
+    "rect": "It has no chaise, no lounge and no corner.",
+    "corner": "It has no chaise and no lounge: both parts have a backrest.",
+    "curved": "It has no corner, no straight section and no chaise.",
+    "L": "Only the long part has a backrest; the lounge has none.",
+}
+
+
 def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0, facts: dict | None = None) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape. `facts` (from
@@ -4138,6 +4147,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
         )
         if shape["kind"] == "curved":
             text += ". " + curved_sofa_sentence(facts.get(piece["tag"]) or curved_facts(shape, aspect))
+            text += " " + SHAPE_TYPE_LINES["curved"]
             paragraphs.append(text)
             continue
         f = facts.get(piece["tag"]) or {}
@@ -4151,6 +4161,10 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
             )
         elif shape["kind"] == "corner":
             text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect))
+        if shape["kind"] in ("L", "corner"):
+            text += " " + SHAPE_TYPE_LINES[shape["kind"]]
+        elif item.category in ("Sofa", "Chair"):  # a straight sofa or an armchair
+            text += " " + SHAPE_TYPE_LINES["rect"]
         paragraphs.append(text)
     return "\n\n".join(paragraphs)
 
@@ -4257,6 +4271,22 @@ PREVIOUS_GAP_REPLY_FORM = (
     "words> | <open-floor sentence>\n"
     "For example:"
 )
+# what each labelled type has (and hasn't), so the gap writer only describes real parts
+GAP_SOFA_TYPES = (
+    "SOFA TYPES — use only the parts each type has. The label on each shape tells you its type.\n"
+    "- ARMCHAIR / 1-SEATER: one seat, one backrest, arms on both sides. It has NO chaise, NO lounge, NO corner, NO "
+    "second part.\n"
+    "- 2-SEATER / 3-SEATER / 4-SEATER: one straight run with a backrest along its whole back and arms at both ends. "
+    "It has NO chaise, NO lounge, NO corner, NO second part.\n"
+    "- L-SHAPE: a long part with a backrest, and a LOUNGE (an open chaise) at one end. The lounge has NO backrest and "
+    "NO arm at its tip. The only arm is at the far end of the long part. Never call an L-shape a corner sofa.\n"
+    "- CORNER SOFA: two seating parts that meet at a corner seat, and BOTH parts have a backrest. Arms at both outer "
+    "ends. It has NO chaise and NO lounge — never use the words chaise, lounge or chaise tip for it; call its ends "
+    "'the left end', 'the right end', 'the end nearer the camera' or 'the end of the second part'.\n"
+    "- CURVED SOFA: one continuous curved run with its backrest following the curve. It has NO corner, NO straight "
+    "sections, NO chaise, NO lounge.\n"
+    "Describe each shape only with the parts its type has."
+)
 GAP_REPLY_FORM = (
     "Reply with only one line per shape, in label order, in this form (the label exactly as written on the photo):\n"
     "<label> | against: BACK / LEFT / RIGHT / no wall | <open-floor sentence>\n"
@@ -4268,6 +4298,7 @@ DEFAULT_GAP_WRITER_PROMPT = "\n\n".join(
         '"2 · 3-SEATER". Each shape shows exactly where a sofa will stand. The thick black line marks the sofa\'s '
         "back. A part marked LOUNGE is an open chaise.",
         GAP_WALL_PARAGRAPH,
+        GAP_SOFA_TYPES,
         "For each labelled shape, write 1–2 short sentences, in plain words, about the OPEN FLOOR around it — so an "
         "image editor keeps those gaps:\n"
         "- What each end of the shape is near, and whether there is open floor between that end and the nearest wall, "
@@ -4408,6 +4439,50 @@ def find_reusable_gap_result(db: Session, room_id: int, key: str) -> tuple[int, 
     return None
 
 
+CHAISE_TIP_RE = re.compile(r"\b(?:(?:the|its|their)\s+)?(?:chaise|lounge)(?:['’]s)?\s+tip\b", re.IGNORECASE)
+CHAISE_WORD_RE = re.compile(r"\s*\b(chaise|lounge)s?\b", re.IGNORECASE)
+
+
+def clean_gap_line(line: str, kind: str | None) -> str:
+    """A gap writer line ("TAG: sentence") for a piece that is not an L-shape
+    loses its chaise / lounge words: "chaise tip" / "lounge tip" becomes "end
+    of its second part" (a corner sofa) or "its end" (anything else), and any
+    other "chaise" / "lounge" word goes. An L-shape's line is unchanged."""
+    if kind == "L":
+        return line
+    tag, sep, sentence = line.partition(": ")
+    if not sep:
+        return line
+    tip = "the end of its second part" if kind == "corner" else "its end"
+
+    def tip_words(match: re.Match) -> str:
+        return tip[0].upper() + tip[1:] if match.group(0)[0].isupper() else tip
+
+    cleaned = CHAISE_TIP_RE.sub(tip_words, sentence)
+    # "the lounge end" -> "the end"; "the chaise" on its own -> "the sofa" (or "the armchair"); then any word left
+    noun = "armchair" if "ARMCHAIR" in tag.upper() else "sofa"
+    cleaned = re.sub(r"\b(?:chaise|lounge)s?\s+(?=(?:end|side|part|edge)\b)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(the|its|a|an)\s+(?:chaise|lounge)s?\b", lambda m: f"{m.group(1)} {noun}", cleaned, flags=re.IGNORECASE)
+    cleaned = CHAISE_WORD_RE.sub("", cleaned)
+    cleaned = re.sub(r"\b(the|its|a|an)\s+(the|its)\b", r"\2", cleaned, flags=re.IGNORECASE)  # "the its end" -> "its end"
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).replace(" ,", ",").replace(" .", ".").strip()
+    return f"{tag}: {cleaned}"
+
+
+def clean_gap_lines(lines: list[str], kinds: dict) -> tuple[list[str], list[dict]]:
+    """Every OPEN FLOOR line through clean_gap_line (`kinds`: the shape kind
+    by label); returns the lines to use and, for the Debug panel, each line
+    that was changed (original and cleaned)."""
+    out, changed = [], []
+    for line in lines:
+        tag = line.partition(": ")[0]
+        cleaned = clean_gap_line(line, kinds.get(tag))
+        out.append(cleaned)
+        if cleaned != line:
+            changed.append({"tag": tag, "original": line, "cleaned": cleaned})
+    return out, changed
+
+
 async def resolve_gap_writer(
     db: Session, attempt: Attempt, guide: bytes, shapes: list[dict], padded: bool, guide_style: str = "flat"
 ) -> dict:
@@ -4424,11 +4499,16 @@ async def resolve_gap_writer(
     except Exception:
         logger.exception("gap writer reuse lookup failed attempt_id=%s", attempt.id)
         reusable = None
+    kinds = {tag: shape["kind"] for tag, shape in zip(tags, shapes)}
     if reusable:
         render_id, gap = reusable
+        # cleaned again: a result saved before the safety net may still carry chaise words
+        lines, cleaned = clean_gap_lines(gap.get("lines") or [], kinds)
         return {
             **info,
-            **{k: gap.get(k) for k in ("lines", "facts", "output", "usage", "elapsed_s")},
+            **{k: gap.get(k) for k in ("facts", "output", "usage", "elapsed_s")},
+            "lines": lines,
+            "cleaned": (gap.get("cleaned") or []) + cleaned,
             "reused_from_render": render_id,
         }
     try:
@@ -4440,10 +4520,12 @@ async def resolve_gap_writer(
         logger.exception("gap writer failed attempt_id=%s", attempt.id)
         return {**info, "reason": f"failed: {exc.__class__.__name__}"}
     lines, facts = parse_gap_reply(result["output"], tags)
+    lines, cleaned = clean_gap_lines(lines, kinds)
     return {
         **info,
         **result,
         "lines": lines,
+        "cleaned": cleaned,  # lines whose chaise / lounge words were taken out (piece not an L-shape)
         "facts": facts,  # by label: {"wall", "lounge"} as the writer gave them
         "spent": result["usage"],  # this render's own call, logged with its spend
         "reason": None if lines else "no line started with a shape's label",

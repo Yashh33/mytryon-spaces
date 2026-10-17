@@ -1224,3 +1224,5 @@ h2 { font-size: 19px; }
 /* the toolbar and pieces tray always fit on screen in full screen, clear of a phone's home bar */
 .draw-wrap.fs { height: 100vh; height: 100dvh; padding-bottom: max(10px, env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
 .draw-wrap.fs .draw-toolbar, .draw-wrap.fs .draw-tray-row { flex-shrink: 0; }
+.draw-extend rect { cursor: ew-resize; }
+.draw-hint { margin-top: 6px; font-size: 12px; color: var(--muted); }

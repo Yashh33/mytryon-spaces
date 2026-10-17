@@ -13,12 +13,15 @@ import {
   bendCurve,
   centroid,
   curvedOutline,
+  extendPart,
   flipShape,
   flipShapeVertical,
   floorTurnSign,
   moveLoungeToOtherEnd,
   moveShape,
   newShape,
+  partAxis,
+  partEndHandle,
   piecesOf,
   shapeFits,
   shapeCentre,
@@ -38,6 +41,9 @@ const RESIZE_SIZE = 32;
 const ROTATE_R = 17;
 const TILT_W = 26;
 const BEND_R = 14;
+const EXTEND_W = 30; // the arrow handle at the free end of each part of an L / corner sofa
+const EXTEND_H = 20;
+const EXTEND_STEP = 0.1; // the toolbar's - / + for one part's length
 const FLOOR_TURN_W = 44;
 const FLOOR_TURN_H = 26;
 const TILT_H = 38;
@@ -368,6 +374,11 @@ export default function DrawOnPhoto() {
         const centre = shapeCentre(shape.points);
         Object.assign(drag.current, { centre, from: polar(centre, at) });
       }
+      if (t.role === "extend") {
+        // one part of an L / corner sofa longer or shorter, along its own length
+        const part = Number(t.part);
+        Object.assign(drag.current, { part, axis: partAxis(shape.points, part, aspect) });
+      }
       if (t.role === "floorturn") {
         // dragging right swings the sofa's front toward the right of the picture
         Object.assign(drag.current, { kind: shape.kind, widthFt: widthFtOf(key), turnSign: floorTurnSign(shape) });
@@ -398,7 +409,14 @@ export default function DrawOnPhoto() {
     d.moved = true;
     if (d.role === "empty") return;
     const at = toPhoto(e.clientX, e.clientY);
-    if (d.role === "bend") {
+    if (d.role === "extend") {
+      // the pointer's movement along the part's length, as a share of that length, from the original points
+      const { dir, length } = d.axis;
+      if (dir && length > 1e-9) {
+        const along = (at[0] - d.start[0]) * aspect * dir[0] + (at[1] - d.start[1]) * dir[1];
+        setShapePoints(d.key, extendPart(d.orig, d.part, along / length, aspect));
+      }
+    } else if (d.role === "bend") {
       // a curved sofa: stronger or flatter, the front arc following
       const points = bendCurve(d.orig, at[0], at[1], aspect);
       if (points) setShapePoints(d.key, points);
@@ -556,6 +574,20 @@ export default function DrawOnPhoto() {
           <button type="button" onClick={() => step((s) => tiltPoints(s.points, tiltFactor(-TILT_STEP), aspect))} aria-label="Lay flatter">▲</button>
           <button type="button" onClick={() => step((s) => tiltPoints(s.points, tiltFactor(TILT_STEP), aspect))} aria-label="Stand up">▼</button>
         </div>
+        {selectedShape.kind === "L" || selectedShape.kind === "corner"
+          ? [selectedShape.kind === "L" ? 1 - selectedShape.lounge : 0, selectedShape.kind === "L" ? selectedShape.lounge : 1].map((part) => {
+              const label = part === (selectedShape.kind === "L" ? selectedShape.lounge : 1) ? (selectedShape.kind === "L" ? "Lounge" : "Second part") : "Long part";
+              const longer = extendPart(selectedShape.points, part, EXTEND_STEP, aspect);
+              const shorter = extendPart(selectedShape.points, part, -EXTEND_STEP, aspect);
+              return (
+                <div key={`part-${part}`} className="draw-toolbar-group" title={`${label} length`}>
+                  <span>{label}</span>
+                  <button type="button" disabled={!fitsOnPhoto(selectedShape, shorter)} onClick={() => step(() => shorter)} aria-label={`${label} shorter`}>−</button>
+                  <button type="button" disabled={!fitsOnPhoto(selectedShape, longer)} onClick={() => step(() => longer)} aria-label={`${label} longer`}>+</button>
+                </div>
+              );
+            })
+          : null}
         <div className="draw-toolbar-group" title="Size">
           <span>Size</span>
           <button type="button" onClick={() => step((s) => transformPoints(s.points, 1 / SIZE_STEP, 0, aspect, true))} aria-label="Smaller">−</button>
@@ -801,6 +833,25 @@ export default function DrawOnPhoto() {
                               ↶↷
                             </text>
                           </g>
+                          {selectedShape.kind === "L" || selectedShape.kind === "corner"
+                            ? [0, 1].map((part) => {
+                                const handle = partEndHandle(selectedShape.points, part, aspect, (HANDLE_GAP * scale) / H);
+                                const [hx, hy] = px(handle.at);
+                                const [ew, eh] = [EXTEND_W * scale, EXTEND_H * scale];
+                                return (
+                                  <g key={`extend-${part}`} className="draw-extend" transform={`rotate(${handle.angle} ${hx} ${hy})`}>
+                                    <rect
+                                      data-role="extend" data-key={key} data-part={part}
+                                      x={hx - ew / 2} y={hy - eh / 2} width={ew} height={eh} rx={eh / 2}
+                                      fill="#fff" stroke={hex} strokeWidth={3 * scale}
+                                    />
+                                    <text x={hx} y={hy} fontSize={15 * scale} textAnchor="middle" dominantBaseline="central" fill="#111" pointerEvents="none">
+                                      ↔
+                                    </text>
+                                  </g>
+                                );
+                              })
+                            : null}
                           <g className="draw-tilt">
                             <rect
                               data-role="tilt" data-key={key}
@@ -832,6 +883,7 @@ export default function DrawOnPhoto() {
             ) : null}
           </div>
           {fullscreen && rotateHint ? <div className="draw-rotate-hint">Turn your phone sideways for a bigger view</div> : null}
+          {!fullscreen ? <div className="draw-hint">Arrows at the ends of an L or corner sofa change that part&apos;s length only.</div> : null}
         </div>
 
         {toolbar}

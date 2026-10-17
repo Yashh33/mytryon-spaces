@@ -624,3 +624,71 @@ export function shapeFits(shape, points, aspect, widthFt, boxes) {
   const lift = boxLift(ruler, aspect, widthFt);
   return outline.every(([, y]) => y - lift(y) >= EDGE - 1e-6);
 }
+
+// ---- one part of an L / corner sofa longer or shorter -------------------------------
+// Part 0 (the long part) = p0 p1 q p5, part 1 (the second part) = q p2 p3 p4,
+// q where line p5-p4 meets line p1-p2. Only the chosen part's free end moves.
+
+const pix = (p, aspect) => [p[0] * aspect, p[1]];
+const unpix = (p, aspect) => [p[0] / aspect, p[1]];
+const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+const unit = (v) => {
+  const n = Math.hypot(v[0], v[1]);
+  return n > 1e-9 ? [v[0] / n, v[1] / n] : null;
+};
+
+/** A part's long direction (unit vector, photo pixels with x scaled by
+ * `aspect`, pointing to its free end) and its length along it. */
+export function partAxis(points, part, aspect) {
+  const P = points.map((p) => pix(p, aspect));
+  const [p0, p1, p2, , , p5] = P;
+  if (part === 1) {
+    const q = intersect(P[5], P[4], p1, p2) || p1;
+    return { dir: unit(sub(p2, p1)), length: dist(q, p2) };
+  }
+  return { dir: unit(sub(p0, p1)), length: dist(p1, p0), depth: dist(p0, p5) };
+}
+
+/** The points with one part's free end moved by `t` x that part's length
+ * (+ longer, - shorter). Part 1: p2 moves along p1->p2 and p3 / p4 follow
+ * as moveLCorner makes them (tip width, depth and part 0 unchanged). Part 0:
+ * p0 moves along p1->p0 and p5 along p4->p5 to the point where the end edge
+ * keeps its angle (p1..p4 unchanged). Null when a corner would leave the
+ * photo or the part would become shorter than it is deep. */
+export function extendPart(origPoints, part, t, aspect) {
+  const P = origPoints.map((p) => pix(p, aspect));
+  const [p0, p1, p2, p3, p4, p5] = P;
+  if (part === 1) {
+    const q = intersect(p5, p4, p1, p2);
+    const dir = unit(sub(p2, p1));
+    if (!q || !dir) return null;
+    const length = dist(q, p2);
+    const moved = add(p2, [dir[0] * t * length, dir[1] * t * length]);
+    if (dist(q, moved) < dist(p2, p3)) return null; // never shorter than its tip is wide
+    const [x, y] = unpix(moved, aspect);
+    return moveLCorner(origPoints, 2, x, y, aspect);
+  }
+  const dir = unit(sub(p0, p1));
+  if (!dir) return null;
+  const length = dist(p1, p0);
+  const newP0 = add(p0, [dir[0] * t * length, dir[1] * t * length]);
+  // the end edge keeps its angle: p5 is where the line through the new p0, parallel to p0->p5, meets line p4->p5
+  const newP5 = intersect(newP0, add(newP0, sub(p5, p0)), p4, p5);
+  if (!newP5) return null;
+  if (dist(p1, newP0) < dist(newP0, newP5)) return null; // never shorter than it is deep
+  const out = P.map((p, i) => (i === 0 ? newP0 : i === 5 ? newP5 : p)).map((p) => unpix(p, aspect));
+  if (out.some(([x, y]) => outside(x) || outside(y))) return null;
+  return out.map(([x, y]) => [round5(x), round5(y)]);
+}
+
+/** Where a part's length handle sits (photo fractions): the middle of its
+ * free end edge (p2-p3 for part 1, p0-p5 for part 0), pushed `gap` (in
+ * photo-height units) outward along the part. */
+export function partEndHandle(points, part, aspect, gap) {
+  const P = points.map((p) => pix(p, aspect));
+  const [a, b] = part === 1 ? [P[2], P[3]] : [P[0], P[5]];
+  const { dir } = partAxis(points, part, aspect);
+  const middle = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const at = dir ? add(middle, [dir[0] * gap, dir[1] * gap]) : middle;
+  return { at: unpix(at, aspect), angle: dir ? (Math.atan2(dir[1], dir[0]) * 180) / Math.PI : 0 };
+}

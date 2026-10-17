@@ -3302,11 +3302,14 @@ BOX_SIDE_ALPHA = 56  # about 22%
 BOX_OUTLINE_PX = 3
 BOX_FALLBACK_WIDTH_FT = 6.0  # a piece with no width recorded
 # a seating piece's backrest: a thin slab along each black line, taller than the seat
-SLAB_HEIGHT_FT = 2.6
-SLAB_THICKNESS_FT = 0.6
+# every slab point rises SLAB_LIFT_FACTOR x the seat lift directly below it
+# (same local scale, so a back running toward the camera never grows into a
+# pillar): about 2.3 ft against the 1.4 ft seat
+SLAB_LIFT_FACTOR = 1.7
+SLAB_THICKNESS_FT = 0.5
 SLAB_MIN_THICKNESS = 0.006  # of the photo's width: still visible when a back is seen nearly edge-on
-SLAB_TOP_ALPHA = 128  # about 50%
-SLAB_SIDE_ALPHA = 92  # about 36%
+SLAB_TOP_ALPHA = 102  # about 40%: only slightly stronger than the seat top
+SLAB_SIDE_ALPHA = 66  # about 26%
 SEATING_CATEGORIES = ("Sofa", "Chair")  # pieces with a backrest slab; tables, beds etc. have none
 # the first sentence about Image 1, and the removal sentence's words, for boxes
 GUIDE_BOXES_LINE = (
@@ -3662,6 +3665,9 @@ def _box_outline(shape: dict) -> tuple[list, list, list, list]:
         for part, edge in enumerate(shape["backrest"])
         if edge is not None
     ]
+    if kind == "corner" and shape["backrest"][1] == 0:
+        # the second part's back runs along its whole outer side, from the outer corner (p1) to its tip (p2)
+        backs = [b if b[0] != parts[1][0] else [outline[1], outline[2]] for b in backs]
     return outline, backs, list(range(6)), max(backs, key=lambda b: math.dist(b[0], b[1]))
 
 
@@ -3719,8 +3725,9 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict, seating
     top (BOX_TOP_ALPHA), then the near sides (BOX_SIDE_ALPHA) and a
     BOX_OUTLINE_PX outline of every edge in a darker shade. A seating piece
     (by (item_id, sub_index) in `seating`) also gets a backrest slab along
-    each black line — SLAB_HEIGHT_FT tall, SLAB_THICKNESS_FT thick, a bit
-    more opaque — with the black line along the slab's top; an L's lounge
+    each black line — SLAB_LIFT_FACTOR x the seat lift below every point,
+    SLAB_THICKNESS_FT thick, a little more opaque — with the black line along
+    the slab's whole top; an L's lounge
     has none, a corner sofa has one along both backs. Without a slab the
     black line runs along the top back edge of the box. Returns each shape's
     (seat lift, top lift) by (item_id, sub_index), for placing its labels."""
@@ -3729,7 +3736,7 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict, seating
     width, height = guide.size
     draw = ImageDraw.Draw(guide)
     slab_min_px = SLAB_MIN_THICKNESS * width  # a slab stays visible even seen nearly edge-on
-    slab_scale = SLAB_HEIGHT_FT / BOX_HEIGHT_FT
+    slab_scale = SLAB_LIFT_FACTOR
 
     def paint(polygon: list, rgba: tuple) -> None:
         # each face blends on its own, so overlapping faces stay see-through
@@ -4070,29 +4077,32 @@ def l_lounge_sentence(f: dict) -> str:
     )
 
 
-def corner_sofa_sentence(f: dict) -> str:
-    """A corner sofa: the wall each part's back is against, which end of the
-    long part the shorter part joins and which way it runs (`f` from
-    two_part_facts), both parts with a backrest."""
-    if f["wall"] == "NONE":
-        layout = (
-            f"the long part stands free of the walls along its black line, and the shorter part is at {f['end']}, "
-            f"running {f['direction']}, with its own backrest along its black line."
-        )
+def corner_sofa_sentence(f: dict, image: int) -> str:
+    """A corner sectional (`f` from two_part_facts, `image` its product
+    photo's Image number): the long part's wall, the end with the corner
+    seat, the way the second part runs, its own full backrest against the
+    neighbouring wall, and an arm at each far end. Computed from the shape
+    and wall on every render."""
+    wall = f["wall"]
+    if wall in ("BACK", "NONE"):
+        corner_end = f"At the {f['end_side']} end"
+        far_end = f"{'RIGHT' if f['end_side'] == 'LEFT' else 'LEFT'} end"
     else:
-        # the shorter part runs along the neighbouring wall, from the corner
-        layout = (
-            f"the long part has its back against the {f['wall']} wall along its black line, and the shorter part runs "
-            f"from the corner along the {f['corner_wall']} wall, with its own backrest against that wall."
-        )
+        corner_end = f"At {f['end']}"  # "the end nearer the back wall" / "the end nearer the camera"
+        far_end = f"the end {f['other_end']}"
+    long_back = "along its thick black line" if wall == "NONE" else f"along the {wall} wall"
+    second_wall = "" if f["corner_wall"] == "NONE" else f", against the {f['corner_wall']} wall"
+    second_arm = (
+        "at the end of the second part nearest the camera" if "toward the camera" in f["direction"] else "at the far end of the second part"
+    )
     return (
-        "It is a corner sofa with two seating parts that meet at the corner, BOTH with a full backrest: "
-        f"{layout} "
-        "There is no open chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the "
-        "photograph shows a straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, "
-        "legs, material and colour. The corner seat joins both parts. The shorter part along the "
-        f"{f['corner_wall']} wall has the same tall backrest as the long part, exactly like the tall back shown in the "
-        "box. Arms: one at the far end of the long part and one at the far end of the shorter part."
+        f"It is a corner sectional sofa (an L-shaped sectional with a corner seat), in the design of Image {image}. "
+        f"The long part has its back cushions {long_back}. {corner_end} there is a corner seat, and from there the "
+        f"second part runs {f['direction']}; this second part ALSO has full back cushions along its outer side"
+        f"{second_wall}, the same height as the long part's back. It is NOT a chaise lounge: no seat without a "
+        f"backrest. One arm at the far end of the long part ({far_end}) and one arm {second_arm}. If Image {image} "
+        "shows a straight sofa, build this corner sectional in the same design: same cushions, arms, legs, material "
+        "and colour."
     )
 
 
@@ -4112,17 +4122,18 @@ def shape_facts(attempt: Attempt, shapes: list[dict], aspect: float, writer: dic
     worked out from the shape, and so is a curved sofa's bow. Rectangles
     without a wall from the writer have none (their sentence says "flat
     against the wall")."""
-    tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
+    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
     out = {}
     for shape in shapes:
-        tag = tags.get((shape["item_id"], shape["sub_index"]))
+        piece = pieces.get((shape["item_id"], shape["sub_index"]))
+        tag = piece["tag"] if piece else None
         given = (writer or {}).get(tag) or {}
         if shape["kind"] == "L":
             f = two_part_facts(shape, aspect, given.get("wall"))
             out[tag] = {**f, "sentence": l_lounge_sentence(f)}
         elif shape["kind"] == "corner":
             f = two_part_facts(shape, aspect, given.get("wall"))
-            out[tag] = {**f, "sentence": corner_sofa_sentence(f)}
+            out[tag] = {**f, "sentence": corner_sofa_sentence(f, piece["item_index"] + 2)}
         elif shape["kind"] == "curved":
             f = curved_facts(shape, aspect, given.get("wall"))
             out[tag] = {**f, "sentence": curved_sofa_sentence(f)}
@@ -4219,7 +4230,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
                 "shows a straight sofa, rebuild it as this L in the same design."
             )
         elif shape["kind"] == "corner":
-            text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect))
+            text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect), number)
         paragraphs.append(text)
     return "\n\n".join(paragraphs)
 

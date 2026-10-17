@@ -583,7 +583,7 @@ export function moveLoungeToOtherEnd(shape, aspect) {
 // distance below a horizon at BOX_HORIZON of the photo's height.
 
 export const BOX_HEIGHT_FT = 1.4;
-const SLAB_HEIGHT_FT = 2.6; // a seating piece's backrest slab along each black line (main.py draw_box_guide)
+const SLAB_LIFT_FACTOR = 1.7; // a seating piece's backrest slab: 1.7 x the seat lift below it (main.py draw_box_guide)
 const BOX_HORIZON = 0.4;
 const BOX_FALLBACK_WIDTH_FT = 6;
 
@@ -601,7 +601,10 @@ function boxOutline(shape, aspect) {
   }
   const backs = shapeParts(kind, points).flatMap((corners, part) => {
     const e = shape.backrest?.[part];
-    return e == null ? [] : [[corners[e], corners[(e + 1) % 4]]];
+    if (e == null) return [];
+    // a corner sofa's second back runs along its whole outer side, from the outer corner (p1) to its tip (p2)
+    if (kind === "corner" && part === 1 && e === 0) return [[points[1], points[2]]];
+    return [[corners[e], corners[(e + 1) % 4]]];
   });
   const length = ([a, b]) => Math.hypot((b[0] - a[0]) * aspect, b[1] - a[1]);
   const ruler = backs.length ? backs.reduce((best, b) => (length(b) > length(best) ? b : best)) : [points[0], points[1]];
@@ -628,6 +631,6 @@ export function shapeFits(shape, points, aspect, widthFt, boxes, seating = true)
   const lift = boxLift(ruler, aspect, widthFt);
   if (!outline.every(([, y]) => y - lift(y) >= EDGE - 1e-6)) return false;
   if (!seating) return true;
-  const slab = SLAB_HEIGHT_FT / BOX_HEIGHT_FT;
+  const slab = SLAB_LIFT_FACTOR;
   return backs.every((back) => back.every(([, y]) => y - lift(y) * slab >= EDGE - 1e-6));
 }

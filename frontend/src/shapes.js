@@ -63,7 +63,6 @@ export function piecesOf(items) {
         kind,
         type: typeLabel(item.category, label, kind),
         width_ft: widthFt,
-        seating: item.category === "Sofa" || item.category === "Chair", // has a backrest slab in the 3D boxes
       };
     });
   });
@@ -583,7 +582,6 @@ export function moveLoungeToOtherEnd(shape, aspect) {
 // distance below a horizon at BOX_HORIZON of the photo's height.
 
 export const BOX_HEIGHT_FT = 1.4;
-const SLAB_LIFT_FACTOR = 1.7; // a seating piece's backrest slab: 1.7 x the seat lift below it (main.py draw_box_guide)
 const BOX_HORIZON = 0.4;
 const BOX_FALLBACK_WIDTH_FT = 6;
 
@@ -592,23 +590,19 @@ function boxOutline(shape, aspect) {
   const { kind, points } = shape;
   if (kind === "curved") {
     const { outline, back } = curvedOutline(points);
-    return { outline, ruler: back, backs: [back] };
+    return { outline, ruler: back };
   }
   if (kind === "rect") {
     const e = shape.backrest?.[0] ?? 0;
-    const back = [points[e], points[(e + 1) % 4]];
-    return { outline: points.slice(0, 4), ruler: back, backs: [back] };
+    return { outline: points.slice(0, 4), ruler: [points[e], points[(e + 1) % 4]] };
   }
   const backs = shapeParts(kind, points).flatMap((corners, part) => {
     const e = shape.backrest?.[part];
-    if (e == null) return [];
-    // a corner sofa's second back runs along its whole outer side, from the outer corner (p1) to its tip (p2)
-    if (kind === "corner" && part === 1 && e === 0) return [[points[1], points[2]]];
-    return [[corners[e], corners[(e + 1) % 4]]];
+    return e == null ? [] : [[corners[e], corners[(e + 1) % 4]]];
   });
   const length = ([a, b]) => Math.hypot((b[0] - a[0]) * aspect, b[1] - a[1]);
   const ruler = backs.length ? backs.reduce((best, b) => (length(b) > length(best) ? b : best)) : [points[0], points[1]];
-  return { outline: points, ruler, backs };
+  return { outline: points, ruler };
 }
 
 /** How far (photo-height fractions) a floor point at height y is raised for its box top. */
@@ -622,15 +616,11 @@ function boxLift(ruler, aspect, widthFt) {
 }
 
 /** Does `shape` with these `points` fit on the photo with the EDGE margin —
- * its whole outline and, with `boxes`, its raised box top and (a `seating`
- * piece) the top of its taller backrest slab too? */
-export function shapeFits(shape, points, aspect, widthFt, boxes, seating = true) {
-  const { outline, ruler, backs } = boxOutline({ ...shape, points }, aspect);
+ * its whole outline and, with `boxes`, its raised box top too? */
+export function shapeFits(shape, points, aspect, widthFt, boxes) {
+  const { outline, ruler } = boxOutline({ ...shape, points }, aspect);
   if (outline.some(([x, y]) => outside(x) || outside(y))) return false;
   if (!boxes) return true;
   const lift = boxLift(ruler, aspect, widthFt);
-  if (!outline.every(([, y]) => y - lift(y) >= EDGE - 1e-6)) return false;
-  if (!seating) return true;
-  const slab = SLAB_LIFT_FACTOR;
-  return backs.every((back) => back.every(([, y]) => y - lift(y) * slab >= EDGE - 1e-6));
+  return outline.every(([, y]) => y - lift(y) >= EDGE - 1e-6);
 }

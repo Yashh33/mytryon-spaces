@@ -3301,23 +3301,12 @@ BOX_TOP_ALPHA = 89  # about 35% opacity
 BOX_SIDE_ALPHA = 56  # about 22%
 BOX_OUTLINE_PX = 3
 BOX_FALLBACK_WIDTH_FT = 6.0  # a piece with no width recorded
-# a seating piece's backrest: a thin slab along each black line, taller than the seat
-# every slab point rises SLAB_LIFT_FACTOR x the seat lift directly below it
-# (same local scale, so a back running toward the camera never grows into a
-# pillar): about 2.3 ft against the 1.4 ft seat
-SLAB_LIFT_FACTOR = 1.7
-SLAB_THICKNESS_FT = 0.5
-SLAB_MIN_THICKNESS = 0.006  # of the photo's width: still visible when a back is seen nearly edge-on
-SLAB_TOP_ALPHA = 102  # about 40%: only slightly stronger than the seat top
-SLAB_SIDE_ALPHA = 66  # about 26%
-SEATING_CATEGORIES = ("Sofa", "Chair")  # pieces with a backrest slab; tables, beds etc. have none
 # the first sentence about Image 1, and the removal sentence's words, for boxes
 GUIDE_BOXES_LINE = (
     "Image 1 is the room photograph with numbered see-through coloured boxes standing on the floor. Each box shows "
     "ONLY where a piece stands, which way it faces and roughly how big it is; its height is about seat height. The "
     "boxes are plain on purpose: their colour and square shape say nothing about the design, arms, cushions, colour "
-    "or material. The taller back part of each box, with the thick black line on top, is the sofa's backrest; a low "
-    "part with no tall back is an open chaise lounge."
+    "or material. The thick black line along the top of a box marks the backrest side."
 )
 FLAT_REMOVAL_WORDS = "remove all coloured guide shapes, labels and black lines completely"
 BOXES_REMOVAL_WORDS = "remove every coloured box, label and black line completely"
@@ -3530,7 +3519,6 @@ def attempt_pieces(attempt: Attempt) -> list[dict]:
                     "label": label,
                     "kind": kind,
                     "width_ft": sub.get("width_ft"),
-                    "seating": item.category in SEATING_CATEGORIES,
                     "tag": f"{len(pieces) + 1} · {shape_type_label(item, label, kind)}",
                 }
             )
@@ -3665,9 +3653,6 @@ def _box_outline(shape: dict) -> tuple[list, list, list, list]:
         for part, edge in enumerate(shape["backrest"])
         if edge is not None
     ]
-    if kind == "corner" and shape["backrest"][1] == 0:
-        # the second part's back runs along its whole outer side, from the outer corner (p1) to its tip (p2)
-        backs = [b if b[0] != parts[1][0] else [outline[1], outline[2]] for b in backs]
     return outline, backs, list(range(6)), max(backs, key=lambda b: math.dist(b[0], b[1]))
 
 
@@ -3687,56 +3672,18 @@ def _box_lift(ruler_px: list, width_ft: float | None, photo_height: int):
     return lambda y: max(0.0, base * (y - horizon) / (back_y - horizon))
 
 
-def _slab_base(back: list, outline: list, kind: str, lift, min_px: float) -> list:
-    """The floor outline of a backrest slab (photo pixels): the back line, then
-    the same line moved SLAB_THICKNESS_FT into the seat (at the local scale,
-    never thinner than SLAB_MIN_THICKNESS of the photo's width, never more
-    than half way to the front), back to front."""
-    def thickness(y: float) -> float:
-        return lift(y) / BOX_HEIGHT_FT * SLAB_THICKNESS_FT
-
-    inner = []
-    if kind == "curved":  # each back-arc point moves toward its partner on the front arc
-        half = len(outline) // 2
-        for i, (x, y) in enumerate(back):
-            fx, fy = outline[half + (half - 1 - i)]
-            d = math.hypot(fx - x, fy - y) or 1.0
-            t = min(max(thickness(y), min_px), d / 2)
-            inner.append((x + (fx - x) / d * t, y + (fy - y) / d * t))
-    else:  # a straight back moves square to itself, toward the middle of the shape
-        (ax, ay), (bx, by) = back[0], back[-1]
-        cx, cy = sum(x for x, _ in outline) / len(outline), sum(y for _, y in outline) / len(outline)
-        length = math.hypot(bx - ax, by - ay) or 1.0
-        nx, ny = -(by - ay) / length, (bx - ax) / length
-        if (cx - ax) * nx + (cy - ay) * ny < 0:
-            nx, ny = -nx, -ny
-        reach = abs((cx - ax) * nx + (cy - ay) * ny)
-        for x, y in back:
-            t = min(max(thickness(y), min_px), reach)
-            inner.append((x + nx * t, y + ny * t))
-    return list(back) + inner[::-1]
-
-
-
-def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict, seating: set | None = None) -> dict:
+def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict:
     """Draws every shape onto `guide` (RGBA, in place) as a see-through box:
     its floor outline is the bottom, every point raised straight up (see
     _box_lift) is the top. Far boxes first; within a box the far sides, the
-    top (BOX_TOP_ALPHA), then the near sides (BOX_SIDE_ALPHA) and a
-    BOX_OUTLINE_PX outline of every edge in a darker shade. A seating piece
-    (by (item_id, sub_index) in `seating`) also gets a backrest slab along
-    each black line — SLAB_LIFT_FACTOR x the seat lift below every point,
-    SLAB_THICKNESS_FT thick, a little more opaque — with the black line along
-    the slab's whole top; an L's lounge
-    has none, a corner sofa has one along both backs. Without a slab the
-    black line runs along the top back edge of the box. Returns each shape's
-    (seat lift, top lift) by (item_id, sub_index), for placing its labels."""
+    top (BOX_TOP_ALPHA), then the near sides (BOX_SIDE_ALPHA), a
+    BOX_OUTLINE_PX outline of every edge in a darker shade, and last the
+    black backrest line along the TOP back edge. Returns each shape's
+    (seat lift, label lift) by (item_id, sub_index), for placing its labels."""
     from PIL import ImageDraw
 
     width, height = guide.size
     draw = ImageDraw.Draw(guide)
-    slab_min_px = SLAB_MIN_THICKNESS * width  # a slab stays visible even seen nearly edge-on
-    slab_scale = SLAB_LIFT_FACTOR
 
     def paint(polygon: list, rgba: tuple) -> None:
         # each face blends on its own, so overlapping faces stay see-through
@@ -3781,28 +3728,8 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict, seating
         draw.line(top + [top[0]], fill=edge, width=BOX_OUTLINE_PX, joint="curve")
         for i in corners:
             draw.line([bottom[i], top[i]], fill=edge, width=BOX_OUTLINE_PX)
-        key = (shape["item_id"], shape["sub_index"])
-        if key in (seating or set()):
-            slab_lift = lambda y, lift=lift: lift(y) * slab_scale  # noqa: E731
-            for back in backs:
-                base = _slab_base(back, bottom, shape["kind"], lift, slab_min_px)
-                slab_top = [(x, y - slab_lift(y)) for x, y in base]
-                m = len(base)
-                faces = sorted(
-                    ((base[i][1] + base[(i + 1) % m][1]) / 2, [base[i], base[(i + 1) % m], slab_top[(i + 1) % m], slab_top[i]])
-                    for i in range(m)
-                )
-                for _depth, face in faces:
-                    paint(face, (*rgb, SLAB_SIDE_ALPHA))
-                paint(slab_top, (*rgb, SLAB_TOP_ALPHA))
-                draw.line(slab_top + [slab_top[0]], fill=edge, width=BOX_OUTLINE_PX, joint="curve")
-                for i in (0, len(back) - 1, len(back), m - 1):  # the slab's four upright corners
-                    draw.line([base[i], slab_top[i]], fill=edge, width=BOX_OUTLINE_PX)
-                back_lines.append([(x, y - slab_lift(y)) for x, y in back])
-            lifts[key] = (lift, slab_lift)
-        else:
-            back_lines.extend([(x, y - lift(y)) for x, y in back] for back in backs)
-            lifts[key] = (lift, lift)
+        back_lines.extend([(x, y - lift(y)) for x, y in back] for back in backs)
+        lifts[(shape["item_id"], shape["sub_index"])] = (lift, lift)
 
     radius = GUIDE_LINE_PX / 2
     for line in back_lines:
@@ -3823,10 +3750,9 @@ def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
     pieces = attempt_pieces(attempt)
     tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in pieces}
     widths = {(p["item"].id, p["sub_index"]): p["width_ft"] for p in pieces}
-    seating = {(p["item"].id, p["sub_index"]) for p in pieces if p["seating"]}
     with Image.open(room_path) as room_image:
         size = derive_size(room_image.width, room_image.height)
-        guide = draw_guide_image(room_image, shapes, tags, style, widths, seating)
+        guide = draw_guide_image(room_image, shapes, tags, style, widths)
     sent, photo_box = guide, None
     if pad_room_photo_enabled(db):
         sent, photo_box = pad_to_output_ratio(guide, size)
@@ -3841,7 +3767,6 @@ def draw_guide_image(
     tags: dict | None = None,
     style: str = "flat",
     widths: dict | None = None,
-    seating: set | None = None,
 ) -> Image.Image:
     """The room photo with every shape drawn on it: "flat", each shape filled
     in its colour at about 45% opacity with a GUIDE_LINE_PX black line on each
@@ -3856,7 +3781,7 @@ def draw_guide_image(
     width, height = base.size
     if style == "boxes":
         guide = base
-        lifts = draw_box_guide(guide, shapes, widths or {}, seating)
+        lifts = draw_box_guide(guide, shapes, widths or {})
         draw = ImageDraw.Draw(guide)
         return _draw_guide_labels(guide, draw, shapes, tags, lifts)
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -3911,7 +3836,7 @@ def _draw_guide_labels(guide: Image.Image, draw, shapes: list[dict], tags: dict 
         raise_px = lambda pts, lift=top_lift: [(x * width, y * height - lift(y * height)) for x, y in pts]  # noqa: E731
         parts = shape_parts(shape["kind"], shape["points"])
         if shape["kind"] == "L" and shape["lounge"] is not None:
-            lounge = raise_px(parts[shape["lounge"]], seat_lift)  # the lounge is low: no slab
+            lounge = raise_px(parts[shape["lounge"]], seat_lift)  # on the lounge's own top
             label("LOUNGE", sum(x for x, _ in lounge) / 4, sum(y for _, y in lounge) / 4, small, 5 * unit)
         tag = (tags or {}).get((shape["item_id"], shape["sub_index"]))
         if tag:
@@ -4077,32 +4002,27 @@ def l_lounge_sentence(f: dict) -> str:
     )
 
 
-def corner_sofa_sentence(f: dict, image: int) -> str:
-    """A corner sectional (`f` from two_part_facts, `image` its product
-    photo's Image number): the long part's wall, the end with the corner
-    seat, the way the second part runs, its own full backrest against the
-    neighbouring wall, and an arm at each far end. Computed from the shape
-    and wall on every render."""
-    wall = f["wall"]
-    if wall in ("BACK", "NONE"):
-        corner_end = f"At the {f['end_side']} end"
-        far_end = f"{'RIGHT' if f['end_side'] == 'LEFT' else 'LEFT'} end"
+def corner_sofa_sentence(f: dict) -> str:
+    """A corner sofa: the wall each part's back is against and the wall the
+    shorter part runs along from the corner (`f` from two_part_facts), both
+    parts with a backrest."""
+    if f["wall"] == "NONE":
+        layout = (
+            f"the long part stands free of the walls along its black line, and the shorter part is at {f['end']}, "
+            "with its own backrest along its black line."
+        )
     else:
-        corner_end = f"At {f['end']}"  # "the end nearer the back wall" / "the end nearer the camera"
-        far_end = f"the end {f['other_end']}"
-    long_back = "along its thick black line" if wall == "NONE" else f"along the {wall} wall"
-    second_wall = "" if f["corner_wall"] == "NONE" else f", against the {f['corner_wall']} wall"
-    second_arm = (
-        "at the end of the second part nearest the camera" if "toward the camera" in f["direction"] else "at the far end of the second part"
-    )
+        # the shorter part runs along the neighbouring wall, from the corner
+        layout = (
+            f"the long part has its back against the {f['wall']} wall along its black line, and the shorter part runs "
+            f"from the corner along the {f['corner_wall']} wall, with its own backrest against that wall."
+        )
     return (
-        f"It is a corner sectional sofa (an L-shaped sectional with a corner seat), in the design of Image {image}. "
-        f"The long part has its back cushions {long_back}. {corner_end} there is a corner seat, and from there the "
-        f"second part runs {f['direction']}; this second part ALSO has full back cushions along its outer side"
-        f"{second_wall}, the same height as the long part's back. It is NOT a chaise lounge: no seat without a "
-        f"backrest. One arm at the far end of the long part ({far_end}) and one arm {second_arm}. If Image {image} "
-        "shows a straight sofa, build this corner sectional in the same design: same cushions, arms, legs, material "
-        "and colour."
+        "It is a corner sofa with two seating parts that meet at the corner, BOTH with a full backrest: "
+        f"{layout} "
+        "There is no open chaise or lounge: every seat has a backrest. Arms only at the two outer ends. If the "
+        "photograph shows a straight sofa, rebuild it as this corner sofa in the same design: same cushions, arms, "
+        "legs, material and colour."
     )
 
 
@@ -4133,7 +4053,7 @@ def shape_facts(attempt: Attempt, shapes: list[dict], aspect: float, writer: dic
             out[tag] = {**f, "sentence": l_lounge_sentence(f)}
         elif shape["kind"] == "corner":
             f = two_part_facts(shape, aspect, given.get("wall"))
-            out[tag] = {**f, "sentence": corner_sofa_sentence(f, piece["item_index"] + 2)}
+            out[tag] = {**f, "sentence": corner_sofa_sentence(f)}
         elif shape["kind"] == "curved":
             f = curved_facts(shape, aspect, given.get("wall"))
             out[tag] = {**f, "sentence": curved_sofa_sentence(f)}
@@ -4230,7 +4150,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
                 "shows a straight sofa, rebuild it as this L in the same design."
             )
         elif shape["kind"] == "corner":
-            text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect), number)
+            text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect))
         paragraphs.append(text)
     return "\n\n".join(paragraphs)
 

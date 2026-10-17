@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 data/
 supabase-db-backup/
+codebase-dump*.txt
+codebase_dump*.txt

@@ -1890,14 +1890,19 @@ def build_piece_finish_text(items: list[Item]) -> str:
 
 
 def room_fabric_text(room_fabric: dict) -> str:
-    """Draw on photo's FABRIC section: every sofa (the sofa, when there is
-    one) upholstered in the room's fabric photo; nothing else changes."""
-    every, each = ("the sofa", "the sofa") if room_fabric["sofas"] == 1 else ("every sofa", "each sofa")
+    """Draw on photo's FABRIC section: the room's fabric photo is only the
+    outer cover of every sofa (the sofa, when there is one); the design never
+    changes. Fixed, general text: only "the sofa" / "every sofa" varies."""
+    every, each = ("the sofa", "The sofa's") if room_fabric["sofas"] == 1 else ("every sofa", "Each sofa's")
     return (
         "FABRIC\n"
-        f"Upholster {every} in the fabric shown in Image {room_fabric['image']}: match its colour, pattern, weave and "
-        f"texture exactly. Only the upholstery changes — {each} keeps its own design, shape, seats, cushions, arms and "
-        "legs from its own photograph. Legs and any metal or wood parts keep the finish from the sofa's own photograph."
+        f"Image {room_fabric['image']} is a fabric swatch. Apply this fabric ONLY as the outer upholstery cover of {every}: "
+        "match its colour, pattern, weave and texture exactly.\n"
+        f"The fabric changes the cover and nothing else. {each} design stays exactly as shown in its own photograph — "
+        "the same shape, proportions, seats, cushions, backrest, arms, every detail and seam, legs and base. Do not add, "
+        "remove, simplify or restyle any part of a sofa because of the fabric, and never make a sofa plainer, chunkier "
+        "or more blocky to suit the fabric's texture.\n"
+        "Legs and any metal or wood parts keep the finish from the sofa's own photograph."
     )
 
 
@@ -4646,6 +4651,11 @@ def seats_text(piece: dict, kind: str) -> str:
 
 # with no fabric photo, this sentence of the saved prompt ends before "unless ..."
 NO_FABRIC_SECTION_WORDS = ", unless the FABRIC section gives it another."
+# with a fabric photo, the "rebuild it as this ..." sentences leave out material and colour
+REBUILD_MATERIAL_WORDS = "same cushions, arms, legs, material and colour."
+REBUILD_WITHOUT_MATERIAL_WORDS = "same cushions, arms and legs."
+# the final check, with a fabric photo
+FABRIC_FINAL_CHECK = "every sofa keeps the exact design of its own photograph, with the fabric only as its outer cover;"
 
 
 def shapes_room_fabric(attempt: Attempt) -> dict | None:
@@ -4676,11 +4686,19 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
         seats = seats_text(piece, shape["kind"])  # "" when it has no seat count to state
         item, number = piece["item"], piece["item_index"] + 2  # Image 1 is the guide; products follow in item order
         colour = shape["colour"]
-        description = (item.short_description or "").strip().rstrip(".")
+        covered = fabric is not None and item.id in fabric["sofa_ids"]  # the fabric is its outer cover
+        if covered:
+            # no material or colour in the bracket: its own design details (or, until
+            # they are there, its description without material and colour words)
+            description = design_details_of(attempt, item) or design_details_text(
+                clean_design_details((item.short_description or "").replace(",", "\n"))
+            )
+        else:
+            description = (item.short_description or "").strip().rstrip(".")
         described = f"Image {number} ({description})" if description else f"Image {number}"
         source = (
             f"in the exact design of {described}, with the material and colour given in the FABRIC section"
-            if fabric is not None and item.id in fabric["sofa_ids"]
+            if covered
             else f"in the exact design, material and colour of {described}"
         )
         text = (
@@ -4691,7 +4709,10 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
         if piece["tag"] in facing:
             text += " " + facing[piece["tag"]]
         if shape["kind"] in SHAPE_ONLY_TEXT:
-            text += f" {SHAPE_ONLY_TEXT[shape['kind']]} {SHAPE_REBUILD_TEXT[shape['kind']]}"
+            rebuild = SHAPE_REBUILD_TEXT[shape["kind"]]
+            if covered:  # the fabric gives the material and colour
+                rebuild = rebuild.replace(REBUILD_MATERIAL_WORDS, REBUILD_WITHOUT_MATERIAL_WORDS)
+            text += f" {SHAPE_ONLY_TEXT[shape['kind']]} {rebuild}"
         text += seats
         if shape["kind"] in ("L", "corner", "curved"):
             text += " " + SHAPE_TYPE_LINES[shape["kind"]]
@@ -4713,8 +4734,8 @@ def has_seat_lines(attempt: Attempt, shapes: list[dict]) -> bool:
 
 def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
     """The Final check line for the pieces actually drawn: always the camera
-    and the place / design of every sofa; an L's lounge, a corner sofa's two
-    backrests, a curved sofa's curve and a straight sofa's seat count only
+    and the place / design of every sofa (with a fabric photo: the fabric
+    only its outer cover); a corner sofa's two backrests, a curved sofa's curve and a straight sofa's seat count only
     when there is such a piece ("the ..." for one, "every ..." for more);
     always last, nothing of the guide left. Every sofa faces the way stated
     for it, and an L's / corner sofa's second part is at the stated end."""
@@ -4733,11 +4754,11 @@ def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
         return one if count[kind] == 1 else many
 
     parts = [f"the camera has not moved; every sofa is exactly where its {thing} is and keeps the design of its own photograph;"]
+    if shapes_room_fabric(attempt) is not None:
+        parts.append(FABRIC_FINAL_CHECK)
     parts.append("every sofa faces the direction stated for it;")
     if count["L"] or count["corner"]:
         parts.append("the corner or lounge is at the stated end, as seen in the photo;")
-    if count["L"]:
-        parts.append(which("L", "the L's lounge is at the stated end;", "every L's lounge is at the stated end;"))
     if count["corner"]:
         parts.append(which("corner", "the corner sofa has a backrest on both parts and no chaise;", "every corner sofa has a backrest on both parts and no chaise;"))
     if count["curved"]:
@@ -4861,6 +4882,150 @@ def describe_product_photo(path: Path, model: str) -> str:
     )
     text = " ".join((result.choices[0].message.content or "").split()).strip(" .'\"")
     return text[:DESCRIPTION_MAX_CHARS]
+
+
+# With a fabric photo the bracket after "Image N" must not name a material or
+# colour: one vision call per sofa photo lists its own design details instead.
+# General for any sofa photo; saved in attempt.shapes["design_details"] by item id.
+DESIGN_DETAILS_PROMPT = (
+    "This is a showroom photograph of a sofa. List the design details that make this particular sofa recognisable, so "
+    "it can be rebuilt exactly in a different fabric: 4 to 7 short items of a few words each. Describe only what this "
+    "photograph actually shows — for example its back and seat cushions, headrests, stitching or seam lines, arm "
+    "shape, buttons, tufting or panels, and its legs or base. Never name any material, fabric, finish or colour. Never "
+    "say how many seats or cushions it has: the number of seats is set separately. Ignore any tables, scatter "
+    "cushions, throws or other furniture around it. Reply with the items only, one per line."
+)
+DESIGN_DETAILS_MAX = 7  # the prompt asks for 4 to 7
+DESIGN_DETAIL_MAX_CHARS = 80
+# words that say what a sofa is made of or its colour: taken out of a design detail (any sofa, any photo)
+_COLOUR_WORDS = (
+    "black|white|grey|gray|greyish|beige|cream|ivory|brown|tan|cognac|camel|caramel|chocolate|red|orange|yellow|green|"
+    "blue|navy|teal|turquoise|pink|blush|rose|purple|lilac|lavender|gold|golden|silver|bronze|copper|charcoal|taupe|"
+    "sand|stone|olive|sage|mustard|rust|terracotta|burgundy|maroon|wine|plum|ochre|khaki|mint|coral|nude|ecru|"
+    "oatmeal|mocha|espresso|neutral|off-white|dark"
+)
+_MATERIAL_WORDS = (
+    "leather|leatherette|faux|vegan|velvet|velour|boucle|bouclé|linen|fabric|textile|cotton|wool|suede|nubuck|chenille|"
+    "polyester|microfibre|microfiber|tweed|corduroy|woven|knit|metal|metallic|steel|chrome|brass|iron|aluminium|"
+    "aluminum|wood|wooden|oak|walnut|teak|ash|beech|timber|rattan|cane|wicker|marble|glass|plastic|acrylic|lacquer|"
+    "lacquered|matte|glossy|textured"
+)
+_MATERIAL_COLOUR_RE = re.compile(
+    rf"\b(?:(?:light|dark|pale|deep|bright|muted|soft|warm|cool|dusty|dusky)[\s-]+)?(?:{_COLOUR_WORDS}|{_MATERIAL_WORDS})"
+    r"(?:[\s-]+(?:toned|tone|coloured|colored|finish|finished))?\b",
+    re.IGNORECASE,
+)
+# a count in a detail about seats or cushions ("two seat cushions", "three-seat"): the seat count is set separately
+_SEAT_WORDS_RE = re.compile(r"\b(?:seat|seats|seater|cushion|cushions|back|backs)\b", re.IGNORECASE)
+_COUNT_RE = re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|single|pair of|\d+)(?:[\s-]+|\b)", re.IGNORECASE)
+
+
+def without_material_or_colour(text: str) -> str:
+    """`text` with every material and colour word taken out (and the spaces,
+    hyphens and commas they leave tidied)."""
+    text = _MATERIAL_COLOUR_RE.sub(" ", text)
+    text = re.sub(r"\s*-\s*(?=[\s,]|$)|(?:(?<=\s)|^)-\s*", " ", text)  # a hyphen left on its own
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s*,\s*(?:,\s*)*", ", ", text)
+    # a small word left hanging where a removed word was ("cushions in", "legs and")
+    text = re.sub(r"(?:\s+(?:in|with|of|and|on|a|an|the))+\s*(?=,|$)", "", text, flags=re.IGNORECASE)
+    return text.strip(" ,;.-")
+
+
+def clean_design_details(output: str) -> list[str]:
+    """The vision call's lines as design details: bullets and numbers taken
+    off, no count in a detail about seats or cushions, material / colour
+    words taken out, empty and repeated items dropped, at most
+    DESIGN_DETAILS_MAX."""
+    items: list[str] = []
+    for line in re.split(r"[\n;]+", output or ""):
+        line = re.sub(r"^\s*(?:[-*•·]+|\d+[.)])\s*", "", line).strip()
+        if _SEAT_WORDS_RE.search(line):
+            line = _COUNT_RE.sub("", line).strip()
+            line = line[:1].upper() + line[1:]
+        cleaned = without_material_or_colour(line)
+        if cleaned != line.strip(" ,;.-") and len(cleaned.split()) < 2:
+            continue  # little was left once its material or colour went: it said nothing about the design
+        if len(cleaned) > DESIGN_DETAIL_MAX_CHARS:  # shortened at a word, never mid-word
+            cleaned = cleaned[: DESIGN_DETAIL_MAX_CHARS + 1].rsplit(" ", 1)[0].rstrip(" ,;.-")
+        if cleaned and cleaned.lower() not in (i.lower() for i in items):
+            items.append(cleaned)
+    return items[:DESIGN_DETAILS_MAX]
+
+
+def design_details_text(items: list[str]) -> str:
+    """The design details as they go in the bracket: "a; b; c" (an item may
+    have a comma of its own)."""
+    return "; ".join(items)
+
+
+def describe_design_details(path: Path, model: str) -> list[str]:
+    """One vision call: the sofa's own design details (no material, no colour).
+    Synchronous — callers offload it to a thread."""
+    data = path.read_bytes()
+    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    result = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": DESIGN_DETAILS_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}},
+                ],
+            }
+        ],
+        timeout=60,
+    )
+    return clean_design_details(result.choices[0].message.content or "")
+
+
+def design_details_of(attempt: Attempt, item: Item) -> str | None:
+    """The saved design details of a piece ("a; b; c"), or None."""
+    saved = ((attempt.shapes or {}).get("design_details") or {}) if attempt is not None else {}
+    return saved.get(str(item.id)) if isinstance(saved, dict) else None
+
+
+def fill_missing_design_details(db: Session, attempt: Attempt) -> int:
+    """With a fabric photo: every sofa piece without design details gets them,
+    one vision call per distinct photo. Never copied from another attempt.
+    Returns how many calls were made."""
+    if room_fabric_path(attempt.items) is None:
+        return 0
+    calls = 0
+    sofas = [item for item in attempt.items if item.category == "Sofa" and not design_details_of(attempt, item)]
+    for photo_path in dict.fromkeys(item.photo_path for item in sofas):
+        try:
+            details = describe_design_details(DATA_ROOT / photo_path, get_active_vision_model(db))
+            calls += 1
+        except Exception:
+            logger.exception("describing design details failed photo=%s", photo_path)
+            continue
+        if not details:
+            continue
+        saved = dict((attempt.shapes or {}).get("design_details") or {})
+        saved.update({str(item.id): design_details_text(details) for item in sofas if item.photo_path == photo_path})
+        attempt.shapes = {**(attempt.shapes or {}), "design_details": saved}
+        db.commit()
+    return calls
+
+
+async def describe_attempt_design_details(attempt_id: int) -> None:
+    """Background, once a fabric photo is added: the sofas' design details."""
+
+    def work() -> None:
+        db = SessionLocal()
+        try:
+            attempt = db.query(Attempt).filter(Attempt.id == attempt_id).first()
+            if attempt is not None:
+                fill_missing_design_details(db, attempt)
+        except Exception:
+            logger.exception("design details failed attempt_id=%s", attempt_id)
+            db.rollback()
+        finally:
+            db.close()
+
+    await asyncio.to_thread(work)
 
 
 def fill_missing_descriptions(db: Session, items: list[Item]) -> int:
@@ -5281,6 +5446,8 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
         if shapes:
             # descriptions are filled when a piece is added; any still empty are filled now
             await asyncio.to_thread(fill_missing_descriptions, db, attempt.items)
+            # with a fabric photo: the sofas' design details (asked for when it was added); any missing now
+            await asyncio.to_thread(fill_missing_design_details, db, attempt)
         if not attempt.ignore_placement and not shapes:
             # may wait for a writer still running; the client shows "Preparing layout…"
             JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
@@ -6236,6 +6403,7 @@ def copy_attempt(source: Attempt, db: Session) -> Attempt:
                 if s.get("item_id") in new_ids
             ],
         }
+        attempt.shapes.pop("design_details", None)  # described afresh for the copy, like the descriptions
         if isinstance(source.shapes.get("seats"), dict):  # the picked seats move to the copied pieces too
             attempt.shapes["seats"] = {
                 str(new_ids[int(key)]): value
@@ -6450,6 +6618,7 @@ async def api_set_room_fabric(
         item.colour_name = item.colour_hex = item.material = None
     db.commit()
     db.refresh(attempt)
+    asyncio.create_task(describe_attempt_design_details(attempt.id))  # the sofas' design details, for the prompt
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 

@@ -71,6 +71,7 @@ One behaviour only (no switches); the shared floor-plan code is separate and unc
 - Seat counts: straight sofas from their type; L / corner / curved from the Furniture step ("Not sure" = none).
 - One back cushion per seat; no coffee table; only the sofa is taken from each product photo.
 - Finishing step: one optional fabric photo for the whole room (saved on every piece), sent as the last image with a FABRIC section; no per-piece colour or material (old ones are ignored). No fabric: every sofa as its own photo.
+- With a fabric, it is only the outer cover: each sofa's bracket lists its own design details (one vision call per sofa photo, no material, colour or seat count; saved in the attempt's shapes JSON), the rebuild sentences drop "material and colour", and the Final check says the fabric is only the outer cover.
 - Looks: Keep room as it is (default) or Luxury; an old attempt saved with Aesthetic warm or Minimal renders as Keep. "Anything specific?" up to 1000 characters, added as the prompt's last paragraph.
 - The Final check is built from the pieces present.
 

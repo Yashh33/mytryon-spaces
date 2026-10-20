@@ -75,12 +75,11 @@ DRAW_ARROWS=off
 | Original (safe fallback) | on | on | off | off | Known good — go back to this if experiments fail |
 | Variant A | off | off | off | off | Discarded: sofa near a wall turned to face along it |
 | Variant B | off | on | off | off | Discarded (not needed) |
-| S21 facing sentence | off | off | on | off | Works — keep |
+| S21 facing sentence | off | off | on | off | Works — keep. S21 fixed: front direction = black-edge middle → opposite-edge middle (perspective-safe); the arrow uses the same vector |
+| S23 end sentence (part of FACING=on) | off | off | on | any | S23 reinstated: needed for corner sofas (mirrored 2/2 without it) — which end of the long part the lounge / shorter part is at, as seen in the photo |
 | S22 arrows | off | off | on | on | Testing |
 | S11 seat counts | any | any | any | any | Testing — picked on the Furniture step (L-shape, corner, curved); "Not sure" = no seat count |
 | S24 back cushions | not the original | | | | Testing — one back cushion per seat, in every config except the original |
-
-S23 (lounge-end sentence) not needed — lounge correct 5/5 from the image.
 
 To fall back: set WALL_WORDS=on, OPEN_FLOOR=on, FACING=off, ARROWS=off, restart the backend. With no seat count picked, that gives exactly the original prompt and guide image.
 

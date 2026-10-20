@@ -3951,14 +3951,14 @@ ARROW_MAX_REACH = 0.85  # and never past this share of the depth
 
 def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict | None) -> None:
     """DRAW_ARROWS: on each shape, a white arrow with a thin black outline from
-    near its black line toward the front, the way its seats face (the same
-    direction as its facing sentence, facing_fronts): one on a straight piece,
+    near its black line toward the front, the way its seats face: along the
+    same vector as its facing sentence (facing_fronts: black-edge middle to
+    opposite-edge middle), so the two always agree. One on a straight piece,
     on an L's long part, on each part of a corner sofa, and from the middle of
     a curved sofa's back arc toward the inside of the curve. With `lifts`
-    (boxes) it lies on the top of the box. Worked out on the floor, then drawn
-    in picture pixels: at least ARROW_MIN_PX long where the top has room (a
-    box top seen from the front is squashed), never past ARROW_MAX_REACH of
-    the depth. Labels are drawn after it."""
+    (boxes) it starts on the top of the box. At least ARROW_MIN_PX long where
+    the top has room (a box top seen from the front is squashed), never past
+    ARROW_MAX_REACH of the depth. Labels are drawn after it."""
     width, height = guide.size
     unit = width / 1536
     outline = max(round(2 * unit), 1)
@@ -3966,20 +3966,19 @@ def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict
     for shape in shapes:
         top_lift = (lifts or {}).get((shape["item_id"], shape["sub_index"]), (None, lambda y: 0.0))[1]
         raise_up = lambda x, y, lift=top_lift: (x, y - lift(y))  # noqa: E731
-        for line, inside, start_from, depth in facing_fronts(shape, width, height):
-            nx, ny = _front_vector(line, inside)
+        for front in facing_fronts(shape, width, height):
+            vx, vy = front["front"][0] - front["back"][0], front["front"][1] - front["back"][1]
+            depth = math.hypot(vx, vy)
             gap = max(depth * ARROW_START, GUIDE_LINE_PX * 0.75)
             if depth * ARROW_MAX_REACH <= gap:
                 continue
-            on_floor = lambda along: raise_up(start_from[0] + nx * along, start_from[1] + ny * along)  # noqa: E731
-            start, end, limit = on_floor(gap), on_floor(gap + depth * ARROW_LENGTH), on_floor(depth * ARROW_MAX_REACH)
-            length = math.dist(start, end)
-            room = math.dist(start, limit)
-            if room < 1:
+            ux, uy = vx / depth, vy / depth  # the facing sentence's direction
+            on_floor = lambda along: (front["start"][0] + ux * along, front["start"][1] + uy * along)  # noqa: E731
+            start, limit = raise_up(*on_floor(gap)), raise_up(*on_floor(depth * ARROW_MAX_REACH))
+            room = math.dist(start, limit)  # how far the top of the box reaches that way
+            length = min(max(depth * ARROW_LENGTH, ARROW_MIN_PX * unit), room)
+            if length < 1:
                 continue
-            if length < ARROW_MIN_PX * unit:  # too short to see: longer, toward the front, as far as there is room
-                length = min(ARROW_MIN_PX * unit, room)
-            ux, uy = (limit[0] - start[0]) / room, (limit[1] - start[1]) / room
             px, py = -uy, ux  # across the arrow
             tip = min(head_len, length * 0.5)
             at = lambda along, across: (start[0] + ux * along + px * across, start[1] + uy * along + py * across)  # noqa: E731
@@ -4409,8 +4408,11 @@ SHAPES_ONLY_SOURCE_LINE = (
 
 
 # DRAW_FACING on: which way a piece's seats face in the photo, by the angle of its front
-# (from the middle of the black line, square to it, into the shape) from straight down the
-# photo (toward the camera). Left / right are always the photo's.
+# from straight down the photo (toward the camera). The front of a part runs from the middle
+# of its black-line edge to the middle of the opposite edge of the same part, in photo pixels:
+# that follows the part's own sides, so perspective can't turn it (a line square to the black
+# line on the screen can, for a part that runs toward or away from the camera). The white
+# arrow (DRAW_ARROWS) points along the same vector. Left / right are always the photo's.
 FACING_CAMERA_DEG = 25  # up to this: faces the camera
 FACING_TURNED_DEG = 65  # up to this: faces the camera, turned slightly
 FACING_SIDE_DEG = 115  # up to this: seen from the side; beyond: back toward the camera
@@ -4428,17 +4430,11 @@ FACING_PHRASES = {
     "side": "face the {side} of the photo",
     "away": "face away, into the photo",
 }
+RUN_TOWARD_DEG = 45  # S23: a second part running within this of straight down the photo comes toward the camera
 
 
-def _facing_of(line: list, inside: tuple) -> tuple[str, str | None]:
-    """(bucket, LEFT / RIGHT or None) for a back line and a point inside its
-    part, both in photo pixels: the front is square to the line from its
-    middle, toward `inside`."""
-    (x1, y1), (x2, y2) = line[0], line[-1]
-    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-    dx, dy = -(y2 - y1), x2 - x1
-    if dx * (inside[0] - mx) + dy * (inside[1] - my) < 0:
-        dx, dy = -dx, -dy
+def _facing_bucket(dx: float, dy: float) -> tuple[str, str | None]:
+    """(bucket, LEFT / RIGHT or None) for a front direction in photo pixels."""
     angle = math.degrees(math.atan2(abs(dx), dy))  # 0 = straight down the photo, 180 = straight up
     side = "LEFT" if dx < 0 else "RIGHT"
     if angle <= FACING_CAMERA_DEG:
@@ -4456,97 +4452,125 @@ def _line_angle(line: list) -> float:
     return math.degrees(math.atan2(y2 - y1, x2 - x1)) % 180
 
 
-def _centre(points: list) -> tuple[float, float]:
-    return sum(x for x, _ in points) / len(points), sum(y for _, y in points) / len(points)
+def _mid(a: tuple, b: tuple) -> tuple[float, float]:
+    return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
 
 
-def facing_fronts(shape: dict, sx: float, sy: float) -> list[tuple[list, tuple, tuple, float]]:
+def _edge_mid(corners: list, edge: int) -> tuple[float, float]:
+    return _mid(corners[edge % 4], corners[(edge + 1) % 4])
+
+
+def _long_part_index(shape: dict, parts: list) -> int:
+    """An L's long part is the one that is not the lounge; a corner sofa's,
+    the one with the longer longest edge (as two_part_facts)."""
+    if shape["kind"] == "L":
+        return 1 - shape["lounge"]
+    longest = [max(math.dist(c[i], c[(i + 1) % 4]) for i in range(4)) for c in parts]
+    return 0 if longest[0] >= longest[1] else 1
+
+
+def facing_fronts(shape: dict, sx: float, sy: float) -> list[dict]:
     """The parts whose seats the facing sentence (and arrow) is about, with
-    points scaled by (sx, sy): (back line, a point inside the part, where the
-    arrow starts from, the part's depth from the line), in this order: a
-    straight piece its one part; an L its long part; a corner sofa its long
-    part, then its shorter part; a curved sofa its band, by the straight line
-    between the two ends of its back arc, the arrow from the middle of the
-    arc (p4)."""
-    kind = shape["kind"]
-    if kind == "curved":
+    points scaled by (sx, sy), each {"line": its black line, "back": the
+    middle of its black-line edge, "front": the middle of the opposite edge,
+    "start": where the arrow starts}, in this order: a straight piece its one
+    part; an L its long part; a corner sofa its long part, then its shorter
+    part; a curved sofa its band, from the middle of the two ends of its back
+    arc to the middle of the two ends of its front arc, the arrow from the
+    middle of the back arc (p4)."""
+    if shape["kind"] == "curved":
         p0, p1, p2, p3, p4 = [(x * sx, y * sy) for x, y in shape["points"]]
-        line, inside = [p0, p1], ((p2[0] + p3[0]) / 2, (p2[1] + p3[1]) / 2)
-        return [(line, inside, p4, _depth_from(line, inside))]
-    parts = [[(x * sx, y * sy) for x, y in part] for part in shape_parts(kind, shape["points"])]
-    if kind == "rect":
+        return [{"line": [p0, p1], "back": _mid(p0, p1), "front": _mid(p2, p3), "start": p4}]
+    parts = [[(x * sx, y * sy) for x, y in part] for part in shape_parts(shape["kind"], shape["points"])]
+    if shape["kind"] == "rect":
         order = [0]
-    elif kind == "L":
-        order = [1 - shape["lounge"]]
-    else:  # corner sofa: the long part is the one with the longer longest edge (as two_part_facts)
-        longest = [max(math.dist(c[i], c[(i + 1) % 4]) for i in range(4)) for c in parts]
-        order = [0, 1] if longest[0] >= longest[1] else [1, 0]
+    else:
+        long_index = _long_part_index(shape, parts)
+        order = [long_index] if shape["kind"] == "L" else [long_index, 1 - long_index]
     fronts = []
     for index in order:
-        line, centre = _back_line(parts[index], shape["backrest"][index]), _centre(parts[index])
-        middle = ((line[0][0] + line[-1][0]) / 2, (line[0][1] + line[-1][1]) / 2)
-        fronts.append((line, centre, middle, 2 * _depth_from(line, centre)))  # the centre is half the depth
+        corners, edge = parts[index], shape["backrest"][index]
+        if edge is None:  # no backrest set: its longest edge (as _back_line)
+            edge = max(range(4), key=lambda i: math.dist(corners[i], corners[(i + 1) % 4]))
+        back = _edge_mid(corners, edge)
+        fronts.append({"line": [corners[edge], corners[(edge + 1) % 4]], "back": back, "front": _edge_mid(corners, edge + 2), "start": back})
     return fronts
 
 
-def _front_vector(line: list, inside: tuple) -> tuple[float, float]:
-    """The unit direction square to `line`, from its middle toward `inside`."""
-    (x1, y1), (x2, y2) = line[0], line[-1]
-    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-    dx, dy = -(y2 - y1), x2 - x1
-    if dx * (inside[0] - mx) + dy * (inside[1] - my) < 0:
-        dx, dy = -dx, -dy
-    length = math.hypot(dx, dy) or 1.0
-    return dx / length, dy / length
+def _front_of(front: dict) -> tuple[str, str | None]:
+    return _facing_bucket(front["front"][0] - front["back"][0], front["front"][1] - front["back"][1])
 
 
-def _depth_from(line: list, point: tuple) -> float:
-    """How far `point` is from the middle of `line`, measured square to it."""
-    (x1, y1), (x2, y2) = line[0], line[-1]
-    nx, ny = _front_vector(line, point)
-    return abs((point[0] - (x1 + x2) / 2) * nx + (point[1] - (y1 + y2) / 2) * ny)
+# S23: in a two-part shape (shape_parts), the edge of each part at the corner where the two
+# parts meet, and the edge at its other end: part 0 (p0 p1 q p5) p1-q / p5-p0, part 1
+# (q p2 p3 p4) p4-q / p2-p3
+CORNER_END_EDGE = {0: 1, 1: 3}
+FAR_END_EDGE = {0: 3, 1: 1}
+
+
+def _run_words(dx: float, dy: float) -> str:
+    """Which way a part runs in the photo, in camera-relative words."""
+    angle = math.degrees(math.atan2(abs(dx), dy))  # 0 = straight down the photo
+    if angle <= RUN_TOWARD_DEG:
+        return "comes toward the camera"
+    if angle >= 180 - RUN_TOWARD_DEG:
+        return "goes away from the camera, into the photo"
+    return f"runs toward the {'LEFT' if dx < 0 else 'RIGHT'} of the photo"
+
+
+def second_part_sentence(shape: dict, aspect: float) -> str:
+    """S23 (DRAW_FACING): for an L-shaped or corner sofa, from its points in
+    photo pixels, which end of the long part its lounge / shorter part is at
+    as seen in the photo (LEFT / RIGHT; NEARER / FARTHER from the camera when
+    the long part runs mostly up or down the photo), which way that part runs
+    from the join, and for an L where its single arm is. No walls."""
+    parts = [[(x * aspect, y) for x, y in part] for part in shape_parts(shape["kind"], shape["points"])]
+    long_index = _long_part_index(shape, parts)
+    second = 1 - long_index
+    long_part = parts[long_index]
+    joined, other = _edge_mid(long_part, CORNER_END_EDGE[long_index]), _edge_mid(long_part, FAR_END_EDGE[long_index])
+    if abs(other[0] - joined[0]) >= abs(other[1] - joined[1]):
+        end = "LEFT" if joined[0] < other[0] else "RIGHT"
+        at, arm_at = f"at the {end} end of the long part", f"at the {'RIGHT' if end == 'LEFT' else 'LEFT'} end"
+    elif joined[1] > other[1]:  # lower in the photo: nearer the camera
+        at, arm_at = "at the end of the long part NEARER the camera", "at the end FARTHER from the camera"
+    else:
+        at, arm_at = "at the end of the long part FARTHER from the camera", "at the end NEARER the camera"
+    from_join, tip = _edge_mid(parts[second], CORNER_END_EDGE[second]), _edge_mid(parts[second], FAR_END_EDGE[second])
+    run = _run_words(tip[0] - from_join[0], tip[1] - from_join[1])
+    if shape["kind"] == "L":
+        return f"The lounge is {at}, as seen in the photo, and {run}. The single arm is {arm_at}."
+    return f"The shorter part is {at}, as seen in the photo, and {run}."
 
 
 def facing_sentences(attempt: Attempt, shapes: list[dict], aspect: float) -> dict:
     """DRAW_FACING: by label, the sentence saying which way the piece's seats
     face in the photo, worked out only from its shape (photo pixels: x scaled
-    by `aspect`). An L by its long part's black line; a corner sofa one clause
-    per part; a curved sofa by the straight line between the ends of its back
-    arc. A piece whose black line is within FACING_PARALLEL_DEG of an earlier
-    piece's, facing the same way, also says it stands parallel to it."""
+    by `aspect`; facing_fronts). An L by its long part; a corner sofa one
+    clause per part; a curved sofa by its band. An L or corner sofa then says
+    which end its second part is at (S23, second_part_sentence). A piece
+    whose black line is within FACING_PARALLEL_DEG of an earlier piece's,
+    facing the same way, also says it stands parallel to it."""
     pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
     out, seen = {}, []  # seen: (number, line angle, facing) of the pieces before
     for shape in shapes:
         piece = pieces.get((shape["item_id"], shape["sub_index"]))
         if piece is None:
             continue
-        kind = shape["kind"]
-        if kind == "curved":
-            p0, p1, p2, p3, _p4 = [(x * aspect, y) for x, y in shape["points"]]
-            line = [p0, p1]
-            facing = _facing_of(line, ((p2[0] + p3[0]) / 2, (p2[1] + p3[1]) / 2))
-        else:
-            parts = [[(x * aspect, y) for x, y in part] for part in shape_parts(kind, shape["points"])]
-            if kind == "rect":
-                long_index = 0
-            elif kind == "L":
-                long_index = 1 - shape["lounge"]
-            else:  # corner sofa: the long part is the one with the longer longest edge (as two_part_facts)
-                longest = [max(math.dist(c[i], c[(i + 1) % 4]) for i in range(4)) for c in parts]
-                long_index = 0 if longest[0] >= longest[1] else 1
-            line = _back_line(parts[long_index], shape["backrest"][long_index])
-            facing = _facing_of(line, _centre(parts[long_index]))
+        fronts = facing_fronts(shape, aspect, 1.0)
+        facing = _front_of(fronts[0])
         bucket, side = facing
-        if kind == "corner":
-            short_index = 1 - long_index
-            other = _facing_of(_back_line(parts[short_index], shape["backrest"][short_index]), _centre(parts[short_index]))
+        if shape["kind"] == "corner":
+            other = _front_of(fronts[1])
             sentence = (
                 f"The long part's seats {FACING_PHRASES[bucket].format(side=side)}; "
                 f"the shorter part's seats {FACING_PHRASES[other[0]].format(side=other[1])}."
             )
         else:
             sentence = FACING_SENTENCES[bucket].format(side=side)
-        angle = _line_angle(line)
+        if shape["kind"] in ("L", "corner"):
+            sentence += " " + second_part_sentence(shape, aspect)
+        angle = _line_angle(fronts[0]["line"])
         number = piece["tag"].split(" · ")[0]
         for earlier, earlier_angle, earlier_facing in seen:
             gap = abs(angle - earlier_angle)
@@ -4669,6 +4693,8 @@ def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
     parts = [f"the camera has not moved; every sofa is exactly where its {thing} is and keeps the design of its own photograph;"]
     if DRAW_FACING:
         parts.append("every sofa faces the direction stated for it;")
+        if count["L"] or count["corner"]:
+            parts.append("the corner or lounge is at the stated end, as seen in the photo;")
     if count["L"]:
         parts.append(which("L", "the L's lounge is at the stated end;", "every L's lounge is at the stated end;"))
     if count["corner"]:

@@ -1,18 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
-import { useToast } from "./Toast.jsx";
-import { SafeImg } from "./SafeImg.jsx";
 
-const GUIDE_STYLE_LABEL = { flat: "flat shapes", boxes: "3D boxes" };
+const COPIED_MS = 2000;
 
 /** The result page's Debug panel (shops with show_debug on, and the
- * superadmin): what was sent to the image model for one render — every
- * image in order, the full prompt, the gap writer's lines and the run's
- * figures. The same data as the superadmin Debug page. */
+ * superadmin): the exact prompt sent to the image model for one render, word
+ * for word, with a Copy button, and one line of the run's figures. */
 export function DebugPanel({ renderId }) {
-  const toast = useToast();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef(null);
 
   useEffect(() => {
     let live = true;
@@ -27,97 +25,45 @@ export function DebugPanel({ renderId }) {
     };
   }, [renderId]);
 
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
+
   async function copyPrompt() {
     try {
       await navigator.clipboard.writeText(data.prompt);
-      toast("Prompt copied.");
     } catch {
-      toast("Couldn't copy — select the text and copy it instead.");
+      // older browsers: copy through a hidden text box
+      const box = document.createElement("textarea");
+      box.value = data.prompt;
+      box.setAttribute("readonly", "");
+      box.style.position = "fixed";
+      box.style.opacity = "0";
+      document.body.appendChild(box);
+      box.select();
+      document.execCommand("copy");
+      document.body.removeChild(box);
     }
+    setCopied(true);
+    clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS);
   }
 
   if (error) return <div className="debug-panel muted">{error}</div>;
   if (!data) return <div className="debug-panel muted">Loading…</div>;
 
-  const sent = data.images.filter((img) => img.role !== "plan"); // the plan PNG goes to the placement writer only
-  const guide = sent.find((img) => img.role === "guide");
-  const gap = data.gap_writer;
+  const figures = [data.model, data.quality, data.size, data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="debug-panel">
-      <div className="debug-facts">
-        {guide ? <span>Guide: {GUIDE_STYLE_LABEL[guide.guide_style || "flat"] || guide.guide_style}</span> : null}
-        <span>Model: {data.model}</span>
-        <span>Size: {data.size}</span>
-        <span>Quality: {data.quality}</span>
-        <span>Time: {data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : "—"}</span>
-      </div>
-
-      {guide?.look ? (
-        <>
-          <div className="debug-label">Room look used ({guide.look.key})</div>
-          <pre className="debug-pre">{guide.look.text}</pre>
-        </>
-      ) : null}
-
-      {guide?.shape_facts?.length ? (
-        <>
-          <div className="debug-label">Walls, ends and the sentence used in the prompt</div>
-          <pre className="debug-pre">
-            {guide.shape_facts
-              .map((f) => {
-                const wallWords = (w) => (!w ? "not given" : w === "NONE" ? "no wall" : `${w} wall`);
-                const lines = [`${f.tag}`, `  wall: ${wallWords(f.wall)} (from ${f.wall_source || "code"})`];
-                if (f.end) lines.push(`  end: ${f.end} (from the shape)`);
-                if (f.corner_wall) lines.push(`  shorter part along: ${wallWords(f.corner_wall)}`);
-                if (f.bow) lines.push(`  curve bows: ${f.bow} (from the shape)`);
-                if (f.sentence) lines.push(`  sentence: ${f.sentence}`);
-                return lines.join("\n");
-              })
-              .join("\n\n")}
-          </pre>
-        </>
-      ) : null}
-
-      <div className="debug-label">Images sent, in order</div>
-      <div className="debug-images">
-        {sent.map((img, i) => (
-          <figure key={img.url + i}>
-            <a href={img.url} target="_blank" rel="noreferrer">
-              <SafeImg src={img.url} />
-            </a>
-            <figcaption>
-              Image {i + 1} &middot; {img.role}
-              {img.role === "guide" ? ` (${GUIDE_STYLE_LABEL[img.guide_style || "flat"] || img.guide_style})` : ""}
-            </figcaption>
-          </figure>
-        ))}
-      </div>
-
-      <div className="debug-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span>Prompt</span>
+      <div className="debug-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 0 }}>
+        <span>Full prompt sent to the image model</span>
         <button type="button" className="link-btn" onClick={copyPrompt}>
-          Copy
+          {copied ? "Copied" : "Copy"}
         </button>
       </div>
+      <div className="debug-facts muted">{figures}</div>
       <pre className="debug-pre debug-prompt">{data.prompt}</pre>
-
-      {gap ? (
-        <>
-          <div className="debug-label">Gap writer</div>
-          <pre className="debug-pre">
-            {gap.lines?.length ? gap.lines.join("\n") : `Left out — ${gap.reason || "no lines"}`}
-          </pre>
-          {gap.cleaned?.length ? (
-            <>
-              <div className="debug-label">Gap writer lines cleaned (chaise / lounge words on a piece that has none)</div>
-              <pre className="debug-pre">
-                {gap.cleaned.map((c) => `${c.tag}\n  original: ${c.original}\n  cleaned:  ${c.cleaned}`).join("\n\n")}
-              </pre>
-            </>
-          ) : null}
-        </>
-      ) : null}
     </div>
   );
 }

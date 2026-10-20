@@ -48,6 +48,15 @@ npm run dev
 
 If PowerShell refuses to run `Activate.ps1`, run once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
+Image model settings (in `.env` locally, in Render → Environment for the live app; if missing, the defaults below are used):
+```
+# The OpenAI image model for room renders, "Fix this" and the product studio (default gpt-image-2.5-flare)
+IMAGE_MODEL=gpt-image-2.5-flare
+# Its quality: low, medium, high, xhigh, max or auto (default high; 2.5 "high" costs about what GPT Image 2 "medium" did)
+IMAGE_QUALITY=high
+```
+To switch back to GPT Image 2: `IMAGE_MODEL=gpt-image-2` and `IMAGE_QUALITY=medium`, then restart the backend.
+
 ## Deploying (done by a person, never by Claude Code)
 - If the task changed the database: run `python scripts/backup_db.py` first.
 - Then:

@@ -67,7 +67,15 @@ STUDIO_DIR = DATA_ROOT / "studio"
 for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR, FABRICS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-MODEL_NAME = "gpt-image-2"
+# The image model and quality, from the environment (Render -> Environment;
+# locally .env). In GPT Image 2.5 the quality names changed: 2.5 "high" uses
+# about the image budget (and cost) of GPT Image 2 "medium". Allowed:
+# low, medium, high, xhigh, max, auto. To go back: IMAGE_MODEL=gpt-image-2,
+# IMAGE_QUALITY=medium. Every image call (room renders, Fix this, the product
+# studio) uses these, and each generation row saves the values used.
+IMAGE_MODEL = (os.environ.get("IMAGE_MODEL") or "").strip() or "gpt-image-2.5-flare"
+IMAGE_QUALITY = (os.environ.get("IMAGE_QUALITY") or "").strip().lower() or "high"
+IMAGE_QUALITY_CHOICES = ("low", "medium", "high", "xhigh", "max", "auto")
 
 # ---------------------------------------------------------------------------
 # GENERATION PROMPT — the live prompt lives in the `settings` table (key
@@ -209,7 +217,7 @@ PROMPT_PLACEHOLDERS = [
     },
 ]
 
-IMAGE_QUALITY = "medium"
+# IMAGE_QUALITY is set from the environment near the top (see IMAGE_MODEL)
 
 # ---------------------------------------------------------------------------
 # VISION LAYOUT — a salesman input aid only. The room photo is sent to a
@@ -306,7 +314,7 @@ Return only JSON in exactly this shape:
 
 CREDITS_PER_GENERATION = 30
 
-# Published gpt-image-2 rates, dollars per 1M tokens.
+# Published gpt-image-2 rates, dollars per 1M tokens (used for the cost log whatever IMAGE_MODEL is).
 IMAGE_INPUT_RATE_PER_M = 8.0
 TEXT_INPUT_RATE_PER_M = 5.0
 IMAGE_OUTPUT_RATE_PER_M = 30.0
@@ -871,6 +879,9 @@ def column_nullable(conn, table: str, column: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("image model=%s quality=%s", IMAGE_MODEL, IMAGE_QUALITY)
+    if IMAGE_QUALITY not in IMAGE_QUALITY_CHOICES:
+        logger.warning("IMAGE_QUALITY=%r is not one of %s: OpenAI may reject it", IMAGE_QUALITY, ", ".join(IMAGE_QUALITY_CHOICES))
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
         # Each change below runs only when it is still needed (the checks read
@@ -2715,7 +2726,7 @@ def call_image_api(
         start = time.monotonic()
         try:
             result = client.images.edit(
-                model=MODEL_NAME,
+                model=IMAGE_MODEL,
                 image=image_files,
                 prompt=prompt,
                 size=size,
@@ -2731,9 +2742,16 @@ def call_image_api(
             raise GenerationError("The service is a little busy right now. Please try again in a moment.")
         except BadRequestError as exc:
             elapsed_s = time.monotonic() - start
+            if getattr(exc, "param", None) in ("model", "quality"):
+                # OpenAI rejected the IMAGE_MODEL / IMAGE_QUALITY setting: no point retrying
+                logger.error(
+                    "gen label=%s image model or quality rejected (model=%s quality=%s): %s",
+                    log_label, IMAGE_MODEL, quality, exc,
+                )
+                raise GenerationError("Something went wrong generating your image. Please try again.")
             logger.info(
-                "gen label=%s attempt=%d elapsed_s=%.1f result=blocked:%s",
-                log_label, attempt, elapsed_s, exc.code or exc.type,
+                "gen label=%s attempt=%d elapsed_s=%.1f result=blocked:%s message=%s",
+                log_label, attempt, elapsed_s, exc.code or exc.type, exc,
             )
             if attempt < GENERATION_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
@@ -2741,9 +2759,10 @@ def call_image_api(
             raise GenerationError("We couldn't generate a result for those photos. Try a different angle or photo.")
         except Exception as exc:
             elapsed_s = time.monotonic() - start
-            logger.info(
-                "gen label=%s attempt=%d elapsed_s=%.1f result=exception:%s",
-                log_label, attempt, elapsed_s, exc.__class__.__name__,
+            # the full OpenAI message (e.g. an unknown IMAGE_MODEL comes back as a not-found error)
+            logger.error(
+                "gen label=%s attempt=%d elapsed_s=%.1f result=exception:%s model=%s quality=%s message=%s",
+                log_label, attempt, elapsed_s, exc.__class__.__name__, IMAGE_MODEL, quality, exc,
             )
             raise GenerationError("Something went wrong generating your image. Please try again.")
 
@@ -2758,7 +2777,7 @@ def call_image_api(
 
         usage = result.usage.model_dump() if result.usage else None
         print(
-            f"gpt-image-2 generation label={log_label} quality={quality} size={size} "
+            f"{IMAGE_MODEL} generation label={log_label} quality={quality} size={size} "
             f"input_images={len(image_files)} elapsed_s={elapsed_s:.1f} usage={usage}",
             flush=True,
         )
@@ -5090,7 +5109,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             GenerationDebug(
                 render_id=render.id,
                 prompt=prompt,
-                model=MODEL_NAME,
+                model=IMAGE_MODEL,
                 quality=IMAGE_QUALITY,
                 size=size,
                 elapsed_s=result["elapsed_s"],
@@ -6429,7 +6448,7 @@ async def run_fix_job(job_id: str, render_id: int, user_id: int, shop_id: int, c
             GenerationDebug(
                 render_id=render.id,
                 prompt=prompt,
-                model=MODEL_NAME,
+                model=IMAGE_MODEL,
                 quality=IMAGE_QUALITY,
                 size=size,
                 elapsed_s=result["elapsed_s"],

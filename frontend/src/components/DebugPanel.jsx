@@ -53,6 +53,14 @@ export function DebugPanel({ renderId }) {
   const figures = [data.model, data.quality, data.size, data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null]
     .filter(Boolean)
     .join(" · ");
+  // tokens and estimated cost, worked out by the server from the usage saved for this render
+  const c = data.cost;
+  const n = (v) => Number(v || 0).toLocaleString("en-IN");
+  const cached = c && (c.cached_text_input || c.cached_image_input) ? ` (cached ${n(c.cached_text_input)} / ${n(c.cached_image_input)})` : "";
+  const costLine = c
+    ? `input ${n(c.text_input)} text / ${n(c.image_input)} image${cached} · output ${n(c.output)} · ` +
+      `$${c.usd.toFixed(4)} · ₹${c.inr.toFixed(2)}`
+    : "cost unknown";
 
   return (
     <div className="debug-panel">
@@ -63,6 +71,7 @@ export function DebugPanel({ renderId }) {
         </button>
       </div>
       <div className="debug-facts muted">{figures}</div>
+      <div className="debug-facts muted">{costLine}</div>
       <pre className="debug-pre debug-prompt">{data.prompt}</pre>
     </div>
   );

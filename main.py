@@ -314,10 +314,16 @@ Return only JSON in exactly this shape:
 
 CREDITS_PER_GENERATION = 30
 
-# Published gpt-image-2 rates, dollars per 1M tokens (used for the cost log whatever IMAGE_MODEL is).
-IMAGE_INPUT_RATE_PER_M = 8.0
-TEXT_INPUT_RATE_PER_M = 5.0
-IMAGE_OUTPUT_RATE_PER_M = 30.0
+# Image model prices, dollars per 1M tokens — the same for gpt-image-2,
+# gpt-image-2.5-flare and gpt-image-2.5-sunburst. Update here when they change.
+IMAGE_PRICES_PER_M = {
+    "text_input": 5.00,
+    "cached_text_input": 1.25,
+    "image_input": 8.00,
+    "cached_image_input": 2.00,
+    "image_output": 30.00,
+}
+USD_TO_INR = 88.0  # for the Debug panel's rupee figure
 
 # ---------------------------------------------------------------------------
 
@@ -1573,17 +1579,49 @@ def shop_balance(db: Session, shop: Shop, now: datetime | None = None) -> int:
     return int(total or 0)
 
 
-def compute_usd_cost(usage: dict | None) -> float | None:
+def render_cost(usage: dict | None) -> dict | None:
+    """One image call's tokens and estimated cost (IMAGE_PRICES_PER_M) from
+    the usage OpenAI returned: input text / image tokens (with any cached
+    part priced as cached), output tokens, dollars and rupees. None without
+    usage."""
     if not usage:
         return None
     in_details = usage.get("input_tokens_details") or {}
     out_details = usage.get("output_tokens_details") or {}
-    image_in = in_details.get("image_tokens", 0) or 0
-    text_in = in_details.get("text_tokens", 0) or 0
-    image_out = out_details.get("image_tokens", 0) or 0
-    cost = (image_in * IMAGE_INPUT_RATE_PER_M + text_in * TEXT_INPUT_RATE_PER_M) / 1_000_000
-    cost += (image_out * IMAGE_OUTPUT_RATE_PER_M) / 1_000_000
-    return round(cost, 6)
+    text_in = int(in_details.get("text_tokens") or 0)
+    image_in = int(in_details.get("image_tokens") or 0)
+    if not text_in and not image_in:
+        text_in = int(usage.get("input_tokens") or 0)
+    cached = in_details.get("cached_tokens_details") or {}
+    cached_text = min(int(cached.get("text_tokens") or 0), text_in)
+    cached_image = min(int(cached.get("image_tokens") or 0), image_in)
+    if not cached and in_details.get("cached_tokens"):  # one cached total: take it from the text first
+        total = int(in_details.get("cached_tokens") or 0)
+        cached_text = min(total, text_in)
+        cached_image = min(total - cached_text, image_in)
+    output = int(out_details.get("image_tokens") or 0) or int(usage.get("output_tokens") or 0)
+    price = IMAGE_PRICES_PER_M
+    usd = (
+        (text_in - cached_text) * price["text_input"]
+        + cached_text * price["cached_text_input"]
+        + (image_in - cached_image) * price["image_input"]
+        + cached_image * price["cached_image_input"]
+        + output * price["image_output"]
+    ) / 1_000_000
+    return {
+        "text_input": text_in,
+        "image_input": image_in,
+        "cached_text_input": cached_text,
+        "cached_image_input": cached_image,
+        "output": output,
+        "usd": round(usd, 6),
+        "inr": round(usd * USD_TO_INR, 2),
+    }
+
+
+def compute_usd_cost(usage: dict | None) -> float | None:
+    cost = render_cost(usage)
+    return cost["usd"] if cost else None
 
 
 CONFIG_NOTES_BLOCK_RE = re.compile(r"\{\{#CONFIG_NOTES\}\}(.*?)\{\{/CONFIG_NOTES\}\}", re.DOTALL)
@@ -4248,9 +4286,8 @@ def build_shapes_prompt(
 # model gets it) goes to the vision model with the gap prompt; it writes one
 # line per labelled shape about the open floor around it, which goes into the
 # prompt as OPEN FLOOR AROUND EACH SOFA. It never blocks the render: on a
-# failure or after GAP_WRITER_TIMEOUT_S the section is left out. A result is
-# reused while the shapes (and the photo, prompt and model) are unchanged —
-# Generate again, or Adjust & try again without moving a shape. Logged in
+# failure or after GAP_WRITER_TIMEOUT_S the section is left out. It runs
+# fresh for every render: an earlier render's result is never reused. Logged in
 # generation_debug.placement_writer as {"gap_writer": {...}} (a Draw-on-photo
 # render has no placement writer), shown on the Debug page.
 
@@ -4438,26 +4475,6 @@ def call_gap_writer(image: bytes, prompt: str, model: str) -> dict:
     }
 
 
-def find_reusable_gap_result(db: Session, room_id: int, key: str) -> tuple[int, dict] | None:
-    """The latest usable gap writer result with this key among the room's
-    renders (any attempt: an Adjust copy has the same shapes), as
-    (render id, logged result)."""
-    rows = (
-        db.query(GenerationDebug)
-        .join(Render, Render.id == GenerationDebug.render_id)
-        .join(Attempt, Attempt.id == Render.attempt_id)
-        .filter(Attempt.room_id == room_id, Attempt.placement_mode == "shapes")
-        .order_by(GenerationDebug.id.desc())
-        .limit(50)
-        .all()
-    )
-    for row in rows:
-        gap = row.placement_writer.get("gap_writer") if isinstance(row.placement_writer, dict) else None
-        if isinstance(gap, dict) and gap.get("key") == key and gap.get("lines"):
-            return row.render_id, gap
-    return None
-
-
 CHAISE_TIP_RE = re.compile(r"\b(?:(?:the|its|their)\s+)?(?:chaise|lounge)(?:['’]s)?\s+tip\b", re.IGNORECASE)
 CHAISE_WORD_RE = re.compile(r"\s*\b(chaise|lounge)s?\b", re.IGNORECASE)
 
@@ -4505,31 +4522,17 @@ def clean_gap_lines(lines: list[str], kinds: dict) -> tuple[list[str], list[dict
 async def resolve_gap_writer(
     db: Session, attempt: Attempt, guide: bytes, shapes: list[dict], padded: bool, guide_style: str = "flat"
 ) -> dict:
-    """The gap writer's result for this render, reused or fresh. Never raises:
-    a failure comes back with no lines and a reason."""
+    """The gap writer's result for this render, always from a fresh call
+    (never an earlier render's). Never raises: a failure comes back with no
+    lines and a reason."""
     order = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
     tags = [order[(s["item_id"], s["sub_index"])] for s in shapes]
     prompt = get_gap_writer_prompt(db)
     model = get_active_vision_model(db)
     key = gap_writer_key(attempt.room, shapes, tags, padded, prompt, model, guide_style)
     info = {"key": key, "model": model, "lines": [], "output": None, "usage": None, "elapsed_s": None, "reason": None}
-    try:
-        reusable = find_reusable_gap_result(db, attempt.room_id, key)
-    except Exception:
-        logger.exception("gap writer reuse lookup failed attempt_id=%s", attempt.id)
-        reusable = None
     kinds = {tag: shape["kind"] for tag, shape in zip(tags, shapes)}
-    if reusable:
-        render_id, gap = reusable
-        # cleaned again: a result saved before the safety net may still carry chaise words
-        lines, cleaned = clean_gap_lines(gap.get("lines") or [], kinds)
-        return {
-            **info,
-            **{k: gap.get(k) for k in ("facts", "output", "usage", "elapsed_s")},
-            "lines": lines,
-            "cleaned": (gap.get("cleaned") or []) + cleaned,
-            "reused_from_render": render_id,
-        }
+    # always a fresh call: an earlier render's lines and walls are never reused
     try:
         result = await asyncio.wait_for(asyncio.to_thread(call_gap_writer, guide, prompt, model), GAP_WRITER_TIMEOUT_S)
     except asyncio.TimeoutError:
@@ -4584,24 +4587,17 @@ def describe_product_photo(path: Path, model: str) -> str:
 
 
 def fill_missing_descriptions(db: Session, items: list[Item]) -> int:
-    """Gives every item without a short description one: copied from any item
-    with the same photo that has one, otherwise one vision call per photo.
-    Returns how many vision calls were made."""
+    """Gives every item without a short description one: one vision call per
+    distinct photo among `items` (pieces of the same set share it). Never
+    copied from another attempt's piece. Returns how many calls were made."""
     calls = 0
     for photo_path in dict.fromkeys(i.photo_path for i in items if not (i.short_description or "").strip()):
-        twin = (
-            db.query(Item)
-            .filter(Item.photo_path == photo_path, Item.short_description.isnot(None), Item.short_description != "")
-            .first()
-        )
-        text_value = twin.short_description if twin else None
-        if text_value is None:
-            try:
-                text_value = describe_product_photo(DATA_ROOT / photo_path, get_active_vision_model(db))
-                calls += 1
-            except Exception:
-                logger.exception("describing product photo failed photo=%s", photo_path)
-                continue
+        try:
+            text_value = describe_product_photo(DATA_ROOT / photo_path, get_active_vision_model(db))
+            calls += 1
+        except Exception:
+            logger.exception("describing product photo failed photo=%s", photo_path)
+            continue
         for item in items:
             if item.photo_path == photo_path and not (item.short_description or "").strip():
                 item.short_description = text_value
@@ -5898,37 +5894,18 @@ class CreateAttemptBody(BaseModel):
     clone_from_attempt_id: int | None = None
 
 
-@app.post("/api/rooms/{room_id}/attempts")
-async def api_create_attempt(
-    room_id: int,
-    body: CreateAttemptBody | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> JSONResponse:
-    room = get_owned_room(room_id, user, db)
-
-    room_treatment = DEFAULT_ROOM_TREATMENT
-    lighting = DEFAULT_LIGHTING
-    note = None
-    source = None
-    source_items: list[Item] = []
-
-    clone_from_attempt_id = body.clone_from_attempt_id if body else None
-    if clone_from_attempt_id is not None:
-        source = db.query(Attempt).filter(Attempt.id == clone_from_attempt_id, Attempt.room_id == room.id).first()
-        if source is None:
-            return error_response(404, "attempt_not_found", "That attempt could not be found.")
-        room_treatment = source.room_treatment
-        lighting = source.lighting
-        note = source.note
-        source_items = source.items
-
-    delete_empty_attempts(db, room, keep_id=clone_from_attempt_id)
-
-    attempt = Attempt(room_id=room.id, room_treatment=room_treatment, lighting=lighting, note=note)
+def copy_attempt(source: Attempt, db: Session) -> Attempt:
+    """A new attempt of the same room with what the salesman set on `source`:
+    its pieces (photos, types, widths, placements, fabric choices), look,
+    lighting, note, placement mode and drawn shapes. Nothing computed is
+    copied: no render, no prompt, no sofa descriptions (each photo is
+    described afresh for the copy's generation). Only the floor plan's own
+    placement writer output carries over when the pieces are the same (the
+    floor-plan pipeline, unchanged)."""
+    source_items = list(source.items)
+    attempt = Attempt(room_id=source.room_id, room_treatment=source.room_treatment, lighting=source.lighting, note=source.note)
     db.add(attempt)
     db.flush()
-
     for item in source_items:
         db.add(
             Item(
@@ -5943,37 +5920,62 @@ async def api_create_attempt(
                 colour_hex=item.colour_hex,
                 material=item.material,
                 fabric_path=item.fabric_path,
-                short_description=item.short_description,
+                # no short_description: the copy's photos are described afresh for its generation
             )
         )
-
     db.commit()
     db.refresh(attempt)
+    # a drawn-on-photo attempt keeps its mode and shapes; items are copied in
+    # order, so each shape moves to the copy of its piece
+    attempt.placement_mode = source.placement_mode
+    if source.shapes:
+        new_ids = {old.id: new.id for old, new in zip(source_items, attempt.items)}
+        attempt.shapes = {
+            **source.shapes,
+            "shapes": [
+                {**s, "item_id": new_ids[s["item_id"]]}
+                for s in (source.shapes.get("shapes") or [])
+                if s.get("item_id") in new_ids
+            ],
+        }
+    db.commit()
+    db.refresh(attempt)
+    # same pieces as the source: its plan and writer output carry over
+    reuse = reuse_placement_writer(source, attempt, db)
+    db.commit()
+    db.refresh(attempt)
+    if reuse == "plan_only":
+        # the plan is known, its writer output is not usable: write it now,
+        # so it is ready by the time Generate is pressed
+        start_placement_writer(attempt, None, db)
+        db.refresh(attempt)
+    return attempt
+
+
+@app.post("/api/rooms/{room_id}/attempts")
+async def api_create_attempt(
+    room_id: int,
+    body: CreateAttemptBody | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    room = get_owned_room(room_id, user, db)
+
+    clone_from_attempt_id = body.clone_from_attempt_id if body else None
+    source = None
+    if clone_from_attempt_id is not None:
+        source = db.query(Attempt).filter(Attempt.id == clone_from_attempt_id, Attempt.room_id == room.id).first()
+        if source is None:
+            return error_response(404, "attempt_not_found", "That attempt could not be found.")
+
+    delete_empty_attempts(db, room, keep_id=clone_from_attempt_id)
     if source is not None:
-        # a drawn-on-photo attempt keeps its mode and shapes; items are copied
-        # in order, so each shape moves to the copy of its piece
-        attempt.placement_mode = source.placement_mode
-        if source.shapes:
-            new_ids = {old.id: new.id for old, new in zip(source_items, attempt.items)}
-            attempt.shapes = {
-                **source.shapes,
-                "shapes": [
-                    {**s, "item_id": new_ids[s["item_id"]]}
-                    for s in (source.shapes.get("shapes") or [])
-                    if s.get("item_id") in new_ids
-                ],
-            }
+        attempt = copy_attempt(source, db)
+    else:
+        attempt = Attempt(room_id=room.id, room_treatment=DEFAULT_ROOM_TREATMENT, lighting=DEFAULT_LIGHTING, note=None)
+        db.add(attempt)
         db.commit()
         db.refresh(attempt)
-        # same pieces as the source: its plan and writer output carry over
-        reuse = reuse_placement_writer(source, attempt, db)
-        db.commit()
-        db.refresh(attempt)
-        if reuse == "plan_only":
-            # the plan is known, its writer output is not usable: write it now,
-            # so it is ready by the time Generate is pressed
-            start_placement_writer(attempt, None, db)
-            db.refresh(attempt)
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 
@@ -6172,6 +6174,28 @@ async def api_generate_attempt(
 ) -> JSONResponse:
     attempt = get_owned_attempt(attempt_id, user, db)
     return _start_generation(attempt, ignore_placement, user, db)
+
+
+@app.post("/api/attempts/{attempt_id}/generate-new")
+async def api_generate_new_attempt(
+    attempt_id: int,
+    ignore_placement: bool = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    """"Adjust & try again" -> Generate: Adjust edits the attempt itself (no
+    draft is made); only now is a new attempt created — a copy of what the
+    salesman set (copy_attempt) — and generated from scratch. If the
+    generation can't start (no credits, a piece not drawn ...), the copy is
+    removed again, so nothing is left behind."""
+    source = get_owned_attempt(attempt_id, user, db)
+    attempt = copy_attempt(source, db)
+    response = _start_generation(attempt, ignore_placement, user, db)
+    if response.status_code != 200:
+        db.delete(attempt)
+        db.commit()
+        return response
+    return JSONResponse(content={"job_id": json.loads(response.body)["job_id"], "attempt_id": attempt.id})
 
 
 @app.post("/api/attempts/{attempt_id}/plan")
@@ -7941,6 +7965,7 @@ def api_debug_generation(render_id: int, user: User = Depends(get_current_user),
             "size": debug_row.size,
             "elapsed_s": debug_row.elapsed_s,
             "usage": debug_row.usage,
+            "cost": render_cost(debug_row.usage),  # tokens and estimated $ / ₹ (IMAGE_PRICES_PER_M)
             "images": debug_row.images,
             "placement_writer": writer_log,
             "gap_writer": gap_writer,

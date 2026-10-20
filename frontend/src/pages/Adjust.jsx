@@ -1,53 +1,38 @@
-import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useEffect, useState, useRef } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { IMAGE_ACCEPT, debugLog, normalizeToJpeg, photoUploadError, roomLookLabel } from "../utils.js";
 
-/** "Adjust & try again" for a finished attempt (the source). Opening this
- * screen creates nothing: it shows the source's values. The copy to work on
- * (the draft) is made on the first real action, and its id is kept in the
- * URL as ?draft=, so coming back from a sub-screen or refreshing reuses that
- * same draft instead of making another. */
+/** "Adjust & try again" for a finished attempt. Nothing is created here: the
+ * Furniture, Placement and Finishing steps open on this same attempt and save
+ * their changes to it. Only "Generate again" makes a new attempt — a copy of
+ * what is set here — and generates it from scratch (POST .../generate-new).
+ * Backing out without generating leaves nothing new behind. */
 export default function Adjust() {
   const { id } = useParams();
-  const [searchParams] = useSearchParams();
-  const draftParam = searchParams.get("draft");
   const navigate = useNavigate();
   const toast = useToast();
-  const [source, setSource] = useState(null);
-  const [sourceNumber, setSourceNumber] = useState(null);
-  const [draft, setDraft] = useState(null);
+  const [attempt, setAttempt] = useState(null);
+  const [number, setNumber] = useState(null);
   const [error, setError] = useState(null);
-  const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [preparingPhoto, setPreparingPhoto] = useState(false);
-  const cloning = useRef(null); // the in-flight clone request, so two quick taps make one draft
   const fileInputRef = useRef(null);
 
   async function init() {
     setError(null);
     try {
-      const src = (await api.get(`/api/attempts/${id}`)).attempt;
-      const roomData = await api.get(`/api/rooms/${src.room.id}`);
+      const current = (await api.get(`/api/attempts/${id}`)).attempt;
+      const roomData = await api.get(`/api/rooms/${current.room.id}`);
       // numbered the way the room page numbers them: finished attempts only
       const finished = roomData.attempts.filter((a) => a.latest_render).sort((a, b) => a.id - b.id);
-      const index = finished.findIndex((a) => a.id === src.id);
-      setSourceNumber(index >= 0 ? index + 1 : null);
-      setSource(src);
-
-      if (draftParam) {
-        try {
-          const existing = (await api.get(`/api/attempts/${draftParam}`)).attempt;
-          // only a not-yet-generated attempt of this same room is still a draft
-          if (existing.room.id === src.room.id && existing.renders.length === 0) setDraft(existing);
-        } catch {
-          // gone or not ours: carry on without it, a new one is made when needed
-        }
-      }
+      const index = finished.findIndex((a) => a.id === current.id);
+      setNumber(index >= 0 ? index + 1 : null);
+      setAttempt(current);
     } catch (err) {
       setError(err.message);
     }
@@ -58,34 +43,9 @@ export default function Adjust() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  /** The draft to act on, created (once) if this is the first real action. */
-  async function ensureDraft() {
-    if (draft) return draft;
-    if (!cloning.current) {
-      cloning.current = api
-        .post(`/api/rooms/${source.room.id}/attempts`, { json: { clone_from_attempt_id: source.id } })
-        .then((res) => {
-          setDraft(res.attempt);
-          navigate(`/attempt/${id}/adjust?draft=${res.attempt.id}`, { replace: true });
-          return res.attempt;
-        })
-        .finally(() => {
-          cloning.current = null;
-        });
-    }
-    return cloning.current;
-  }
-
-  async function openStep(step) {
-    setBusy(true);
-    try {
-      const d = await ensureDraft();
-      // ?adjust tells the step to come back here, with the draft in the URL
-      navigate(`/attempt/${d.id}/${step}?adjust=${id}`);
-    } catch (err) {
-      toast(err.message);
-      setBusy(false);
-    }
+  function openStep(step) {
+    // ?adjust tells the step to come back here
+    navigate(`/attempt/${id}/${step}?adjust=${id}`);
   }
 
   async function handleRoomPhotoChange(e) {
@@ -105,12 +65,11 @@ export default function Adjust() {
     }
     setPreparingPhoto(false);
     try {
-      const d = await ensureDraft();
       const form = new FormData();
       form.append("photo", jpeg);
-      const data = await api.post(`/api/rooms/${d.room.id}/photo`, { form });
+      const data = await api.post(`/api/rooms/${attempt.room.id}/photo`, { form });
       debugLog("upload OK");
-      setDraft((prev) => (prev ? { ...prev, room: { ...prev.room, photo_url: data.room.photo_url } } : prev));
+      setAttempt((prev) => (prev ? { ...prev, room: { ...prev.room, photo_url: data.room.photo_url } } : prev));
       toast("Room photo updated.");
     } catch (err) {
       debugLog(`upload FAIL ${err.message}`);
@@ -123,9 +82,9 @@ export default function Adjust() {
   async function handleGenerateAgain() {
     setGenerating(true);
     try {
-      const d = await ensureDraft();
-      const data = await api.post(`/api/attempts/${d.id}/generate`);
-      navigate(`/attempt/${d.id}/generating`, { state: { jobId: data.job_id, startedAt: Date.now() } });
+      // the new attempt is created only now, and generated from scratch
+      const data = await api.post(`/api/attempts/${id}/generate-new`);
+      navigate(`/attempt/${data.attempt_id}/generating`, { state: { jobId: data.job_id, startedAt: Date.now() } });
     } catch (err) {
       toast(err.message);
       setGenerating(false);
@@ -133,18 +92,15 @@ export default function Adjust() {
   }
 
   if (error) return <div className="screen screen-narrow"><ErrorBlock message={error} onRetry={init} /></div>;
-  if (!source) return <div className="screen screen-narrow"><Loading /></div>;
-
-  const shown = draft || source; // the source's own values until a draft exists
-  const locked = busy || generating;
+  if (!attempt) return <div className="screen screen-narrow"><Loading /></div>;
 
   return (
     <div className="screen screen-narrow">
       <TopBar
         backTo={`/attempt/${id}/result`}
         crumbs={[
-          { label: shown.room.customer_name, to: `/customer/${shown.room.customer_id}` },
-          { label: shown.room.room_type, to: `/room/${shown.room.id}` },
+          { label: attempt.room.customer_name, to: `/customer/${attempt.room.customer_id}` },
+          { label: attempt.room.room_type, to: `/room/${attempt.room.id}` },
           { label: "Attempt" },
         ]}
       />
@@ -152,14 +108,15 @@ export default function Adjust() {
       <h1 style={{ marginBottom: 16 }}>Adjust &amp; try again</h1>
 
       <div className="adjust-note">
-        Everything is carried over from {sourceNumber ? `Attempt ${sourceNumber}` : "this attempt"}. Change only what you need.
+        Change only what you need on {number ? `Attempt ${number}` : "this attempt"}. &ldquo;Generate again&rdquo; makes a
+        new attempt from these settings.
       </div>
 
-      <button type="button" className="adjust-row" disabled={locked} onClick={() => openStep("furniture")}>
+      <button type="button" className="adjust-row" disabled={generating} onClick={() => openStep("furniture")}>
         <span>
           Furniture
           <div className="sub">
-            {shown.items.length} piece{shown.items.length === 1 ? "" : "s"}
+            {attempt.items.length} piece{attempt.items.length === 1 ? "" : "s"}
           </div>
         </span>
         <span className="chevron">&#8250;</span>
@@ -167,28 +124,28 @@ export default function Adjust() {
       <button
         type="button"
         className="adjust-row"
-        disabled={locked}
-        onClick={() => openStep(shown.placement_mode === "shapes" ? "draw" : "place")}
+        disabled={generating}
+        onClick={() => openStep(attempt.placement_mode === "shapes" ? "draw" : "place")}
       >
         <span>
           Placement
           <div className="sub">
-            {shown.placement_mode === "shapes"
-              ? shown.shapes?.shapes?.length
+            {attempt.placement_mode === "shapes"
+              ? attempt.shapes?.shapes?.length
                 ? "drawn on photo"
                 : "not drawn yet"
-              : shown.items.some((it) => it.placement && it.placement.length)
+              : attempt.items.some((it) => it.placement && it.placement.length)
                 ? "placed"
                 : "not placed"}
           </div>
         </span>
         <span className="chevron">&#8250;</span>
       </button>
-      <button type="button" className="adjust-row" disabled={locked} onClick={() => openStep("finish")}>
+      <button type="button" className="adjust-row" disabled={generating} onClick={() => openStep("finish")}>
         <span>
           Finishing
           <div className="sub">
-            {roomLookLabel(shown.room_treatment)} &middot; {shown.lighting.toUpperCase()}
+            {roomLookLabel(attempt.room_treatment)} &middot; {attempt.lighting.toUpperCase()}
           </div>
         </span>
         <span className="chevron">&#8250;</span>
@@ -196,10 +153,9 @@ export default function Adjust() {
       <button
         type="button"
         className="adjust-row"
-        disabled={locked || uploadingPhoto}
+        disabled={generating || uploadingPhoto}
         onClick={() => {
-          // open the picker straight away (phones need the tap itself); the
-          // draft is only made once a photo has actually been chosen
+          // open the picker straight away (phones need the tap itself)
           debugLog("input clicked");
           fileInputRef.current.click();
         }}
@@ -212,7 +168,7 @@ export default function Adjust() {
       </button>
       <input ref={fileInputRef} type="file" accept={IMAGE_ACCEPT} className="visually-hidden" onChange={handleRoomPhotoChange} />
 
-      <button type="button" className="btn btn-primary" style={{ marginTop: 20 }} disabled={locked} onClick={handleGenerateAgain}>
+      <button type="button" className="btn btn-primary" style={{ marginTop: 20 }} disabled={generating} onClick={handleGenerateAgain}>
         {generating ? "Starting…" : "Generate again"}
       </button>
     </div>

@@ -299,6 +299,12 @@ export default function Finish() {
     try {
       await api.patch(`/api/attempts/${id}`, { json: { room_treatment: roomTreatment, lighting, note } });
       const suffix = ignorePlacement ? "?ignore_placement=true" : "";
+      if (adjust.active) {
+        // opened from "Adjust & try again": the new attempt is created only now, and generated from scratch
+        const data = await api.post(`/api/attempts/${id}/generate-new${suffix}`);
+        navigate(`/attempt/${data.attempt_id}/generating`, { state: { jobId: data.job_id, startedAt: Date.now() } });
+        return;
+      }
       const data = await api.post(`/api/attempts/${id}/generate${suffix}`);
       navigate(`/attempt/${id}/generating`, { state: { jobId: data.job_id, startedAt: Date.now() } });
     } catch (err) {

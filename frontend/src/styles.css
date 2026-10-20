@@ -1009,13 +1009,23 @@ h2 { font-size: 19px; }
   .screen.has-bottom-nav { padding-bottom: 40px; }
 }
 
-/* Login: image half + form half */
+/* Login: image half + form half (the image panel stays hidden on phones) */
 .login-hero { display: none; }
 @media (min-width: 600px) {
-  .login-split { display: grid; grid-template-columns: 2fr 3fr; min-height: 100vh; }
+  .login-split { display: grid; grid-template-columns: 2fr 3fr; min-height: 100vh; background: var(--tint); }
   .login-hero {
     display: flex; align-items: flex-end; padding: 40px 32px;
-    background: linear-gradient(to top, rgba(26, 24, 21, 0.55), rgba(26, 24, 21, 0) 55%), url("/login-hero.jpg") center / cover no-repeat, var(--orange);
+    margin: 16px 0 16px 16px; border-radius: 16px; overflow: hidden;
+    /* the photo covers the panel, centred; a soft dark gradient only at the bottom, behind the line of text;
+       a dark neutral while it loads (no orange block). WebP (about 84 KB) with the jpg as fallback. */
+    background-color: #2b2824;
+    background-image: linear-gradient(to top, rgba(26, 24, 21, 0.62), rgba(26, 24, 21, 0) 50%), url("/login-hero.jpg");
+    background-size: cover; background-position: center; background-repeat: no-repeat;
+  }
+  /* the WebP where the browser takes it; a browser that can't read this rule keeps the jpg above */
+  .login-split .login-hero {
+    background-image: linear-gradient(to top, rgba(26, 24, 21, 0.62), rgba(26, 24, 21, 0) 50%),
+      image-set(url("/login-hero.webp") type("image/webp"), url("/login-hero.jpg") type("image/jpeg"));
   }
   .login-hero-line { margin: 0; color: #fff; font-size: 24px; font-weight: 800; line-height: 1.25; letter-spacing: -0.01em; max-width: 380px; }
   .login-form { max-width: 380px; }

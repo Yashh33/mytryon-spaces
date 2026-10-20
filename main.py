@@ -3342,10 +3342,9 @@ SHAPES_FINAL_CHECK = FINAL_CHECK_TOKEN
 # Final check lines the Draw-on-photo prompt had before; in a saved prompt
 # that was edited (so not moved to the new default), startup replaces just
 # that line with SHAPES_FINAL_CHECK and leaves the rest as it is.
+# (The latest one, with curved sofas, is not listed: a saved prompt keeps it,
+# and build_shapes_prompt replaces any "Final check:" line at render time.)
 PREVIOUS_SHAPES_FINAL_CHECKS = [
-    "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
-    "both parts and no chaise; every curved sofa follows its curve; every sofa has the stated number of seats; no "
-    "shape, label or line remains.",
     "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
     "both parts and no chaise; every sofa has the stated number of seats; no shape, label or line remains.",
     "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated number "

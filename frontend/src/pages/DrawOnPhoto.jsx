@@ -23,6 +23,11 @@ import {
   partAxis,
   partEndHandle,
   piecesOf,
+  facingArrows,
+  seatSectionLines,
+  seatSections,
+  SEAT_DASH,
+  SEAT_GAP,
   shapeFits,
   shapeCentre,
   shapeParts,
@@ -87,6 +92,42 @@ function SmallTag({ text, at, font, W, H }) {
       <text x={x + w / 2} y={y + h / 2} className="draw-tag" fontSize={font} textAnchor="middle" dominantBaseline="central">
         {text}
       </text>
+    </g>
+  );
+}
+
+/** A shape's dashed seat-section lines and white facing arrow(s), from the
+ * same geometry as the guide image and the Preview (seatSectionLines /
+ * facingArrows mirror main.py), recomputed on every change, so they follow
+ * every drag, resize, turn, tilt and part length live. Lines only for a piece
+ * with a seat count (none for a 1-seater or "Not sure"). They never take a
+ * touch: everything under them works as before. Widths never go below a
+ * visible size on screen (`scale`: photo pixels per screen pixel). */
+function SeatMarks({ shape, piece, W, H, scale }) {
+  const sections = piece ? seatSections(piece) : null;
+  const unit = W / 1536;
+  const lines = sections ? seatSectionLines(shape, sections, W, H) : [];
+  const arrows = facingArrows(shape, sections, W, H);
+  const white = Math.max(Math.max(1, Math.round(1.5 * unit)), 1.5 * scale);
+  const dash = `${Math.max(SEAT_DASH * unit, 6 * scale)} ${Math.max(SEAT_GAP * unit, 4 * scale)}`;
+  return (
+    <g pointerEvents="none">
+      {lines.map(([a, b], i) => (
+        <g key={`s${i}`}>
+          <line x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="rgba(0,0,0,0.35)" strokeWidth={white + Math.max(2, 1.5 * scale)} strokeDasharray={dash} />
+          <line x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="rgba(255,255,255,0.94)" strokeWidth={white} strokeDasharray={dash} />
+        </g>
+      ))}
+      {arrows.map((polygon, i) => (
+        <polygon
+          key={`a${i}`}
+          points={polygon.map((p) => p.join(",")).join(" ")}
+          fill="#fff"
+          stroke="#000"
+          strokeWidth={Math.max(Math.max(1, Math.round(2 * unit)), scale)}
+          strokeLinejoin="miter"
+        />
+      ))}
     </g>
   );
 }
@@ -532,6 +573,7 @@ export default function DrawOnPhoto() {
   const selectedShape = selected ? byKey[selected] : null;
   const selectedPiece = selected ? pieces.find((p) => p.key === selected) : null;
   const numberOf = Object.fromEntries(pieces.map((p, i) => [p.key, i + 1]));
+  const pieceOf = Object.fromEntries(pieces.map((p) => [p.key, p]));
 
   /** Resize (bottom-right), rotate (above), tilt (left side) and turn on
    * floor (below) handles, outside the shape's bounding box but always kept
@@ -723,6 +765,7 @@ export default function DrawOnPhoto() {
                           points={back.map((p) => px(p).join(",")).join(" ")}
                           fill="none" stroke="#000" strokeWidth={9 * scale} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"
                         />
+                        <SeatMarks shape={s} piece={pieceOf[key]} W={W} H={H} scale={scale} />
                       </g>
                     );
                   }
@@ -749,6 +792,7 @@ export default function DrawOnPhoto() {
                           <line key={`b${part}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="#000" strokeWidth={9 * scale} strokeLinecap="round" pointerEvents="none" />
                         );
                       })}
+                      <SeatMarks shape={s} piece={pieceOf[key]} W={W} H={H} scale={scale} />
                       {isSelected
                         ? parts.flatMap((corners, part) =>
                             [0, 1, 2, 3]

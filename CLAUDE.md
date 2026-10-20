@@ -63,8 +63,9 @@ One behaviour only (no switches); the shared floor-plan code is separate and unc
 - No open-floor section; the gap writer is not called.
 - Facing sentence per piece, worked out in code from its shape (black-edge middle → opposite-edge middle; LEFT / RIGHT of the photo).
 - L-shape and corner sofa: an end sentence saying which end of the long part the lounge / shorter part is at, as seen in the photo.
-- Guide image: a white facing arrow on each box, along the same direction as the facing sentence.
-- Guide image (and the Preview, which shows it): dashed seat-section lines on each box with a seat count.
+- Guide image: a white facing arrow on each box, along the same direction as the facing sentence; on a part with seat lines it sits in the middle of a seat section (the middle one, or just left of centre for an even count).
+- Dashed seat-section lines on each box with a seat count (none for 1-seaters or "Not sure").
+- The editor draws the same lines and arrows live (frontend/src/shapes.js mirrors main.py); the Preview shows the guide image itself.
 - CAMERA paragraphs open the prompt; styled looks start with "Restyle by editing this photograph…".
 - Covered panels / frames / recesses keep their exact number, size and position (and their layout in a styled look).
 - Seat counts: straight sofas from their type; L / corner / curved from the Furniture step ("Not sure" = none).

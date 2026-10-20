@@ -3964,7 +3964,7 @@ ARROW_MIN_PX = 44  # but at least this long in the picture (for a 1536 px wide p
 ARROW_MAX_REACH = 0.85  # and never past this share of the depth
 
 
-def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict | None) -> None:
+def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict | None, sections: dict | None = None) -> None:
     """On each shape, a white arrow with a thin black outline from
     near its black line toward the front, the way its seats face: along the
     same vector as its facing sentence (facing_fronts: black-edge middle to
@@ -3973,22 +3973,29 @@ def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict
     a curved sofa's back arc toward the inside of the curve. With `lifts`
     (boxes) it starts on the top of the box. At least ARROW_MIN_PX long where
     the top has room (a box top seen from the front is squashed), never past
-    ARROW_MAX_REACH of the depth. Labels are drawn after it."""
+    ARROW_MAX_REACH of the depth. On a part with seat lines (`sections`,
+    seat_sections by (item_id, sub_index)) it starts in the middle of a seat
+    section instead (seat_arrow_starts), never on a dashed line; same
+    direction. Labels are drawn after it. Mirrors facingArrows in
+    frontend/src/shapes.js (the editor draws the same arrows, on the floor)."""
     width, height = guide.size
     unit = width / 1536
     outline = max(round(2 * unit), 1)
     shaft, head, head_len = 5 * unit, 13 * unit, 18 * unit  # half widths and the head's length
     for shape in shapes:
-        top_lift = (lifts or {}).get((shape["item_id"], shape["sub_index"]), (None, lambda y: 0.0))[1]
+        key = (shape["item_id"], shape["sub_index"])
+        top_lift = (lifts or {}).get(key, (None, lambda y: 0.0))[1]
         raise_up = lambda x, y, lift=top_lift: (x, y - lift(y))  # noqa: E731
+        starts = seat_arrow_starts(shape, sections[key], width, height) if sections and sections.get(key) else {}
         for front in facing_fronts(shape, width, height):
+            start_from = starts.get(front["part"]) or front["start"]
             vx, vy = front["front"][0] - front["back"][0], front["front"][1] - front["back"][1]
             depth = math.hypot(vx, vy)
             gap = max(depth * ARROW_START, GUIDE_LINE_PX * 0.75)
             if depth * ARROW_MAX_REACH <= gap:
                 continue
             ux, uy = vx / depth, vy / depth  # the facing sentence's direction
-            on_floor = lambda along: (front["start"][0] + ux * along, front["start"][1] + uy * along)  # noqa: E731
+            on_floor = lambda along: (start_from[0] + ux * along, start_from[1] + uy * along)  # noqa: E731
             start, limit = raise_up(*on_floor(gap)), raise_up(*on_floor(depth * ARROW_MAX_REACH))
             room = math.dist(start, limit)  # how far the top of the box reaches that way
             length = min(max(depth * ARROW_LENGTH, ARROW_MIN_PX * unit), room)
@@ -4046,10 +4053,43 @@ def _u_along(at, point: tuple, v: float) -> float:
     return (lo + hi) / 2
 
 
+def _point_along(line: list, share: float, width: int, height: int) -> tuple:
+    """The point `share` (0-1) of the way along a polyline (photo fractions),
+    by length, in photo pixels."""
+    px = [(x * width, y * height) for x, y in line]
+    lengths = [math.dist(a, b) for a, b in zip(px, px[1:])]
+    goal, run = share * sum(lengths), 0.0
+    for (a, b), length in zip(zip(px, px[1:]), lengths):
+        if run + length >= goal and length > 0:
+            t = (goal - run) / length
+            return a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+        run += length
+    return px[-1]
+
+
+def _seat_maps(shape: dict, width: int, height: int) -> tuple[list, list, float | None]:
+    """A two-part or straight shape's parts (photo pixels), each part's map
+    from the unit square (u along its black-line edge, v from that edge to
+    the front; None without a black line), and u4: where the corner square
+    of part 0 begins (p4), when part 0's black line is its outer long edge
+    (edge 0) — part 0 runs from u = 0 (p0 / p5) to u = 1 (p1 / q)."""
+    parts = [[(x * width, y * height) for x, y in part] for part in shape_parts(shape["kind"], shape["points"])]
+    maps = []
+    for index, corners in enumerate(parts):
+        edge = shape["backrest"][index] if index < len(shape["backrest"]) else None
+        maps.append(None if edge is None else _square_to_quad([corners[(edge + i) % 4] for i in range(4)]))
+    u4 = None
+    if shape["kind"] != "rect":
+        p4 = (shape["points"][4][0] * width, shape["points"][4][1] * height)
+        u4 = _u_along(maps[0], p4, 1.0) if maps[0] is not None and shape["backrest"][0] == 0 else None
+    return parts, maps, u4
+
+
 def seat_section_lines(shape: dict, sections: dict, width: int, height: int) -> list[tuple[tuple, tuple]]:
-    """S28: the floor lines (photo pixels) dividing a shape into its seat
+    """The floor lines (photo pixels) dividing a shape into its seat
     sections, each from its black-line edge to its front edge, in
-    perspective. A straight sofa into n; an L's long part into n (the lounge
+    perspective (mirrored by seatSectionLines in frontend/src/shapes.js, so
+    the editor draws the same lines). A straight sofa into n; an L's long part into n (the lounge
     none; the line where the lounge begins is drawn); a corner sofa's long
     part into n with the corner seat (the corner square is its own section)
     and the shorter part into m after it; a curved sofa's band into n equal
@@ -4059,24 +4099,8 @@ def seat_section_lines(shape: dict, sections: dict, width: int, height: int) -> 
     if kind == "curved":
         outline, back = curved_outline(shape["points"])
         front = outline[len(back):][::-1]  # p3 -> p2, alongside the back arc p0 -> p1
-
-        def along(line: list, share: float) -> tuple:
-            px = [(x * width, y * height) for x, y in line]
-            lengths = [math.dist(a, b) for a, b in zip(px, px[1:])]
-            goal, run = share * sum(lengths), 0.0
-            for (a, b), length in zip(zip(px, px[1:]), lengths):
-                if run + length >= goal and length > 0:
-                    t = (goal - run) / length
-                    return a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
-                run += length
-            return px[-1]
-
-        return [(along(back, k / n), along(front, k / n)) for k in range(1, n)]
-    parts = [[(x * width, y * height) for x, y in part] for part in shape_parts(kind, shape["points"])]
-    maps = []
-    for index, corners in enumerate(parts):
-        edge = shape["backrest"][index] if index < len(shape["backrest"]) else None
-        maps.append(None if edge is None else _square_to_quad([corners[(edge + i) % 4] for i in range(4)]))
+        return [(_point_along(back, k / n, width, height), _point_along(front, k / n, width, height)) for k in range(1, n)]
+    parts, maps, u4 = _seat_maps(shape, width, height)
 
     def split(index: int, count: int, lo: float = 0.0, hi: float = 1.0, ends: tuple = ()) -> list:
         """Lines dividing [lo, hi] of a part into `count` sections, plus lines at `ends`."""
@@ -4090,10 +4114,7 @@ def seat_section_lines(shape: dict, sections: dict, width: int, height: int) -> 
         return split(0, n)
     lines = []
     long_index = 1 - shape["lounge"] if kind == "L" else _long_part_index(shape, parts)
-    # part 0 holds the corner square when its backrest is its outer long edge (edge 0): it runs
-    # from u = 0 (p0 / p5) to u = 1 (p1 / q), and the corner square is from p4 (u4) to u = 1
-    p4 = (shape["points"][4][0] * width, shape["points"][4][1] * height)
-    u4 = _u_along(maps[0], p4, 1.0) if maps[0] is not None and shape["backrest"][0] == 0 else None
+    # part 0 holds the corner square (from u4 to u = 1) when u4 is known (_seat_maps)
 
     def join_end(index: int) -> float:
         """The end of part 1 (u = 0 or 1) where it meets part 0."""
@@ -4117,6 +4138,56 @@ def seat_section_lines(shape: dict, sections: dict, width: int, height: int) -> 
         lines += split(1, n - 1, ends=(join_end(1),)) if maps[1] is not None else []
         lines += split(0, short, 0.0, u4, (u4,))
     return lines
+
+
+def seat_arrow_starts(shape: dict, sections: dict, width: int, height: int) -> dict:
+    """Where a shape's facing arrows start when it has seat lines: by part
+    index (None for a curved sofa), the point on the black-line edge (floor,
+    photo pixels) at the middle of one of that part's seat sections — the
+    middle one for an odd count, the one just left of centre in the photo for
+    an even count — so the arrow never sits on a dashed line. The sections
+    are those of seat_section_lines: an L's long part n (not the lounge); a
+    corner sofa's long part n with the corner seat and its shorter part m
+    (when the long part is part 1, the corner square is left with part 0's
+    own m); a curved sofa's band n along its back arc."""
+    n, m = sections["n"], sections.get("m")
+    kind = shape["kind"]
+
+    def even(lo: float, hi: float, count: int) -> list:
+        return [(lo + (hi - lo) * k / count, lo + (hi - lo) * (k + 1) / count) for k in range(count)]
+
+    def middle_of(spans: list, point_at) -> tuple | None:
+        if not spans:
+            return None
+        if len(spans) % 2:
+            low, high = spans[len(spans) // 2]
+            return point_at((low + high) / 2)
+        left, right = (point_at(sum(span) / 2) for span in spans[len(spans) // 2 - 1 : len(spans) // 2 + 1])
+        return left if left[0] <= right[0] else right  # just left of centre, as seen in the photo
+
+    if kind == "curved":
+        _outline, back = curved_outline(shape["points"])
+        return {None: middle_of(even(0.0, 1.0, n), lambda share: _point_along(back, share, width, height))}
+    parts, maps, u4 = _seat_maps(shape, width, height)
+    spans = {}
+    if kind == "rect":
+        spans[0] = even(0.0, 1.0, n)
+    elif kind == "L":
+        long_index = 1 - shape["lounge"]
+        spans[long_index] = even(0.0, u4 if long_index == 0 and u4 is not None else 1.0, n)
+    else:
+        long_index = _long_part_index(shape, parts)
+        if u4 is None:
+            spans[long_index], spans[1 - long_index] = even(0.0, 1.0, n), even(0.0, 1.0, m)
+        elif long_index == 0:  # the long part holds the corner seat
+            spans[0], spans[1] = even(0.0, u4, n - 1) + [(u4, 1.0)], even(0.0, 1.0, m)
+        else:
+            spans[1], spans[0] = even(0.0, 1.0, n - 1), even(0.0, u4, m)
+    return {
+        index: middle_of(part_spans, lambda u, at=maps[index]: at(u, 0.0))
+        for index, part_spans in spans.items()
+        if maps[index] is not None
+    }
 
 
 def draw_seat_lines(guide: Image.Image, shapes: list[dict], sections: dict, lifts: dict | None) -> None:
@@ -4205,7 +4276,7 @@ def draw_guide_image(
         if sections:
             draw_seat_lines(guide, shapes, sections, lifts)
         draw = ImageDraw.Draw(guide)
-        draw_facing_arrows(guide, draw, shapes, lifts)
+        draw_facing_arrows(guide, draw, shapes, lifts, sections)
         return _draw_guide_labels(guide, draw, shapes, tags, lifts)
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     fill = ImageDraw.Draw(overlay)
@@ -4237,7 +4308,7 @@ def draw_guide_image(
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
     if sections:
         draw_seat_lines(guide, shapes, sections, None)
-    draw_facing_arrows(guide, draw, shapes, None)
+    draw_facing_arrows(guide, draw, shapes, None, sections)
     return _draw_guide_labels(guide, draw, shapes, tags, None)
 
 
@@ -4399,14 +4470,15 @@ def facing_fronts(shape: dict, sx: float, sy: float) -> list[dict]:
     """The parts whose seats the facing sentence (and arrow) is about, with
     points scaled by (sx, sy), each {"line": its black line, "back": the
     middle of its black-line edge, "front": the middle of the opposite edge,
-    "start": where the arrow starts}, in this order: a straight piece its one
+    "start": where the arrow starts, "part": its part index (None for a curved
+    sofa)}, in this order: a straight piece its one
     part; an L its long part; a corner sofa its long part, then its shorter
     part; a curved sofa its band, from the middle of the two ends of its back
     arc to the middle of the two ends of its front arc, the arrow from the
     middle of the back arc (p4)."""
     if shape["kind"] == "curved":
         p0, p1, p2, p3, p4 = [(x * sx, y * sy) for x, y in shape["points"]]
-        return [{"line": [p0, p1], "back": _mid(p0, p1), "front": _mid(p2, p3), "start": p4}]
+        return [{"line": [p0, p1], "back": _mid(p0, p1), "front": _mid(p2, p3), "start": p4, "part": None}]
     parts = [[(x * sx, y * sy) for x, y in part] for part in shape_parts(shape["kind"], shape["points"])]
     if shape["kind"] == "rect":
         order = [0]
@@ -4419,7 +4491,9 @@ def facing_fronts(shape: dict, sx: float, sy: float) -> list[dict]:
         if edge is None:  # no backrest set: its longest edge
             edge = max(range(4), key=lambda i: math.dist(corners[i], corners[(i + 1) % 4]))
         back = _edge_mid(corners, edge)
-        fronts.append({"line": [corners[edge], corners[(edge + 1) % 4]], "back": back, "front": _edge_mid(corners, edge + 2), "start": back})
+        fronts.append(
+            {"line": [corners[edge], corners[(edge + 1) % 4]], "back": back, "front": _edge_mid(corners, edge + 2), "start": back, "part": index}
+        )
     return fronts
 
 

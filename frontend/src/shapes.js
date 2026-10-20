@@ -68,6 +68,8 @@ export function piecesOf(items) {
         kind,
         type: typeLabel(item.category, label, kind, subs.length > 1 ? null : item.seats),
         width_ft: widthFt,
+        category: item.category,
+        seats: subs.length > 1 ? null : item.seats || null, // picked on the Furniture step (L / corner / curved)
       };
     });
   });
@@ -696,4 +698,253 @@ export function partEndHandle(points, part, aspect, gap) {
   const middle = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
   const at = dir ? add(middle, [dir[0] * gap, dir[1] * gap]) : middle;
   return { at: unpix(at, aspect), angle: dir ? (Math.atan2(dir[1], dir[0]) * 180) / Math.PI : 0 };
+}
+
+// ---- seat sections and facing arrows ----------------------------------------
+// The dashed seat-section lines and white facing arrows, in photo pixels on
+// the floor. Mirrors seat_sections, _square_to_quad, _u_along, _seat_maps,
+// seat_section_lines, seat_arrow_starts, facing_fronts and draw_facing_arrows
+// in main.py, so the editor draws what the guide image and the Preview draw
+// (there they are raised onto the top of each box).
+
+const SEATER_RE = /^(\d+)-seater$/;
+export const SEAT_DASH = 7; // dash and gap, in pixels for a 1536 px wide photo
+export const SEAT_GAP = 5;
+const GUIDE_LINE_PX = 12;
+const ARROW_START = 0.12; // an arrow starts this share of the depth in front of its black line
+const ARROW_LENGTH = 1 / 3; // and is this share of the depth long
+const ARROW_MIN_PX = 44; // but at least this long (for a 1536 px wide photo)
+const ARROW_MAX_REACH = 0.85; // and never past this share of the depth
+
+/** A piece's seat sections, or null: a straight sofa {n} (two or more); an L
+ * {n: the long part's seats}; a corner sofa {n: with the corner seat, m: the
+ * shorter part's}; a curved sofa {n}. L / corner / curved only with seats
+ * picked on the Furniture step. */
+export function seatSections(piece) {
+  if (piece.kind === "L" || piece.kind === "corner" || piece.kind === "curved") {
+    const seats = piece.seats;
+    if (!seats) return null;
+    return piece.kind === "corner" ? { n: seats.long, m: seats.short } : { n: seats.long || seats.total };
+  }
+  const match = piece.category === "Sofa" ? SEATER_RE.exec(piece.label || "") : null;
+  const count = match ? Number(match[1]) : null;
+  return count && count >= 2 ? { n: count } : null;
+}
+
+const midOf = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+const edgeMid = (corners, edge) => midOf(corners[edge % 4], corners[(edge + 1) % 4]);
+
+/** The projective map from the unit square to a quad's four corners. */
+function squareToQuad(quad) {
+  const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = quad;
+  const sx = x0 - x1 + x2 - x3;
+  const sy = y0 - y1 + y2 - y3;
+  let a, b, c, d, e, f, g, h;
+  if (Math.abs(sx) < 1e-12 && Math.abs(sy) < 1e-12) {
+    [a, b, c, d, e, f, g, h] = [x1 - x0, x3 - x0, x0, y1 - y0, y3 - y0, y0, 0, 0];
+  } else {
+    const [dx1, dx2, dy1, dy2] = [x1 - x2, x3 - x2, y1 - y2, y3 - y2];
+    const det = dx1 * dy2 - dx2 * dy1;
+    if (Math.abs(det) < 1e-12) return null;
+    g = (sx * dy2 - dx2 * sy) / det;
+    h = (dx1 * sy - sx * dy1) / det;
+    [a, b, c] = [x1 - x0 + g * x1, x3 - x0 + h * x3, x0];
+    [d, e, f] = [y1 - y0 + g * y1, y3 - y0 + h * y3, y0];
+  }
+  return (u, v) => {
+    const w = g * u + h * v + 1;
+    return [(a * u + b * v + c) / w, (d * u + e * v + f) / w];
+  };
+}
+
+/** Where `point` (on the line v of the map `at`) is along it, 0-1. */
+function uAlong(at, point, v) {
+  let [lo, hi] = [0, 1];
+  const start = at(0, v);
+  const end = at(1, v);
+  const [ex, ey] = [end[0] - start[0], end[1] - start[1]];
+  const target = (point[0] - start[0]) * ex + (point[1] - start[1]) * ey;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    const [mx, my] = at(mid, v);
+    if ((mx - start[0]) * ex + (my - start[1]) * ey < target) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/** The point `share` of the way along a polyline (photo fractions), in pixels. */
+function pointAlong(line, share, W, H) {
+  const pts = line.map(([x, y]) => [x * W, y * H]);
+  const lengths = pts.slice(1).map((p, i) => dist(pts[i], p));
+  const goal = share * lengths.reduce((s, l) => s + l, 0);
+  let run = 0;
+  for (let i = 0; i < lengths.length; i++) {
+    if (run + lengths[i] >= goal && lengths[i] > 0) {
+      const t = (goal - run) / lengths[i];
+      const [a, b] = [pts[i], pts[i + 1]];
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+    run += lengths[i];
+  }
+  return pts[pts.length - 1];
+}
+
+/** Parts in pixels, each part's unit-square map (null without a black line), and u4. */
+function seatMaps(shape, W, H) {
+  const parts = shapeParts(shape.kind, shape.points).map((part) => part.map(([x, y]) => [x * W, y * H]));
+  const maps = parts.map((corners, index) => {
+    const edge = index < shape.backrest.length ? shape.backrest[index] : null;
+    return edge == null ? null : squareToQuad([0, 1, 2, 3].map((i) => corners[(edge + i) % 4]));
+  });
+  let u4 = null;
+  if (shape.kind !== "rect") {
+    const p4 = [shape.points[4][0] * W, shape.points[4][1] * H];
+    u4 = maps[0] && shape.backrest[0] === 0 ? uAlong(maps[0], p4, 1) : null;
+  }
+  return { parts, maps, u4 };
+}
+
+function longPartIndex(shape, parts) {
+  if (shape.kind === "L") return 1 - shape.lounge;
+  const longest = parts.map((c) => Math.max(...[0, 1, 2, 3].map((i) => dist(c[i], c[(i + 1) % 4]))));
+  return longest[0] >= longest[1] ? 0 : 1;
+}
+
+/** The dashed seat-section lines [[back point, front point], ...] in photo pixels. */
+export function seatSectionLines(shape, sections, W, H) {
+  const { n, m } = sections;
+  if (shape.kind === "curved") {
+    const { outline, back } = curvedOutline(shape.points);
+    const front = outline.slice(back.length).reverse(); // p3 -> p2, alongside the back arc
+    const lines = [];
+    for (let k = 1; k < n; k++) lines.push([pointAlong(back, k / n, W, H), pointAlong(front, k / n, W, H)]);
+    return lines;
+  }
+  const { parts, maps, u4 } = seatMaps(shape, W, H);
+  const split = (index, count, lo = 0, hi = 1, ends = []) => {
+    const at = maps[index];
+    if (!at) return [];
+    const cuts = [];
+    for (let k = 1; k < count; k++) cuts.push(lo + ((hi - lo) * k) / count);
+    return [...cuts, ...ends].map((u) => [at(u, 0), at(u, 1)]);
+  };
+  if (shape.kind === "rect") return split(0, n);
+  const longIndex = shape.kind === "L" ? 1 - shape.lounge : longPartIndex(shape, parts);
+  const joinEnd = (index) => {
+    const at = maps[index];
+    const q = parts[1][0];
+    return dist(at(0, 0.5), q) <= dist(at(1, 0.5), q) ? 0 : 1;
+  };
+  if (shape.kind === "L") {
+    if (longIndex === 0) return u4 != null ? split(0, n, 0, u4, [u4]) : split(0, n);
+    return maps[1] ? split(1, n, 0, 1, [joinEnd(1)]) : [];
+  }
+  if (u4 == null) return [...split(longIndex, n), ...split(1 - longIndex, m)];
+  if (longIndex === 0) {
+    const longLines = n > 1 ? split(0, n - 1, 0, u4, [u4]) : split(0, 1, 0, 1, [u4]);
+    return [...longLines, ...split(1, m, 0, 1, maps[1] ? [joinEnd(1)] : [])];
+  }
+  return [...(maps[1] ? split(1, n - 1, 0, 1, [joinEnd(1)]) : []), ...split(0, m, 0, u4, [u4])];
+}
+
+/** Where each part's arrow starts when it has seat lines: by part index
+ * ("curved" for a curved sofa), the middle of a seat section on its
+ * black-line edge — the middle one for an odd count, the one just left of
+ * centre in the photo for an even count. */
+export function seatArrowStarts(shape, sections, W, H) {
+  const { n, m } = sections;
+  const even = (lo, hi, count) => Array.from({ length: count }, (_, k) => [lo + ((hi - lo) * k) / count, lo + ((hi - lo) * (k + 1)) / count]);
+  const middleOf = (spans, pointAt) => {
+    if (!spans.length) return null;
+    if (spans.length % 2) {
+      const [low, high] = spans[(spans.length - 1) / 2];
+      return pointAt((low + high) / 2);
+    }
+    const [left, right] = spans.slice(spans.length / 2 - 1, spans.length / 2 + 1).map((s) => pointAt((s[0] + s[1]) / 2));
+    return left[0] <= right[0] ? left : right;
+  };
+  if (shape.kind === "curved") {
+    const { back } = curvedOutline(shape.points);
+    return { curved: middleOf(even(0, 1, n), (share) => pointAlong(back, share, W, H)) };
+  }
+  const { parts, maps, u4 } = seatMaps(shape, W, H);
+  const spans = {};
+  if (shape.kind === "rect") spans[0] = even(0, 1, n);
+  else if (shape.kind === "L") {
+    const longIndex = 1 - shape.lounge;
+    spans[longIndex] = even(0, longIndex === 0 && u4 != null ? u4 : 1, n);
+  } else {
+    const longIndex = longPartIndex(shape, parts);
+    if (u4 == null) {
+      spans[longIndex] = even(0, 1, n);
+      spans[1 - longIndex] = even(0, 1, m);
+    } else if (longIndex === 0) {
+      spans[0] = [...even(0, u4, n - 1), [u4, 1]];
+      spans[1] = even(0, 1, m);
+    } else {
+      spans[1] = even(0, 1, n - 1);
+      spans[0] = even(0, u4, m);
+    }
+  }
+  const out = {};
+  for (const [index, partSpans] of Object.entries(spans)) {
+    const at = maps[index];
+    if (at) out[index] = middleOf(partSpans, (u) => at(u, 0));
+  }
+  return out;
+}
+
+/** The parts the facing arrows are about, in photo pixels: {back, front, start, part}. */
+function facingFronts(shape, W, H) {
+  if (shape.kind === "curved") {
+    const [p0, p1, p2, p3, p4] = shape.points.map(([x, y]) => [x * W, y * H]);
+    return [{ back: midOf(p0, p1), front: midOf(p2, p3), start: p4, part: "curved" }];
+  }
+  const parts = shapeParts(shape.kind, shape.points).map((part) => part.map(([x, y]) => [x * W, y * H]));
+  let order = [0];
+  if (shape.kind !== "rect") {
+    const longIndex = longPartIndex(shape, parts);
+    order = shape.kind === "L" ? [longIndex] : [longIndex, 1 - longIndex];
+  }
+  return order.map((index) => {
+    const corners = parts[index];
+    let edge = shape.backrest[index];
+    if (edge == null) {
+      // no black line set: its longest edge
+      edge = [1, 2, 3].reduce((best, i) => (dist(corners[i], corners[(i + 1) % 4]) > dist(corners[best], corners[(best + 1) % 4]) ? i : best), 0);
+    }
+    const back = edgeMid(corners, edge);
+    return { back, front: edgeMid(corners, edge + 2), start: back, part: String(index) };
+  });
+}
+
+/** The white facing arrows as polygons in photo pixels, on the floor: from
+ * near the black line toward the front, along the black-edge middle ->
+ * opposite-edge middle direction; from a seat section's middle when the
+ * piece has `sections` (seatSections). */
+export function facingArrows(shape, sections, W, H) {
+  const unit = W / 1536;
+  const [shaft, head, headLen] = [5 * unit, 13 * unit, 18 * unit];
+  const starts = sections ? seatArrowStarts(shape, sections, W, H) : {};
+  const polygons = [];
+  for (const front of facingFronts(shape, W, H)) {
+    const [vx, vy] = [front.front[0] - front.back[0], front.front[1] - front.back[1]];
+    const depth = Math.hypot(vx, vy);
+    const gap = Math.max(depth * ARROW_START, GUIDE_LINE_PX * 0.75);
+    if (depth * ARROW_MAX_REACH <= gap) continue;
+    const [ux, uy] = [vx / depth, vy / depth];
+    const from = starts[front.part] || front.start;
+    const start = [from[0] + ux * gap, from[1] + uy * gap];
+    const limit = [from[0] + ux * depth * ARROW_MAX_REACH, from[1] + uy * depth * ARROW_MAX_REACH];
+    const room = dist(start, limit);
+    const length = Math.min(Math.max(depth * ARROW_LENGTH, ARROW_MIN_PX * unit), room);
+    if (length < 1) continue;
+    const [px, py] = [-uy, ux];
+    const tip = Math.min(headLen, length * 0.5);
+    const neck = length - tip;
+    const at = (along, across) => [start[0] + ux * along + px * across, start[1] + uy * along + py * across];
+    polygons.push([at(0, shaft), at(neck, shaft), at(neck, head), at(length, 0), at(neck, -head), at(neck, -shaft), at(0, -shaft)]);
+  }
+  return polygons;
 }

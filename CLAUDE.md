@@ -57,21 +57,27 @@ IMAGE_QUALITY=high
 ```
 To switch back to GPT Image 2: `IMAGE_MODEL=gpt-image-2` and `IMAGE_QUALITY=medium`, then restart the backend.
 
-Draw on photo prompt experiment (same places; restart the backend after changing `.env`):
+## Experiments (Draw on photo)
+Three switches, in `.env` locally and in Render → Environment for the live app; restart the backend after changing them. If one is missing, the code uses "off".
 ```
-# off (default): piece sentences say nothing about walls, each sofa goes only by its own shape and black line; on: the old wall wording
-DRAW_WALL_WORDS=off
-# off (default): no "OPEN FLOOR AROUND EACH SOFA" section and no gap writer call; on: both
-DRAW_OPEN_FLOOR=off
+# on: the original wall wording (the gap writer's wall answers); off: piece sentences say nothing about walls
+DRAW_WALL_WORDS=on
+# on: the "OPEN FLOOR AROUND EACH SOFA" section and its gap writer call; off: neither
+DRAW_OPEN_FLOOR=on
+# on: each piece gets a sentence saying which way its seats face in the photo, worked out in code from its shape; off: nothing changes
+DRAW_FACING=off
 ```
 
-| Variant | DRAW_WALL_WORDS | DRAW_OPEN_FLOOR |
-|---|---|---|
-| A | off | off |
-| B | off | on |
-| Old prompt (word for word) | on | on |
+| Config | WALL_WORDS | OPEN_FLOOR | FACING | Status |
+|---|---|---|---|---|
+| Original (safe fallback) | on | on | off | Known good — go back to this if experiments fail |
+| Variant A | off | off | off | Discarded: sofa near a wall turned to face along it |
+| Variant B | off | on | off | Discarded (not needed) |
+| S21 test | off | off | on | Testing |
 
-The Debug panel's info line shows which variant made each render (e.g. "walls off · open floor off").
+To fall back: set WALL_WORDS=on, OPEN_FLOOR=on, FACING=off, restart the backend.
+
+The Debug panel's info line shows the switches that made each render (e.g. "walls off · open floor off · facing on").
 
 ## Deploying (done by a person, never by Claude Code)
 - If the task changed the database: run `python scripts/backup_db.py` first.

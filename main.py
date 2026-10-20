@@ -80,14 +80,18 @@ IMAGE_QUALITY_CHOICES = ("low", "medium", "high", "xhigh", "max", "auto")
 #   DRAW_WALL_WORDS  "off" (default): the piece sentences say nothing about walls — each sofa goes
 #                    only by its own shape and black line; "on": today's wall wording.
 #   DRAW_OPEN_FLOOR  "off" (default): no OPEN FLOOR section and no gap writer call; "on": both.
-# Variant A = off/off, Variant B = off/on, the old prompt = on/on (word for word).
+#   DRAW_FACING      "off" (default): nothing changes; "on": each piece gets a sentence saying which
+#                    way its seats face in the photo, worked out from its shape (facing_sentences).
+# The original prompt = on/on/off (word for word); see CLAUDE.md "Experiments (Draw on photo)".
 DRAW_WALL_WORDS = (os.environ.get("DRAW_WALL_WORDS") or "off").strip().lower() == "on"
 DRAW_OPEN_FLOOR = (os.environ.get("DRAW_OPEN_FLOOR") or "off").strip().lower() == "on"
+DRAW_FACING = (os.environ.get("DRAW_FACING") or "off").strip().lower() == "on"
 
 
 def draw_variant_label() -> str:
-    """For the Debug panel: "walls off · open floor off" etc."""
-    return f"walls {'on' if DRAW_WALL_WORDS else 'off'} · open floor {'on' if DRAW_OPEN_FLOOR else 'off'}"
+    """For the Debug panel: "walls off · open floor off · facing on" etc."""
+    on = lambda flag: "on" if flag else "off"  # noqa: E731
+    return f"walls {on(DRAW_WALL_WORDS)} · open floor {on(DRAW_OPEN_FLOOR)} · facing {on(DRAW_FACING)}"
 
 # ---------------------------------------------------------------------------
 # GENERATION PROMPT — the live prompt lives in the `settings` table (key
@@ -4250,6 +4254,109 @@ SHAPES_ONLY_SOURCE_LINE = (
 )
 
 
+# DRAW_FACING on: which way a piece's seats face in the photo, by the angle of its front
+# (from the middle of the black line, square to it, into the shape) from straight down the
+# photo (toward the camera). Left / right are always the photo's.
+FACING_CAMERA_DEG = 25  # up to this: faces the camera
+FACING_TURNED_DEG = 65  # up to this: faces the camera, turned slightly
+FACING_SIDE_DEG = 115  # up to this: seen from the side; beyond: back toward the camera
+FACING_PARALLEL_DEG = 8  # two black lines within this of each other (and the same facing) are parallel
+FACING_SENTENCES = {
+    "camera": "Its seats face the camera.",
+    "turned": "Its seats face the camera, turned slightly toward the {side} of the photo.",
+    "side": "It is seen from the side: its seats face the {side} of the photo.",
+    "away": "Its back is toward the camera: its seats face away, into the photo.",
+}
+# a corner sofa's two parts: "The long part's seats face ...; the shorter part's seats face ..."
+FACING_PHRASES = {
+    "camera": "face the camera",
+    "turned": "face the camera, turned slightly toward the {side} of the photo",
+    "side": "face the {side} of the photo",
+    "away": "face away, into the photo",
+}
+
+
+def _facing_of(line: list, inside: tuple) -> tuple[str, str | None]:
+    """(bucket, LEFT / RIGHT or None) for a back line and a point inside its
+    part, both in photo pixels: the front is square to the line from its
+    middle, toward `inside`."""
+    (x1, y1), (x2, y2) = line[0], line[-1]
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    dx, dy = -(y2 - y1), x2 - x1
+    if dx * (inside[0] - mx) + dy * (inside[1] - my) < 0:
+        dx, dy = -dx, -dy
+    angle = math.degrees(math.atan2(abs(dx), dy))  # 0 = straight down the photo, 180 = straight up
+    side = "LEFT" if dx < 0 else "RIGHT"
+    if angle <= FACING_CAMERA_DEG:
+        return "camera", None
+    if angle <= FACING_TURNED_DEG:
+        return "turned", side
+    if angle <= FACING_SIDE_DEG:
+        return "side", side
+    return "away", None
+
+
+def _line_angle(line: list) -> float:
+    """A line's direction in degrees, 0-180 (a line has no way round)."""
+    (x1, y1), (x2, y2) = line[0], line[-1]
+    return math.degrees(math.atan2(y2 - y1, x2 - x1)) % 180
+
+
+def _centre(points: list) -> tuple[float, float]:
+    return sum(x for x, _ in points) / len(points), sum(y for _, y in points) / len(points)
+
+
+def facing_sentences(attempt: Attempt, shapes: list[dict], aspect: float) -> dict:
+    """DRAW_FACING: by label, the sentence saying which way the piece's seats
+    face in the photo, worked out only from its shape (photo pixels: x scaled
+    by `aspect`). An L by its long part's black line; a corner sofa one clause
+    per part; a curved sofa by the straight line between the ends of its back
+    arc. A piece whose black line is within FACING_PARALLEL_DEG of an earlier
+    piece's, facing the same way, also says it stands parallel to it."""
+    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
+    out, seen = {}, []  # seen: (number, line angle, facing) of the pieces before
+    for shape in shapes:
+        piece = pieces.get((shape["item_id"], shape["sub_index"]))
+        if piece is None:
+            continue
+        kind = shape["kind"]
+        if kind == "curved":
+            p0, p1, p2, p3, _p4 = [(x * aspect, y) for x, y in shape["points"]]
+            line = [p0, p1]
+            facing = _facing_of(line, ((p2[0] + p3[0]) / 2, (p2[1] + p3[1]) / 2))
+        else:
+            parts = [[(x * aspect, y) for x, y in part] for part in shape_parts(kind, shape["points"])]
+            if kind == "rect":
+                long_index = 0
+            elif kind == "L":
+                long_index = 1 - shape["lounge"]
+            else:  # corner sofa: the long part is the one with the longer longest edge (as two_part_facts)
+                longest = [max(math.dist(c[i], c[(i + 1) % 4]) for i in range(4)) for c in parts]
+                long_index = 0 if longest[0] >= longest[1] else 1
+            line = _back_line(parts[long_index], shape["backrest"][long_index])
+            facing = _facing_of(line, _centre(parts[long_index]))
+        bucket, side = facing
+        if kind == "corner":
+            short_index = 1 - long_index
+            other = _facing_of(_back_line(parts[short_index], shape["backrest"][short_index]), _centre(parts[short_index]))
+            sentence = (
+                f"The long part's seats {FACING_PHRASES[bucket].format(side=side)}; "
+                f"the shorter part's seats {FACING_PHRASES[other[0]].format(side=other[1])}."
+            )
+        else:
+            sentence = FACING_SENTENCES[bucket].format(side=side)
+        angle = _line_angle(line)
+        number = piece["tag"].split(" · ")[0]
+        for earlier, earlier_angle, earlier_facing in seen:
+            gap = abs(angle - earlier_angle)
+            if min(gap, 180 - gap) <= FACING_PARALLEL_DEG and earlier_facing == facing:
+                sentence += f" It stands parallel to sofa {earlier}."
+                break
+        seen.append((number, angle, facing))
+        out[piece["tag"]] = sentence
+    return out
+
+
 def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0, facts: dict | None = None) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape. `facts` (from
@@ -4258,6 +4365,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
     shape when not given."""
     if facts is None:
         facts = shape_facts(attempt, shapes, aspect)
+    facing = facing_sentences(attempt, shapes, aspect) if DRAW_FACING else {}
     pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
     section = finish_section_name(attempt.items)
     paragraphs = []
@@ -4279,6 +4387,8 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
         if not DRAW_WALL_WORDS:
             # no wall or room-side words at all: the shape, its black line and its label only
             text += SHAPE_ONLY_BACK
+            if piece["tag"] in facing:
+                text += " " + facing[piece["tag"]]
             if shape["kind"] in SHAPE_ONLY_TEXT:
                 text += f" {SHAPE_ONLY_TEXT[shape['kind']]} {SHAPE_REBUILD_TEXT[shape['kind']]}"
             if shape["kind"] in ("L", "corner", "curved"):
@@ -4288,12 +4398,17 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
             paragraphs.append(text)
             continue
         if shape["kind"] == "curved":
-            text += ". " + curved_sofa_sentence(facts.get(piece["tag"]) or curved_facts(shape, aspect))
+            text += "."
+            if piece["tag"] in facing:
+                text += " " + facing[piece["tag"]]
+            text += " " + curved_sofa_sentence(facts.get(piece["tag"]) or curved_facts(shape, aspect))
             text += " " + SHAPE_TYPE_LINES["curved"]
             paragraphs.append(text)
             continue
         f = facts.get(piece["tag"]) or {}
         text += rect_back_words(f.get("wall") if shape["kind"] == "rect" else None)
+        if piece["tag"] in facing:
+            text += " " + facing[piece["tag"]]
         if shape["kind"] == "L":
             text += " " + l_lounge_sentence(f or two_part_facts(shape, aspect))
             text += (
@@ -4330,6 +4445,8 @@ def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
         return one if count[kind] == 1 else many
 
     parts = [f"the camera has not moved; every sofa is exactly where its {thing} is and keeps the design of its own photograph;"]
+    if DRAW_FACING:
+        parts.append("every sofa faces the direction stated for it;")
     if count["L"]:
         parts.append(which("L", "the L's lounge is at the stated end;", "every L's lounge is at the stated end;"))
     if count["corner"]:
@@ -8074,6 +8191,47 @@ def can_view_render_debug(user: User, render: Render, db: Session) -> bool:
     return maker.id == user.id and shop_feature(db.query(Shop).filter(Shop.id == user.shop_id).first(), "show_debug")
 
 
+def sent_input_images(images: list | None) -> list[dict]:
+    """The images a render sent to the image model, in the order sent, from
+    its debug row (the floor plan PNG went to the placement writer only, so
+    it is left out). Each with its label ("Image 1 · guide") and its file on
+    disk, or None when that file no longer exists."""
+    root = DATA_ROOT.resolve()
+    out = []
+    for image in images or []:
+        role = image.get("role") or "image"
+        if role == "plan":
+            continue
+        url = image.get("url") or ""
+        path = None
+        if url.startswith("/media/"):
+            candidate = (DATA_ROOT / url[len("/media/"):]).resolve()
+            inside = candidate.is_relative_to(root) and not candidate.relative_to(root).as_posix().lower().startswith("studio")
+            if inside and candidate.is_file():
+                path = candidate
+        label = f"Image {len(out) + 1} · {role}"
+        if image.get("padded") and role != "guide":
+            label += " (shown without its grey border)"  # only the guide is saved as sent, border and all
+        out.append({"label": label, "path": path})
+    return out
+
+
+@app.get("/api/debug/generation/{render_id}/input/{index}")
+def api_debug_generation_input(
+    render_id: int, index: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Response:
+    """One image a render sent to the image model, for the Debug panel: same
+    access rule as the render's debug data (can_view_render_debug)."""
+    render = db.query(Render).filter(Render.id == render_id).first()
+    if render is None or not can_view_render_debug(user, render, db):
+        raise HTTPException(status_code=404)
+    debug_row = db.query(GenerationDebug).filter(GenerationDebug.render_id == render_id).first()
+    inputs = sent_input_images(debug_row.images if debug_row else None)
+    if not 0 <= index < len(inputs) or inputs[index]["path"] is None:
+        raise HTTPException(status_code=404, detail="image not saved")
+    return FileResponse(str(inputs[index]["path"]), headers={"Cache-Control": "private, max-age=3600"})
+
+
 @app.get("/api/debug/generation/{render_id}")
 def api_debug_generation(render_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     render = db.query(Render).filter(Render.id == render_id).first()
@@ -8106,6 +8264,11 @@ def api_debug_generation(render_id: int, user: User = Depends(get_current_user),
             "usage": debug_row.usage,
             "cost": render_cost(debug_row.usage),  # tokens and estimated $ / ₹ (IMAGE_PRICES_PER_M)
             "images": debug_row.images,
+            # every image sent to the image model, in order; url None: the file is no longer on disk
+            "inputs": [
+                {"label": entry["label"], "url": f"/api/debug/generation/{render.id}/input/{i}" if entry["path"] else None}
+                for i, entry in enumerate(sent_input_images(debug_row.images))
+            ],
             "placement_writer": writer_log,
             "gap_writer": gap_writer,
             "fix": debug_row.fix,

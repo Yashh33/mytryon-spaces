@@ -4,8 +4,9 @@ import { api } from "../api.js";
 const COPIED_MS = 2000;
 
 /** The result page's Debug panel (shops with show_debug on, and the
- * superadmin): the exact prompt sent to the image model for one render, word
- * for word, with a Copy button, and one line of the run's figures. */
+ * superadmin): every image sent to the image model for one render, and the
+ * exact prompt, word for word, with a Copy button, and one line of the run's
+ * figures. */
 export function DebugPanel({ renderId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -50,7 +51,7 @@ export function DebugPanel({ renderId }) {
   if (error) return <div className="debug-panel muted">{error}</div>;
   if (!data) return <div className="debug-panel muted">Loading…</div>;
 
-  // the Draw-on-photo experiment variant that made it ("walls off · open floor off"), when recorded
+  // the Draw-on-photo experiment switches that made it ("walls off · open floor off · facing on"), when recorded
   const variant = (data.images || []).find((img) => img.role === "guide")?.variant;
   const figures = [data.model, data.quality, data.size, data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null, variant]
     .filter(Boolean)
@@ -66,6 +67,16 @@ export function DebugPanel({ renderId }) {
 
   return (
     <div className="debug-panel">
+      {data.inputs?.length > 0 && (
+        <>
+          <div className="debug-label" style={{ marginTop: 0 }}>Images sent to the image model</div>
+          <div className="debug-images" style={{ marginBottom: 12 }}>
+            {data.inputs.map((input, i) => (
+              <InputImage key={i} input={input} />
+            ))}
+          </div>
+        </>
+      )}
       <div className="debug-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 0 }}>
         <span>Full prompt sent to the image model</span>
         <button type="button" className="link-btn" onClick={copyPrompt}>
@@ -76,5 +87,24 @@ export function DebugPanel({ renderId }) {
       <div className="debug-facts muted">{costLine}</div>
       <pre className="debug-pre debug-prompt">{data.prompt}</pre>
     </div>
+  );
+}
+
+/** One image exactly as sent ("Image 1 · guide"); tap to open it full size
+ * in a new tab. Served by the debug route, so only those who may see this
+ * render's debug data can open it. */
+function InputImage({ input }) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <figure>
+      {input.url && !broken ? (
+        <a href={input.url} target="_blank" rel="noopener noreferrer">
+          <img src={input.url} alt={input.label} loading="lazy" onError={() => setBroken(true)} />
+        </a>
+      ) : (
+        <div className="img-missing">image not saved</div>
+      )}
+      <figcaption>{input.label}</figcaption>
+    </figure>
   );
 }

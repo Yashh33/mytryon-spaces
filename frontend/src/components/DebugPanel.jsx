@@ -50,7 +50,9 @@ export function DebugPanel({ renderId }) {
   if (error) return <div className="debug-panel muted">{error}</div>;
   if (!data) return <div className="debug-panel muted">Loading…</div>;
 
-  const figures = [data.model, data.quality, data.size, data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null]
+  // the Draw-on-photo experiment variant that made it ("walls off · open floor off"), when recorded
+  const variant = (data.images || []).find((img) => img.role === "guide")?.variant;
+  const figures = [data.model, data.quality, data.size, data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null, variant]
     .filter(Boolean)
     .join(" · ");
   // tokens and estimated cost, worked out by the server from the usage saved for this render

@@ -57,6 +57,22 @@ IMAGE_QUALITY=high
 ```
 To switch back to GPT Image 2: `IMAGE_MODEL=gpt-image-2` and `IMAGE_QUALITY=medium`, then restart the backend.
 
+Draw on photo prompt experiment (same places; restart the backend after changing `.env`):
+```
+# off (default): piece sentences say nothing about walls, each sofa goes only by its own shape and black line; on: the old wall wording
+DRAW_WALL_WORDS=off
+# off (default): no "OPEN FLOOR AROUND EACH SOFA" section and no gap writer call; on: both
+DRAW_OPEN_FLOOR=off
+```
+
+| Variant | DRAW_WALL_WORDS | DRAW_OPEN_FLOOR |
+|---|---|---|
+| A | off | off |
+| B | off | on |
+| Old prompt (word for word) | on | on |
+
+The Debug panel's info line shows which variant made each render (e.g. "walls off · open floor off").
+
 ## Deploying (done by a person, never by Claude Code)
 - If the task changed the database: run `python scripts/backup_db.py` first.
 - Then:

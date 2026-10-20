@@ -76,6 +76,18 @@ for d in (ROOMS_DIR, ITEMS_DIR, RENDERS_DIR, FABRICS_DIR):
 IMAGE_MODEL = (os.environ.get("IMAGE_MODEL") or "").strip() or "gpt-image-2.5-flare"
 IMAGE_QUALITY = (os.environ.get("IMAGE_QUALITY") or "").strip().lower() or "high"
 IMAGE_QUALITY_CHOICES = ("low", "medium", "high", "xhigh", "max", "auto")
+# Experiment (Draw on photo only), from the environment; restart the backend after a change.
+#   DRAW_WALL_WORDS  "off" (default): the piece sentences say nothing about walls — each sofa goes
+#                    only by its own shape and black line; "on": today's wall wording.
+#   DRAW_OPEN_FLOOR  "off" (default): no OPEN FLOOR section and no gap writer call; "on": both.
+# Variant A = off/off, Variant B = off/on, the old prompt = on/on (word for word).
+DRAW_WALL_WORDS = (os.environ.get("DRAW_WALL_WORDS") or "off").strip().lower() == "on"
+DRAW_OPEN_FLOOR = (os.environ.get("DRAW_OPEN_FLOOR") or "off").strip().lower() == "on"
+
+
+def draw_variant_label() -> str:
+    """For the Debug panel: "walls off · open floor off" etc."""
+    return f"walls {'on' if DRAW_WALL_WORDS else 'off'} · open floor {'on' if DRAW_OPEN_FLOOR else 'off'}"
 
 # ---------------------------------------------------------------------------
 # GENERATION PROMPT — the live prompt lives in the `settings` table (key
@@ -4202,6 +4214,42 @@ SHAPE_TYPE_LINES = {
 }
 
 
+# DRAW_WALL_WORDS off: each sofa described only by its own shape, black line(s) and label
+SHAPE_ONLY_BACK = ", with its back along the thick black line, facing away from that line."
+SHAPE_ONLY_TEXT = {
+    "L": (
+        "Its long part has its backrest along the thick black line. The part of the shape marked LOUNGE is an open "
+        "chaise lounge with no backrest and no arm at its tip. The sofa has one arm only, at the far end of the long "
+        "part, away from the lounge. Do not swap these ends."
+    ),
+    "corner": (
+        "It is a corner sofa with two seating parts that meet at the corner, each with a full backrest along its own "
+        "black line. There is no open chaise or lounge: every seat has a backrest. Arms only at the two outer ends."
+    ),
+    "curved": (
+        "Its curved back follows the thick black line; both ends curve toward the open side of the shape, so the seats "
+        "face the inside of the curve. It is one continuous curved sofa: no corner, no straight sections, no chaise."
+    ),
+}
+# the "If the photograph shows a straight sofa ..." lines, as today
+SHAPE_REBUILD_TEXT = {
+    "L": "If the photograph shows a straight sofa, rebuild it as this L in the same design.",
+    "corner": (
+        "If the photograph shows a straight sofa, rebuild it as this corner sofa in the same design: same cushions, "
+        "arms, legs, material and colour."
+    ),
+    "curved": (
+        "If the photograph shows a straight sofa, rebuild it as this curved sofa in the same design: same cushions, "
+        "arms, legs, material and colour."
+    ),
+}
+# DRAW_WALL_WORDS off: after "Add the furniture into the room photograph (Image 1), on the coloured guide shapes."
+ADD_FURNITURE_LINE = "Add the furniture into the room photograph (Image 1), on the coloured guide shapes."
+SHAPES_ONLY_SOURCE_LINE = (
+    "Where each sofa stands and which way it faces come only from its coloured shape and black line in Image 1."
+)
+
+
 def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0, facts: dict | None = None) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape. `facts` (from
@@ -4228,6 +4276,17 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
             f"{piece['tag']} ({colour.lower()} shape): one {shape_piece_name(item, piece['label'], shape['kind'])} "
             f"{source}. Build it exactly on the {colour.lower()} shape, covering the same floor area, at the same size"
         )
+        if not DRAW_WALL_WORDS:
+            # no wall or room-side words at all: the shape, its black line and its label only
+            text += SHAPE_ONLY_BACK
+            if shape["kind"] in SHAPE_ONLY_TEXT:
+                text += f" {SHAPE_ONLY_TEXT[shape['kind']]} {SHAPE_REBUILD_TEXT[shape['kind']]}"
+            if shape["kind"] in ("L", "corner", "curved"):
+                text += " " + SHAPE_TYPE_LINES[shape["kind"]]
+            elif item.category in ("Sofa", "Chair"):  # a straight sofa or an armchair
+                text += " " + SHAPE_TYPE_LINES["rect"]
+            paragraphs.append(text)
+            continue
         if shape["kind"] == "curved":
             text += ". " + curved_sofa_sentence(facts.get(piece["tag"]) or curved_facts(shape, aspect))
             text += " " + SHAPE_TYPE_LINES["curved"]
@@ -4303,6 +4362,8 @@ def build_shapes_prompt(
     Image 1 and the removal sentence speak of boxes (swapped here, so the
     saved prompt is never changed)."""
     filled = template.replace(SHAPES_TOKEN, build_shapes_text(attempt, shapes, aspect, facts))
+    if not DRAW_WALL_WORDS:
+        filled = filled.replace(ADD_FURNITURE_LINE, f"{ADD_FURNITURE_LINE} {SHAPES_ONLY_SOURCE_LINE}", 1)
     if guide_style == "boxes":
         filled = filled.replace(FLAT_REMOVAL_WORDS, BOXES_REMOVAL_WORDS)
     thing = "box" if guide_style == "boxes" else "shape"
@@ -4544,6 +4605,14 @@ CHAISE_TIP_RE = re.compile(r"\b(?:(?:the|its|their)\s+)?(?:chaise|lounge)(?:['�
 CHAISE_WORD_RE = re.compile(r"\s*\b(chaise|lounge)s?\b", re.IGNORECASE)
 
 
+# DRAW_WALL_WORDS off (with DRAW_OPEN_FLOOR on): the open-floor sentences name no wall by its side
+GAP_NO_WALL_SIDES = (
+    "In the open-floor sentences, never name a wall by its side: do not write \"left wall\", \"right wall\", "
+    "\"back wall\", \"right-side wall\" or similar. Use only landmarks you can see — windows, doors, openings, "
+    "pillars, panels, other sofas."
+)
+
+
 def clean_gap_line(line: str, kind: str | None) -> str:
     """A gap writer line ("TAG: sentence") for a piece that is not an L-shape
     loses its chaise / lounge words: "chaise tip" / "lounge tip" becomes "end
@@ -4593,6 +4662,8 @@ async def resolve_gap_writer(
     order = {(p["item"].id, p["sub_index"]): p["tag"] for p in attempt_pieces(attempt)}
     tags = [order[(s["item_id"], s["sub_index"])] for s in shapes]
     prompt = get_gap_writer_prompt(db)
+    if not DRAW_WALL_WORDS:
+        prompt += "\n\n" + GAP_NO_WALL_SIDES
     model = get_active_vision_model(db)
     key = gap_writer_key(attempt.room, shapes, tags, padded, prompt, model, guide_style)
     info = {"key": key, "model": model, "lines": [], "output": None, "usage": None, "elapsed_s": None, "reason": None}
@@ -5077,13 +5148,16 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 "guide_style": guide_style,
             }
             # the gap writer reads this same guide image; the client shows "Preparing layout…"
-            JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
-            gap_info = await resolve_gap_writer(db, attempt, built["jpeg"], shapes, photo_box is not None, guide_style)
+            if DRAW_OPEN_FLOOR:
+                JOBS[job_id] = {"status": "processing", "stage": "preparing_layout"}
+                gap_info = await resolve_gap_writer(db, attempt, built["jpeg"], shapes, photo_box is not None, guide_style)
             # each shape's wall and lounge direction: the gap writer's, or worked out from the shape
-            facts_used = shape_facts(attempt, shapes, guide.width / guide.height, gap_info.get("facts"))
+            # (used only with DRAW_WALL_WORDS on)
+            facts_used = shape_facts(attempt, shapes, guide.width / guide.height, (gap_info or {}).get("facts"))
             room_debug["shape_facts"] = [{"tag": tag, **f} for tag, f in facts_used.items()]  # for the Debug panel
             look_used = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
             room_debug["look"] = {"key": look_used, "text": SHAPES_ROOM_TREATMENT_TEXT[look_used]}
+            room_debug["variant"] = draw_variant_label()  # which experiment variant made this render
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:

@@ -1699,7 +1699,7 @@ def compute_sub_pieces(item: Item) -> list[dict]:
     return [{"sub_index": 0, "label": item.type, "shape": item.shape, "width_ft": item.width_ft}]
 
 
-def build_image_manifest(items: list[Item], feet: bool = False, room_padded: bool = False) -> str:
+def build_image_manifest(items: list[Item], feet: bool = False, room_padded: bool = False, product_note: str | None = None) -> str:
     """One line per image, in the exact order sent to the model — the whole
     point being that the numbering here always matches reality: the clean
     room photo, then each product photo in the order pieces were added.
@@ -1715,7 +1715,7 @@ def build_image_manifest(items: list[Item], feet: bool = False, room_padded: boo
         if earlier is not None:
             lines.append(
                 f"Image {n} is the same showroom photograph as Image {earlier}, used for another "
-                "piece of the same design."
+                "piece of the same design." + (f" {product_note}" if product_note else "")
             )
             n += 1
             continue
@@ -1731,12 +1731,14 @@ def build_image_manifest(items: list[Item], feet: bool = False, room_padded: boo
                 "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
                 f"legs and stitching. Its material and colour come from the {finish_section_name(items)} section, not "
                 f"from this photograph. {follows}; the rest of the design must match this photograph."
+                + (f" {product_note}" if product_note else "")
             )
         else:
             lines.append(
                 f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
                 "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
                 f"legs, stitching, material, colour and texture. {follows}; everything else must match this photograph."
+                + (f" {product_note}" if product_note else "")
             )
         n += 1
     numbers = fabric_image_numbers(items)
@@ -2678,14 +2680,18 @@ def build_prompt(
     feet: bool = False,
     room_padded: bool = False,
     look_text: str | None = None,
+    decor_override: str | None = None,
+    product_note: str | None = None,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
     replaces the generated facts in {{PLACEMENT}}. `feet` is the
     feet_in_prompt setting. `room_padded`: the room photo is being sent with
     grey borders (see pad_to_output_ratio). `look_text`, when given, is used
-    instead of the look's ROOM_TREATMENT_TEXT (Draw on photo only)."""
+    instead of the look's ROOM_TREATMENT_TEXT, `decor_override` instead of
+    decor_text(), and `product_note` ends every product image line (Draw on
+    photo only; the floor plan passes none of them)."""
     pieces = build_pieces_text(items, feet)
-    image_manifest = build_image_manifest(items, feet, room_padded)
+    image_manifest = build_image_manifest(items, feet, room_padded, product_note)
     config_notes = build_config_notes(items, feet)
     # with the writer's text, ROOM LAYOUT keeps only the shape and camera lines
     room_layout_text = build_room_layout_text(room.layout_json, features=placement_text is None)
@@ -2695,7 +2701,7 @@ def build_prompt(
         look_text if look_text is not None else ROOM_TREATMENT_TEXT.get(room_treatment, ROOM_TREATMENT_TEXT[DEFAULT_ROOM_TREATMENT])
     )
     lighting_text = LIGHTING_TEXT.get(lighting, LIGHTING_TEXT[DEFAULT_LIGHTING])
-    decor = decor_text(room_treatment)
+    decor = decor_override if decor_override is not None else decor_text(room_treatment)
     if "{{DECOR}}" not in template:
         # older hand-edited template without the slot: the decor rule follows
         # the look text (keep/minimal templates carry their own no-decor
@@ -3330,15 +3336,16 @@ SHAPES_TOKEN = "{{SHAPES}}"
 # the gap writer's section (see GAP WRITER); empty when it failed or timed out
 OPEN_FLOOR_TOKEN = "{{OPEN_FLOOR}}"
 OPEN_FLOOR_HEADING = "OPEN FLOOR AROUND EACH SOFA:"
-SHAPES_FINAL_CHECK = (
-    "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
-    "both parts and no chaise; every curved sofa follows its curve; every sofa has the stated number of seats; no "
-    "shape, label or line remains."
-)
+# the Draw-on-photo Final check line is built at render time from the pieces present (shapes_final_check)
+FINAL_CHECK_TOKEN = "{{FINAL_CHECK}}"
+SHAPES_FINAL_CHECK = FINAL_CHECK_TOKEN
 # Final check lines the Draw-on-photo prompt had before; in a saved prompt
 # that was edited (so not moved to the new default), startup replaces just
 # that line with SHAPES_FINAL_CHECK and leaves the rest as it is.
 PREVIOUS_SHAPES_FINAL_CHECKS = [
+    "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
+    "both parts and no chaise; every curved sofa follows its curve; every sofa has the stated number of seats; no "
+    "shape, label or line remains.",
     "Final check: the camera has not moved; every L's lounge is at the stated end; every corner sofa has a backrest on "
     "both parts and no chaise; every sofa has the stated number of seats; no shape, label or line remains.",
     "Final check: the camera has not moved; every L's lounge is at the stated end; every sofa has the stated number "
@@ -3388,14 +3395,48 @@ KEEP_STRUCTURE_SENTENCE = (
     "Keep the room's structure exactly the same: the walls, doorways, windows, floor area, ceiling and room "
     "proportions stay precisely as they appear. Only the finishes and decor described below may change."
 )
-# for every look: added to the final check line
-SHAPES_FINAL_CHECK_PLACE = "every sofa is exactly where its {thing} is and keeps the design of its own photograph"
 # the look texts as Draw on photo uses them: finishes only — no feature wall,
 # statement chandelier or artwork (they rebuilt walls and moved sofas)
 LOOK_FEATURE_WALL_OPTION = (
     "a feature wall with panelling or stone/marble texture on a wall that is free of furniture and windows, if one "
     "is available; "
 )
+RECESSED_PANELS_SENTENCE = " A wall with five recessed panels must still have five recessed panels."
+# the only addition Draw on photo allows, in every look
+SHAPES_ADDITION_RULE = (
+    "A plain rug under the seating is the only addition allowed besides the listed sofas. No coffee table, no side "
+    "tables."
+)
+# {{DECOR}} for Draw on photo (the floor plan keeps decor_text): "keep" and
+# "minimal" add nothing; the styled looks keep their decor placement rules,
+# with no item named
+SHAPES_NO_DECOR_TEXT = (
+    "Add no decorative objects of any kind. No plants, no artwork, no vases, no books, no trays, no lamps, no "
+    "ornaments. The room must otherwise contain only the furniture pieces listed below."
+)
+SHAPES_LOOK_DECOR_TEXT = (
+    "Decor is optional and secondary. Add at most three decorative items in total, and only where there is clearly "
+    "free space. Decor goes only on walls and in corners that have no furniture. Never put any decor in the corner a "
+    "sofa occupies, between a sofa and a wall or window, or within about an arm's length of any sofa. Never put decor "
+    "in front of a window or doorway, or in the floor area between the furniture and the camera. Leave the space "
+    "around the furniture clear so it stands on its own."
+)
+SHAPES_NO_EXTRA_FURNITURE_TEXT = (
+    "Never add any furniture or appliance that is not in the piece list: no TV, TV unit or console, shelves, "
+    "cabinets, side tables, extra chairs or extra sofas."
+)
+# added to every product image line of the Draw-on-photo image list
+SHAPES_PRODUCT_PHOTO_NOTE = (
+    "If this photograph also shows tables, rugs, cushions, lamps or other furniture, ignore them: take only the sofa "
+    "from it."
+)
+
+
+def shapes_decor_text(room_treatment: str) -> str:
+    look = SHAPES_LOOK_DECOR_TEXT if room_treatment in ("warm", "luxury") else SHAPES_NO_DECOR_TEXT
+    return f"{look} {SHAPES_NO_EXTRA_FURNITURE_TEXT} {SHAPES_ADDITION_RULE}"
+
+
 SHAPES_ROOM_TREATMENT_TEXT = {
     "keep": ROOM_TREATMENT_TEXT["keep"],
     "warm": _ROOM_TREATMENT_BASE + (
@@ -3406,30 +3447,14 @@ SHAPES_ROOM_TREATMENT_TEXT = {
         "is better than crowded. Cosy, inviting, magazine-quality."
     ),
     "luxury": (
-        "Keeping the walls, windows, doors, flooring area, ceiling and room proportions exactly as photographed, style "
-        "the room as a high-end luxury interior by changing only finishes: deep rich wall tones, a premium floor "
-        "finish, warm cove lighting with hidden LED strips, elegant floor-length drapes on the existing windows, a "
-        "plush large rug and a marble or stone coffee table. At most one indoor plant, only in an empty corner. "
-        "Dramatic, premium, hotel-like."
+        "Style the room as a high-end luxury interior of your own design: choose the wall colours, floor finish, "
+        "lighting, curtains, rug and decor that make it look premium and inviting. Change only finishes and decor, "
+        "never the room's structure."
     ),
-    "minimal": ROOM_TREATMENT_TEXT["minimal"],
+    "minimal": ROOM_TREATMENT_TEXT["minimal"].replace(
+        "at most one plain rug and one simple low coffee table, no artwork", "at most one plain rug, no coffee table, no artwork"
+    ),
 }
-
-
-def _add_to_final_check(text: str, words: str) -> str:
-    """`words` added to the prompt's "Final check:" line (after "the camera has
-    not moved;" when it says so); unchanged if there is no such line."""
-    start = text.find("Final check:")
-    if start < 0:
-        return text
-    end = text.find("\n", start)
-    end = len(text) if end < 0 else end
-    line = text[start:end]
-    if words in line:
-        return text
-    anchor = "the camera has not moved;" if "the camera has not moved;" in line else "Final check:"
-    cut = start + line.index(anchor) + len(anchor)
-    return text[:cut] + f" {words};" + text[cut:]
 
 
 def get_guide_style(db: Session) -> str:
@@ -3467,7 +3492,8 @@ DEFAULT_SHAPES_GENERATION_PROMPT = "\n\n".join(
         "tint, outline or line may remain anywhere. The floor where the shapes were must look clean and natural.",
         _prompt_section("CAMERA —", "ROOM LAYOUT"),
         _prompt_section("Keep everything else exactly the same.", "A sofa whose back is against a wall"),
-        _prompt_section("Clear away people, tools, ladders", "{{ROOM_TREATMENT}}"),
+        # Draw on photo leaves out the floor-plan prompt's room-specific "five recessed panels" sentence
+        _prompt_section("Clear away people, tools, ladders", "{{ROOM_TREATMENT}}").replace(RECESSED_PANELS_SENTENCE, ""),
         "{{ROOM_TREATMENT}}",
         "{{DECOR}}",
         "{{LIGHTING}}",
@@ -3488,6 +3514,7 @@ SUPERSEDED_SHAPES_PROMPT_HASHES = {
     "4c64965fad27c36bff7d05dd0b220f1696f3de221d7084fd466d00ef9362dd2f",  # before {{OPEN_FLOOR}} (the gap writer's section)
     "fd3e79f4c610ad58d5ac5e933a54534ae3399b75ef1489039b60f61e55577009",  # before the corner sofa in the final check
     "c4fd70c38c1744fa5475425f58e4ca1a550e0afea27191f8502e1cdce048b32c",  # before curved sofas in the final check
+    "5ebd687b93ae0dfe6a72883279e3ab6635250f0559c6d057e193b8c758544273",  # before {{FINAL_CHECK}} and without the recessed panels sentence
 }
 
 
@@ -4226,6 +4253,37 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
     return "\n\n".join(paragraphs)
 
 
+def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
+    """The Final check line for the pieces actually drawn: always the camera
+    and the place / design of every sofa; an L's lounge, a corner sofa's two
+    backrests, a curved sofa's curve and a straight sofa's seat count only
+    when there is such a piece ("the ..." for one, "every ..." for more);
+    always last, nothing of the guide left."""
+    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
+    count = {"L": 0, "corner": 0, "curved": 0, "straight": 0}
+    for shape in shapes:
+        piece = pieces.get((shape["item_id"], shape["sub_index"]))
+        if shape["kind"] in ("L", "corner", "curved"):
+            count[shape["kind"]] += 1
+        elif piece and sofa_seat_count(piece["item"].category, piece["label"]) is not None:
+            count["straight"] += 1
+
+    def which(kind: str, one: str, many: str) -> str:
+        return one if count[kind] == 1 else many
+
+    parts = [f"the camera has not moved; every sofa is exactly where its {thing} is and keeps the design of its own photograph;"]
+    if count["L"]:
+        parts.append(which("L", "the L's lounge is at the stated end;", "every L's lounge is at the stated end;"))
+    if count["corner"]:
+        parts.append(which("corner", "the corner sofa has a backrest on both parts and no chaise;", "every corner sofa has a backrest on both parts and no chaise;"))
+    if count["curved"]:
+        parts.append(which("curved", "the curved sofa follows its curve;", "every curved sofa follows its curve;"))
+    if count["straight"]:
+        parts.append(which("straight", "the straight sofa has the stated number of seats;", "every straight sofa has the stated number of seats;"))
+    parts.append("no shape, label or line remains.")
+    return "Final check: " + " ".join(parts)
+
+
 def build_shapes_prompt(
     template: str,
     attempt: Attempt,
@@ -4254,7 +4312,13 @@ def build_shapes_prompt(
         # the look restyles the room: the furniture and the room's structure must not change with it
         filled = filled.replace(KEEP_EVERYTHING_SENTENCE, KEEP_STRUCTURE_SENTENCE)
         filled = filled.replace("{{ROOM_TREATMENT}}", SHAPES_STYLING_RULES.format(thing=thing) + "\n\n{{ROOM_TREATMENT}}", 1)
-    filled = _add_to_final_check(filled, SHAPES_FINAL_CHECK_PLACE.format(thing=thing))
+    final_check = shapes_final_check(attempt, shapes, thing)
+    if FINAL_CHECK_TOKEN in filled:
+        filled = filled.replace(FINAL_CHECK_TOKEN, final_check)
+    elif re.search(r"^Final check:.*$", filled, flags=re.MULTILINE):
+        filled = re.sub(r"^Final check:.*$", lambda _m: final_check, filled, count=1, flags=re.MULTILINE)
+    else:
+        filled = filled.rstrip() + "\n\n" + final_check + "\n"
     section = OPEN_FLOOR_HEADING + "\n" + "\n".join(open_floor) if open_floor else ""
     if OPEN_FLOOR_TOKEN in filled:
         filled = filled.replace(OPEN_FLOOR_TOKEN, section)
@@ -4276,6 +4340,8 @@ def build_shapes_prompt(
         feet,
         room_padded,
         look_text=SHAPES_ROOM_TREATMENT_TEXT[look],
+        decor_override=shapes_decor_text(look),
+        product_note=SHAPES_PRODUCT_PHOTO_NOTE,
     )
     # Image 1 is the guide image, not the bare room photo
     return prompt.replace("Image 1 is a room.", GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE, 1)

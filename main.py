@@ -84,26 +84,40 @@ IMAGE_QUALITY_CHOICES = ("low", "medium", "high", "xhigh", "max", "auto")
 #                    way its seats face in the photo, worked out from its shape (facing_sentences).
 #   DRAW_ARROWS      "off" (default): nothing changes; "on": a white arrow on each guide box pointing
 #                    the way its seats face (draw_facing_arrows), and the prompt says so.
-# The original prompt = on/on/off/off (word for word); see CLAUDE.md "Experiments (Draw on photo)".
+#   DRAW_SEAT_LINES  "off" (default): nothing changes; "on": thin dashed lines on each box dividing it
+#                    into its seats (draw_seat_lines), and the prompt says so.
+#   DRAW_CAMERA_FIRST "off" (default): nothing changes; "on": the CAMERA paragraphs open the prompt, and
+#                    a styled look says to edit this photograph, not make a new view.
+#   DRAW_COVERED_LAYOUT "off" (default): nothing changes; "on": covered panels / frames / recesses keep
+#                    their exact number, size and position (and a styled look keeps their layout).
+# The original prompt = on/on/off/off/off/off/off (word for word); see CLAUDE.md "Experiments (Draw on photo)".
 DRAW_WALL_WORDS = (os.environ.get("DRAW_WALL_WORDS") or "off").strip().lower() == "on"
 DRAW_OPEN_FLOOR = (os.environ.get("DRAW_OPEN_FLOOR") or "off").strip().lower() == "on"
 DRAW_FACING = (os.environ.get("DRAW_FACING") or "off").strip().lower() == "on"
 DRAW_ARROWS = (os.environ.get("DRAW_ARROWS") or "off").strip().lower() == "on"
+DRAW_SEAT_LINES = (os.environ.get("DRAW_SEAT_LINES") or "off").strip().lower() == "on"
+DRAW_CAMERA_FIRST = (os.environ.get("DRAW_CAMERA_FIRST") or "off").strip().lower() == "on"
+DRAW_COVERED_LAYOUT = (os.environ.get("DRAW_COVERED_LAYOUT") or "off").strip().lower() == "on"
 
 
 def draw_variant_label() -> str:
-    """For the Debug panel: "walls off · open floor off · facing on · arrows on" etc."""
+    """For the Debug panel: "walls off · open floor off · facing on · arrows on · seat lines on ..." etc."""
     on = lambda flag: "on" if flag else "off"  # noqa: E731
     return (
         f"walls {on(DRAW_WALL_WORDS)} · open floor {on(DRAW_OPEN_FLOOR)} · facing {on(DRAW_FACING)} · "
-        f"arrows {on(DRAW_ARROWS)}"
+        f"arrows {on(DRAW_ARROWS)} · seat lines {on(DRAW_SEAT_LINES)} · camera first {on(DRAW_CAMERA_FIRST)} · "
+        f"covered layout {on(DRAW_COVERED_LAYOUT)}"
     )
 
 
 def draw_is_fallback() -> bool:
-    """The original (safe fallback) switches: walls on, open floor on, facing off, arrows off.
+    """The original (safe fallback) switches: walls on, open floor on, everything else off.
     S24's back-cushion sentences are added in every other config."""
-    return DRAW_WALL_WORDS and DRAW_OPEN_FLOOR and not DRAW_FACING and not DRAW_ARROWS
+    return (
+        DRAW_WALL_WORDS
+        and DRAW_OPEN_FLOOR
+        and not (DRAW_FACING or DRAW_ARROWS or DRAW_SEAT_LINES or DRAW_CAMERA_FIRST or DRAW_COVERED_LAYOUT)
+    )
 
 # ---------------------------------------------------------------------------
 # GENERATION PROMPT — the live prompt lives in the `settings` table (key
@@ -3417,6 +3431,48 @@ BOXES_ARROWS_LINE = "The white arrow on each box points the way its seats face."
 FLAT_ARROWS_LINE = "The white arrow on each shape points the way its seats face."
 BOXES_ARROWS_REMOVAL_WORDS = "remove every coloured box, label, arrow and black line completely"
 FLAT_ARROWS_REMOVAL_WORDS = "remove all coloured guide shapes, labels, arrows and black lines completely"
+# DRAW_SEAT_LINES on (and a piece with seat sections drawn): after the sentence about Image 1 (and the arrows)
+SEAT_LINES_LINE = "The thin dashed lines on a box divide it into its seats: one seat per section."
+FLAT_SEAT_LINES_LINE = "The thin dashed lines on a shape divide it into its seats: one seat per section."
+SEAT_LINES_CHECK = "every seat sits in its own section; no seams or gaps where the dashed lines were;"
+
+
+def removal_words(guide_style: str, arrows: bool, dashed: bool) -> str:
+    """The removal sentence's words for what the guide image shows: "remove
+    every coloured box, label, arrow, dashed line and black line completely"."""
+    extras = (["arrow"] if arrows else []) + (["dashed line"] if dashed else [])
+    if guide_style == "boxes":
+        return "remove every coloured box, " + ", ".join(["label", *extras]) + " and black line completely"
+    return "remove all coloured guide shapes, " + ", ".join(["labels", *(e + "s" for e in extras)]) + " and black lines completely"
+
+
+# DRAW_CAMERA_FIRST on: the CAMERA paragraph and the one after it open the prompt
+CAMERA_PARAGRAPH_START = "CAMERA — this requirement overrides every other instruction"
+CAMERA_NOTE_START = "Any description below of where the camera stands"
+# DRAW_CAMERA_FIRST on, any look but "keep": starts the look's paragraph
+RESTYLE_BY_EDITING = (
+    "Restyle by editing this photograph, not by creating a new view of the room: the ceiling, beams, windows, doors "
+    "and openings stay exactly where they are in Image 1."
+)
+# DRAW_COVERED_LAYOUT on: after the covered-feature sentence, and (any look but "keep") ending the look's paragraph
+COVERED_DONE_WORDS = "render that feature complete and finished — as it will look once the work is done."
+COVERED_LAYOUT_SENTENCE = (
+    "Rebuild exactly the same number, size and position of panels, frames, recesses or niches as their outlines show "
+    "in the photo. Never turn a covered frame or panel into a doorway or opening."
+)
+COVERED_LAYOUT_STYLING = "Covered panels, frames and recesses keep their exact layout; styling may change only their colour and finish."
+
+
+def camera_first(prompt: str) -> str:
+    """DRAW_CAMERA_FIRST: the CAMERA paragraph, and the "Any description
+    below of where the camera stands ..." paragraph after it, moved to the very
+    top (not repeated where they were). Unchanged if there is none."""
+    paragraphs = prompt.split("\n\n")
+    at = next((i for i, para in enumerate(paragraphs) if para.startswith(CAMERA_PARAGRAPH_START)), None)
+    if at is None:
+        return prompt
+    take = [at] + ([at + 1] if at + 1 < len(paragraphs) and paragraphs[at + 1].startswith(CAMERA_NOTE_START) else [])
+    return "\n\n".join([paragraphs[i] for i in take] + [para for i, para in enumerate(paragraphs) if i not in take])
 
 
 # Draw on photo, when the look restyles the room (any look but "keep"): built
@@ -3711,6 +3767,22 @@ BACK_CUSHION_SENTENCE = (
 LOUNGE_NO_BACK_CUSHION = "The lounge has no back cushion."
 
 
+def seat_sections(piece: dict) -> dict | None:
+    """S28: the seat sections a piece's box is divided into, or None: a
+    straight sofa {"n": its seats} (two or more); an L {"n": the long part's
+    seats}; a corner sofa {"n": the long part's seats with the corner seat,
+    "m": the shorter part's after it}; a curved sofa {"n": its seats}. L /
+    corner / curved only with seats picked (not "Not sure")."""
+    kind = piece["kind"]
+    if kind in SEAT_CHOICES:
+        seats = piece_seats(piece["item"])
+        if not seats:
+            return None
+        return {"n": seats["long"], "m": seats["short"]} if kind == "corner" else {"n": seats.get("long") or seats.get("total")}
+    count = sofa_seat_count(piece["item"].category, piece["label"])
+    return {"n": count} if count and count >= 2 else None
+
+
 def seats_debug_text(piece: dict) -> str:
     """For the Debug panel: "3 + lounge", "3 + 2", "4", a straight sofa's "3", or "not set"."""
     seats = piece_seats(piece["item"]) if piece["kind"] in SEAT_CHOICES else None
@@ -3987,6 +4059,159 @@ def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict
             draw.polygon(polygon, fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=outline)
 
 
+SEAT_DASH = 7  # dashed seat lines: dash and gap, in pixels for a 1536 px wide photo
+SEAT_GAP = 5
+
+
+def _square_to_quad(quad: list):
+    """The projective map from the unit square ((0,0) (1,0) (1,1) (0,1)) to
+    the four corners of `quad`, so equal steps in the square are equal steps
+    on the floor, seen in perspective."""
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = quad
+    sx, sy = x0 - x1 + x2 - x3, y0 - y1 + y2 - y3
+    if abs(sx) < 1e-12 and abs(sy) < 1e-12:
+        a, b, c, d, e, f, g, h = x1 - x0, x3 - x0, x0, y1 - y0, y3 - y0, y0, 0.0, 0.0
+    else:
+        dx1, dx2, dy1, dy2 = x1 - x2, x3 - x2, y1 - y2, y3 - y2
+        det = dx1 * dy2 - dx2 * dy1
+        if abs(det) < 1e-12:
+            return None
+        g, h = (sx * dy2 - dx2 * sy) / det, (dx1 * sy - sx * dy1) / det
+        a, b, c = x1 - x0 + g * x1, x3 - x0 + h * x3, x0
+        d, e, f = y1 - y0 + g * y1, y3 - y0 + h * y3, y0
+
+    def at(u: float, v: float) -> tuple[float, float]:
+        w = g * u + h * v + 1
+        return (a * u + b * v + c) / w, (d * u + e * v + f) / w
+
+    return at
+
+
+def _u_along(at, point: tuple, v: float) -> float:
+    """Where `point` (on the line v = `v` of the map `at`) is along it, 0-1."""
+    lo, hi = 0.0, 1.0
+    start, end = at(0.0, v), at(1.0, v)
+    ex, ey = end[0] - start[0], end[1] - start[1]
+    target = (point[0] - start[0]) * ex + (point[1] - start[1]) * ey
+    for _ in range(40):  # the map is monotonic along the line: halve the range
+        mid = (lo + hi) / 2
+        mx, my = at(mid, v)
+        if (mx - start[0]) * ex + (my - start[1]) * ey < target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def seat_section_lines(shape: dict, sections: dict, width: int, height: int) -> list[tuple[tuple, tuple]]:
+    """S28: the floor lines (photo pixels) dividing a shape into its seat
+    sections, each from its black-line edge to its front edge, in
+    perspective. A straight sofa into n; an L's long part into n (the lounge
+    none; the line where the lounge begins is drawn); a corner sofa's long
+    part into n with the corner seat (the corner square is its own section)
+    and the shorter part into m after it; a curved sofa's band into n equal
+    lengths along the curve."""
+    n, m = sections["n"], sections.get("m")
+    kind = shape["kind"]
+    if kind == "curved":
+        outline, back = curved_outline(shape["points"])
+        front = outline[len(back):][::-1]  # p3 -> p2, alongside the back arc p0 -> p1
+
+        def along(line: list, share: float) -> tuple:
+            px = [(x * width, y * height) for x, y in line]
+            lengths = [math.dist(a, b) for a, b in zip(px, px[1:])]
+            goal, run = share * sum(lengths), 0.0
+            for (a, b), length in zip(zip(px, px[1:]), lengths):
+                if run + length >= goal and length > 0:
+                    t = (goal - run) / length
+                    return a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+                run += length
+            return px[-1]
+
+        return [(along(back, k / n), along(front, k / n)) for k in range(1, n)]
+    parts = [[(x * width, y * height) for x, y in part] for part in shape_parts(kind, shape["points"])]
+    maps = []
+    for index, corners in enumerate(parts):
+        edge = shape["backrest"][index] if index < len(shape["backrest"]) else None
+        maps.append(None if edge is None else _square_to_quad([corners[(edge + i) % 4] for i in range(4)]))
+
+    def split(index: int, count: int, lo: float = 0.0, hi: float = 1.0, ends: tuple = ()) -> list:
+        """Lines dividing [lo, hi] of a part into `count` sections, plus lines at `ends`."""
+        at = maps[index]
+        if at is None:
+            return []
+        cuts = [lo + (hi - lo) * k / count for k in range(1, count)] + list(ends)
+        return [(at(u, 0.0), at(u, 1.0)) for u in cuts]
+
+    if kind == "rect":
+        return split(0, n)
+    lines = []
+    long_index = 1 - shape["lounge"] if kind == "L" else _long_part_index(shape, parts)
+    # part 0 holds the corner square when its backrest is its outer long edge (edge 0): it runs
+    # from u = 0 (p0 / p5) to u = 1 (p1 / q), and the corner square is from p4 (u4) to u = 1
+    p4 = (shape["points"][4][0] * width, shape["points"][4][1] * height)
+    u4 = _u_along(maps[0], p4, 1.0) if maps[0] is not None and shape["backrest"][0] == 0 else None
+
+    def join_end(index: int) -> float:
+        """The end of part 1 (u = 0 or 1) where it meets part 0."""
+        at, q = maps[index], parts[1][0]
+        return 0.0 if math.dist(at(0.0, 0.5), q) <= math.dist(at(1.0, 0.5), q) else 1.0
+
+    if kind == "L":
+        if long_index == 0:  # the lounge hangs from part 0's corner square: seats up to it, a line where it begins
+            lines += split(0, n, 0.0, u4, (u4,)) if u4 is not None else split(0, n)
+        elif maps[1] is not None:  # the lounge is part 0: seats along part 1, a line where it meets the lounge
+            lines += split(1, n, ends=(join_end(1),))
+        return lines
+    # corner sofa
+    if u4 is None:
+        return split(long_index, n) + split(1 - long_index, m)
+    short = m
+    if long_index == 0:  # the long part holds the corner seat
+        lines += split(0, n - 1, 0.0, u4, (u4,)) if n > 1 else split(0, 1, ends=(u4,))
+        lines += split(1, short, ends=(join_end(1),) if maps[1] is not None else ())
+    else:  # the corner square counts with the long part (part 1)
+        lines += split(1, n - 1, ends=(join_end(1),)) if maps[1] is not None else []
+        lines += split(0, short, 0.0, u4, (u4,))
+    return lines
+
+
+def draw_seat_lines(guide: Image.Image, shapes: list[dict], sections: dict, lifts: dict | None) -> None:
+    """DRAW_SEAT_LINES: thin dashed white lines with a faint dark edge across
+    the top of each box (or on each flat shape), dividing it into its seat
+    sections (seat_section_lines; `sections` by (item_id, sub_index), from
+    seat_sections). Thinner than the box outline; drawn before the arrows and
+    labels, so it never covers them."""
+    from PIL import ImageDraw
+
+    width, height = guide.size
+    unit = width / 1536
+    line_px = max(1, round(1.5 * unit))
+    draw = ImageDraw.Draw(guide, "RGBA")  # blends the faint edge
+    dash, gap = SEAT_DASH * unit, SEAT_GAP * unit
+    for shape in shapes:
+        key = (shape["item_id"], shape["sub_index"])
+        if not sections.get(key):
+            continue
+        top_lift = (lifts or {}).get(key, (None, lambda y: 0.0))[1]
+        for floor_a, floor_b in seat_section_lines(shape, sections[key], width, height):
+            a = (floor_a[0], floor_a[1] - top_lift(floor_a[1]))
+            b = (floor_b[0], floor_b[1] - top_lift(floor_b[1]))
+            length = math.dist(a, b)
+            if length < 1:
+                continue
+            ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+            dashes, t = [], 0.0
+            while t < length:
+                end = min(t + dash, length)
+                dashes.append(((a[0] + ux * t, a[1] + uy * t), (a[0] + ux * end, a[1] + uy * end)))
+                t = end + gap
+            for start, end in dashes:
+                draw.line([start, end], fill=(0, 0, 0, 90), width=line_px + 2)
+            for start, end in dashes:
+                draw.line([start, end], fill=(255, 255, 255, 240), width=line_px)
+
+
 def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
     """The guide image exactly as the image model gets it: the shapes drawn
     in the current guide style, then padded like the room photo would be.
@@ -3998,9 +4223,10 @@ def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
     pieces = attempt_pieces(attempt)
     tags = {(p["item"].id, p["sub_index"]): p["tag"] for p in pieces}
     widths = {(p["item"].id, p["sub_index"]): p["width_ft"] for p in pieces}
+    sections = {(p["item"].id, p["sub_index"]): seat_sections(p) for p in pieces} if DRAW_SEAT_LINES else None
     with Image.open(room_path) as room_image:
         size = derive_size(room_image.width, room_image.height)
-        guide = draw_guide_image(room_image, shapes, tags, style, widths)
+        guide = draw_guide_image(room_image, shapes, tags, style, widths, sections)
     sent, photo_box = guide, None
     if pad_room_photo_enabled(db):
         sent, photo_box = pad_to_output_ratio(guide, size)
@@ -4015,6 +4241,7 @@ def draw_guide_image(
     tags: dict | None = None,
     style: str = "flat",
     widths: dict | None = None,
+    sections: dict | None = None,
 ) -> Image.Image:
     """The room photo with every shape drawn on it: "flat", each shape filled
     in its colour at about 45% opacity with a GUIDE_LINE_PX black line on each
@@ -4022,7 +4249,9 @@ def draw_guide_image(
     draw_box_guide, `widths` = each piece's width in feet by (item_id,
     sub_index)). Then a white label above each shape (or box) ("1 · L-SHAPE",
     from `tags` by (item_id, sub_index)) and a small LOUNGE label on an L's
-    lounge. The draw screen shows the same labels (DrawOnPhoto.jsx)."""
+    lounge. The draw screen shows the same labels (DrawOnPhoto.jsx).
+    `sections` (DRAW_SEAT_LINES, seat_sections by (item_id, sub_index)): the
+    dashed seat lines, drawn before the arrows and labels."""
     from PIL import ImageDraw
 
     base = photo.convert("RGBA")
@@ -4030,6 +4259,8 @@ def draw_guide_image(
     if style == "boxes":
         guide = base
         lifts = draw_box_guide(guide, shapes, widths or {})
+        if sections:
+            draw_seat_lines(guide, shapes, sections, lifts)
         draw = ImageDraw.Draw(guide)
         if DRAW_ARROWS:
             draw_facing_arrows(guide, draw, shapes, lifts)
@@ -4062,6 +4293,8 @@ def draw_guide_image(
         draw.line(back, fill=(0, 0, 0, 255), width=GUIDE_LINE_PX, joint="curve")
         for x, y in (back[0], back[-1]):  # round ends
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+    if sections:
+        draw_seat_lines(guide, shapes, sections, None)
     if DRAW_ARROWS:
         draw_facing_arrows(guide, draw, shapes, None)
     return _draw_guide_labels(guide, draw, shapes, tags, None)
@@ -4670,6 +4903,18 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
     return "\n\n".join(paragraphs)
 
 
+def has_seat_lines(attempt: Attempt, shapes: list[dict]) -> bool:
+    """DRAW_SEAT_LINES on and at least one drawn piece has seat sections."""
+    if not DRAW_SEAT_LINES:
+        return False
+    pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
+    return any(
+        seat_sections(pieces[(sh["item_id"], sh["sub_index"])])
+        for sh in shapes
+        if (sh["item_id"], sh["sub_index"]) in pieces
+    )
+
+
 def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
     """The Final check line for the pieces actually drawn: always the camera
     and the place / design of every sofa; an L's lounge, a corner sofa's two
@@ -4707,7 +4952,11 @@ def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
         parts.append(which("straight", "the straight sofa has the stated number of seats;", "every straight sofa has the stated number of seats;"))
     if (picked or count["straight"]) and not draw_is_fallback():
         parts.append("every seat has one matching back cushion;")
-    parts.append("no shape, label, arrow or line remains." if DRAW_ARROWS else "no shape, label or line remains.")
+    dashed = has_seat_lines(attempt, shapes)
+    if dashed:
+        parts.append(SEAT_LINES_CHECK)
+    shown = ["label"] + (["arrow"] if DRAW_ARROWS else []) + (["dashed line"] if dashed else [])
+    parts.append("no shape, " + ", ".join(shown) + " or line remains.")
     return "Final check: " + " ".join(parts)
 
 
@@ -4735,10 +4984,22 @@ def build_shapes_prompt(
         filled = filled.replace(ADD_FURNITURE_LINE, f"{ADD_FURNITURE_LINE} {SHAPES_ONLY_SOURCE_LINE}", 1)
     if guide_style == "boxes":
         filled = filled.replace(FLAT_REMOVAL_WORDS, BOXES_REMOVAL_WORDS)
-    if DRAW_ARROWS:
-        filled = filled.replace(BOXES_REMOVAL_WORDS, BOXES_ARROWS_REMOVAL_WORDS).replace(FLAT_REMOVAL_WORDS, FLAT_ARROWS_REMOVAL_WORDS)
+    dashed = has_seat_lines(attempt, shapes)
+    if DRAW_ARROWS or dashed:
+        filled = filled.replace(BOXES_REMOVAL_WORDS, removal_words("boxes", DRAW_ARROWS, dashed)).replace(
+            FLAT_REMOVAL_WORDS, removal_words("flat", DRAW_ARROWS, dashed)
+        )
+    if DRAW_COVERED_LAYOUT:
+        filled = filled.replace(COVERED_DONE_WORDS, f"{COVERED_DONE_WORDS} {COVERED_LAYOUT_SENTENCE}", 1)
     thing = "box" if guide_style == "boxes" else "shape"
     look = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
+    look_text = SHAPES_ROOM_TREATMENT_TEXT[look]
+    if look != "keep":
+        # S25 / S20: the look's paragraph edits this photograph and keeps covered features' layout
+        if DRAW_CAMERA_FIRST:
+            look_text = f"{RESTYLE_BY_EDITING} {look_text}"
+        if DRAW_COVERED_LAYOUT:
+            look_text = f"{look_text} {COVERED_LAYOUT_STYLING}"
     if look != "keep":
         # the look restyles the room: the furniture and the room's structure must not change with it
         filled = filled.replace(KEEP_EVERYTHING_SENTENCE, KEEP_STRUCTURE_SENTENCE)
@@ -4770,7 +5031,7 @@ def build_shapes_prompt(
         attempt.note,
         feet,
         room_padded,
-        look_text=SHAPES_ROOM_TREATMENT_TEXT[look],
+        look_text=look_text,
         decor_override=shapes_decor_text(look),
         product_note=SHAPES_PRODUCT_PHOTO_NOTE,
         seat_counted={item.id for item in attempt.items if piece_seats(item)},
@@ -4779,7 +5040,10 @@ def build_shapes_prompt(
     image_line = GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE
     if DRAW_ARROWS:
         image_line += " " + (BOXES_ARROWS_LINE if guide_style == "boxes" else FLAT_ARROWS_LINE)
-    return prompt.replace("Image 1 is a room.", image_line, 1)
+    if dashed:
+        image_line += " " + (SEAT_LINES_LINE if guide_style == "boxes" else FLAT_SEAT_LINES_LINE)
+    prompt = prompt.replace("Image 1 is a room.", image_line, 1)
+    return camera_first(prompt) if DRAW_CAMERA_FIRST else prompt
 
 
 # ---- GAP WRITER ---------------------------------------------------------------

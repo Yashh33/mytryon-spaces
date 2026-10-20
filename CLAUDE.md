@@ -58,7 +58,7 @@ IMAGE_QUALITY=high
 To switch back to GPT Image 2: `IMAGE_MODEL=gpt-image-2` and `IMAGE_QUALITY=medium`, then restart the backend.
 
 ## Experiments (Draw on photo)
-Four switches, in `.env` locally and in Render → Environment for the live app; restart the backend after changing them. If one is missing, the code uses "off".
+Seven switches, in `.env` locally and in Render → Environment for the live app; restart the backend after changing them. If one is missing, the code uses "off".
 ```
 # on: the original wall wording (the gap writer's wall answers); off: piece sentences say nothing about walls
 DRAW_WALL_WORDS=on
@@ -68,22 +68,31 @@ DRAW_OPEN_FLOOR=on
 DRAW_FACING=off
 # on: a white arrow on each guide box pointing the way its seats face, and the prompt says so; off: nothing changes
 DRAW_ARROWS=off
+# on: thin dashed lines on each box dividing it into its seats (pieces with a seat count), and the prompt says so; off: nothing changes
+DRAW_SEAT_LINES=off
+# on: the CAMERA paragraphs open the prompt, and a styled look says to edit this photograph; off: nothing changes
+DRAW_CAMERA_FIRST=off
+# on: covered panels / frames / recesses keep their exact number, size and position (and their layout in a styled look); off: nothing changes
+DRAW_COVERED_LAYOUT=off
 ```
 
-| Config | WALL_WORDS | OPEN_FLOOR | FACING | ARROWS | Status |
-|---|---|---|---|---|---|
-| Original (safe fallback) | on | on | off | off | Known good — go back to this if experiments fail |
-| Variant A | off | off | off | off | Discarded: sofa near a wall turned to face along it |
-| Variant B | off | on | off | off | Discarded (not needed) |
-| S21 facing sentence | off | off | on | off | Works — keep. S21 fixed: front direction = black-edge middle → opposite-edge middle (perspective-safe); the arrow uses the same vector |
-| S23 end sentence (part of FACING=on) | off | off | on | any | S23 reinstated: needed for corner sofas (mirrored 2/2 without it) — which end of the long part the lounge / shorter part is at, as seen in the photo |
-| S22 arrows | off | off | on | on | Testing |
-| S11 seat counts | any | any | any | any | Testing — picked on the Furniture step (L-shape, corner, curved); "Not sure" = no seat count |
-| S24 back cushions | not the original | | | | Testing — one back cushion per seat, in every config except the original |
+| Config | WALL_WORDS | OPEN_FLOOR | FACING | ARROWS | SEAT_LINES | CAMERA_FIRST | COVERED_LAYOUT | Status |
+|---|---|---|---|---|---|---|---|---|
+| Original (safe fallback) | on | on | off | off | off | off | off | Known good — go back to this if experiments fail |
+| Variant A | off | off | off | off | off | off | off | Discarded: sofa near a wall turned to face along it |
+| Variant B | off | on | off | off | off | off | off | Discarded (not needed) |
+| S21 facing sentence | off | off | on | off | any | any | any | Works — keep. S21 fixed: front direction = black-edge middle → opposite-edge middle (perspective-safe); the arrow uses the same vector |
+| S23 end sentence (part of FACING=on) | off | off | on | any | any | any | any | S23 reinstated: needed for corner sofas (mirrored 2/2 without it) — which end of the long part the lounge / shorter part is at, as seen in the photo |
+| S22 arrows | off | off | on | on | any | any | any | Testing |
+| S11 seat counts | any | any | any | any | any | any | any | Testing — picked on the Furniture step (L-shape, corner, curved); "Not sure" = no seat count |
+| S24 back cushions | not the original | | | | | | | Testing — one back cushion per seat, in every config except the original |
+| S28 seat lines | off | off | on | on | on | any | any | Testing |
+| S25 camera first | off | off | on | on | any | on | any | Testing |
+| S20 covered layout | off | off | on | on | any | any | on | Testing |
 
-To fall back: set WALL_WORDS=on, OPEN_FLOOR=on, FACING=off, ARROWS=off, restart the backend. With no seat count picked, that gives exactly the original prompt and guide image.
+To fall back: set WALL_WORDS=on, OPEN_FLOOR=on, FACING=off, ARROWS=off, SEAT_LINES=off, CAMERA_FIRST=off, COVERED_LAYOUT=off, restart the backend. With no seat count picked, that gives exactly the original prompt and guide image.
 
-The Debug panel's info line shows the switches that made each render and each piece's seats (e.g. "walls off · open floor off · facing on · arrows on · 1 seats: 3 + lounge · 2 seats: 3").
+The Debug panel's info line shows the switches that made each render and each piece's seats (e.g. "walls off · open floor off · facing on · arrows on · seat lines on · camera first on · covered layout on · 1 seats: 3 + lounge · 2 seats: 3").
 
 ## Deploying (done by a person, never by Claude Code)
 - If the task changed the database: run `python scripts/backup_db.py` first.

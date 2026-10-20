@@ -58,7 +58,7 @@ IMAGE_QUALITY=high
 To switch back to GPT Image 2: `IMAGE_MODEL=gpt-image-2` and `IMAGE_QUALITY=medium`, then restart the backend.
 
 ## Experiments (Draw on photo)
-Three switches, in `.env` locally and in Render → Environment for the live app; restart the backend after changing them. If one is missing, the code uses "off".
+Four switches, in `.env` locally and in Render → Environment for the live app; restart the backend after changing them. If one is missing, the code uses "off".
 ```
 # on: the original wall wording (the gap writer's wall answers); off: piece sentences say nothing about walls
 DRAW_WALL_WORDS=on
@@ -66,18 +66,25 @@ DRAW_WALL_WORDS=on
 DRAW_OPEN_FLOOR=on
 # on: each piece gets a sentence saying which way its seats face in the photo, worked out in code from its shape; off: nothing changes
 DRAW_FACING=off
+# on: a white arrow on each guide box pointing the way its seats face, and the prompt says so; off: nothing changes
+DRAW_ARROWS=off
 ```
 
-| Config | WALL_WORDS | OPEN_FLOOR | FACING | Status |
-|---|---|---|---|---|
-| Original (safe fallback) | on | on | off | Known good — go back to this if experiments fail |
-| Variant A | off | off | off | Discarded: sofa near a wall turned to face along it |
-| Variant B | off | on | off | Discarded (not needed) |
-| S21 test | off | off | on | Testing |
+| Config | WALL_WORDS | OPEN_FLOOR | FACING | ARROWS | Status |
+|---|---|---|---|---|---|
+| Original (safe fallback) | on | on | off | off | Known good — go back to this if experiments fail |
+| Variant A | off | off | off | off | Discarded: sofa near a wall turned to face along it |
+| Variant B | off | on | off | off | Discarded (not needed) |
+| S21 facing sentence | off | off | on | off | Works — keep |
+| S22 arrows | off | off | on | on | Testing |
+| S11 seat counts | any | any | any | any | Testing — picked on the Furniture step (L-shape, corner, curved); "Not sure" = no seat count |
+| S24 back cushions | not the original | | | | Testing — one back cushion per seat, in every config except the original |
 
-To fall back: set WALL_WORDS=on, OPEN_FLOOR=on, FACING=off, restart the backend.
+S23 (lounge-end sentence) not needed — lounge correct 5/5 from the image.
 
-The Debug panel's info line shows the switches that made each render (e.g. "walls off · open floor off · facing on").
+To fall back: set WALL_WORDS=on, OPEN_FLOOR=on, FACING=off, ARROWS=off, restart the backend. With no seat count picked, that gives exactly the original prompt and guide image.
+
+The Debug panel's info line shows the switches that made each render and each piece's seats (e.g. "walls off · open floor off · facing on · arrows on · 1 seats: 3 + lounge · 2 seats: 3").
 
 ## Deploying (done by a person, never by Claude Code)
 - If the task changed the database: run `python scripts/backup_db.py` first.

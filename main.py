@@ -82,16 +82,28 @@ IMAGE_QUALITY_CHOICES = ("low", "medium", "high", "xhigh", "max", "auto")
 #   DRAW_OPEN_FLOOR  "off" (default): no OPEN FLOOR section and no gap writer call; "on": both.
 #   DRAW_FACING      "off" (default): nothing changes; "on": each piece gets a sentence saying which
 #                    way its seats face in the photo, worked out from its shape (facing_sentences).
-# The original prompt = on/on/off (word for word); see CLAUDE.md "Experiments (Draw on photo)".
+#   DRAW_ARROWS      "off" (default): nothing changes; "on": a white arrow on each guide box pointing
+#                    the way its seats face (draw_facing_arrows), and the prompt says so.
+# The original prompt = on/on/off/off (word for word); see CLAUDE.md "Experiments (Draw on photo)".
 DRAW_WALL_WORDS = (os.environ.get("DRAW_WALL_WORDS") or "off").strip().lower() == "on"
 DRAW_OPEN_FLOOR = (os.environ.get("DRAW_OPEN_FLOOR") or "off").strip().lower() == "on"
 DRAW_FACING = (os.environ.get("DRAW_FACING") or "off").strip().lower() == "on"
+DRAW_ARROWS = (os.environ.get("DRAW_ARROWS") or "off").strip().lower() == "on"
 
 
 def draw_variant_label() -> str:
-    """For the Debug panel: "walls off · open floor off · facing on" etc."""
+    """For the Debug panel: "walls off · open floor off · facing on · arrows on" etc."""
     on = lambda flag: "on" if flag else "off"  # noqa: E731
-    return f"walls {on(DRAW_WALL_WORDS)} · open floor {on(DRAW_OPEN_FLOOR)} · facing {on(DRAW_FACING)}"
+    return (
+        f"walls {on(DRAW_WALL_WORDS)} · open floor {on(DRAW_OPEN_FLOOR)} · facing {on(DRAW_FACING)} · "
+        f"arrows {on(DRAW_ARROWS)}"
+    )
+
+
+def draw_is_fallback() -> bool:
+    """The original (safe fallback) switches: walls on, open floor on, facing off, arrows off.
+    S24's back-cushion sentences are added in every other config."""
+    return DRAW_WALL_WORDS and DRAW_OPEN_FLOOR and not DRAW_FACING and not DRAW_ARROWS
 
 # ---------------------------------------------------------------------------
 # GENERATION PROMPT — the live prompt lives in the `settings` table (key
@@ -1715,7 +1727,13 @@ def compute_sub_pieces(item: Item) -> list[dict]:
     return [{"sub_index": 0, "label": item.type, "shape": item.shape, "width_ft": item.width_ft}]
 
 
-def build_image_manifest(items: list[Item], feet: bool = False, room_padded: bool = False, product_note: str | None = None) -> str:
+def build_image_manifest(
+    items: list[Item],
+    feet: bool = False,
+    room_padded: bool = False,
+    product_note: str | None = None,
+    seat_counted: set | None = None,
+) -> str:
     """One line per image, in the exact order sent to the model — the whole
     point being that the numbering here always matches reality: the clean
     room photo, then each product photo in the order pieces were added.
@@ -1736,8 +1754,12 @@ def build_image_manifest(items: list[Item], feet: bool = False, room_padded: boo
             n += 1
             continue
         first_image_for_photo[item.photo_path] = n
-        # no seat count is ever stated for an L-shaped, corner or curved sofa
-        follows = "Only its shape and the overall " if item.shape in ARM_SHAPES else "Only the number of seats and the overall "
+        # no seat count is stated for an L-shaped, corner or curved sofa, unless
+        # one was picked for it (Draw on photo: `seat_counted`, item ids)
+        if item.shape in ARM_SHAPES:
+            follows = "Only its shape, the number of seats and the overall " if item.id in (seat_counted or ()) else "Only its shape and the overall "
+        else:
+            follows = "Only the number of seats and the overall "
         follows += "width follow the configuration stated below" if feet else "size follow what is stated below"
         if item_has_finish(item):
             # its material and colour were chosen on the Finishing step, so the
@@ -2698,6 +2720,7 @@ def build_prompt(
     look_text: str | None = None,
     decor_override: str | None = None,
     product_note: str | None = None,
+    seat_counted: set | None = None,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
     replaces the generated facts in {{PLACEMENT}}. `feet` is the
@@ -2707,7 +2730,7 @@ def build_prompt(
     decor_text(), and `product_note` ends every product image line (Draw on
     photo only; the floor plan passes none of them)."""
     pieces = build_pieces_text(items, feet)
-    image_manifest = build_image_manifest(items, feet, room_padded, product_note)
+    image_manifest = build_image_manifest(items, feet, room_padded, product_note, seat_counted)
     config_notes = build_config_notes(items, feet)
     # with the writer's text, ROOM LAYOUT keeps only the shape and camera lines
     room_layout_text = build_room_layout_text(room.layout_json, features=placement_text is None)
@@ -3389,6 +3412,11 @@ GUIDE_BOXES_LINE = (
 )
 FLAT_REMOVAL_WORDS = "remove all coloured guide shapes, labels and black lines completely"
 BOXES_REMOVAL_WORDS = "remove every coloured box, label and black line completely"
+# DRAW_ARROWS on: after the sentence about Image 1, and the removal sentence's words
+BOXES_ARROWS_LINE = "The white arrow on each box points the way its seats face."
+FLAT_ARROWS_LINE = "The white arrow on each shape points the way its seats face."
+BOXES_ARROWS_REMOVAL_WORDS = "remove every coloured box, label, arrow and black line completely"
+FLAT_ARROWS_REMOVAL_WORDS = "remove all coloured guide shapes, labels, arrows and black lines completely"
 
 
 # Draw on photo, when the look restyles the room (any look but "keep"): built
@@ -3624,9 +3652,86 @@ def attempt_pieces(attempt: Attempt) -> list[dict]:
     return pieces
 
 
+# S11: the seats the salesman picked on the Furniture step for an L-shaped,
+# corner or curved sofa (none picked, "Not sure": no seat count anywhere, as
+# before). Kept in attempt.shapes["seats"] = {"<item id>": {...}}, so no new
+# column: L {"long": 2-4} (not counting the lounge); corner {"long": 2-4 with
+# the corner seat, "short": 1-3 after it}; curved {"total": 3-6}.
+SEAT_CHOICES = {
+    "L": {"long": (2, 3, 4)},
+    "corner": {"long": (2, 3, 4), "short": (1, 2, 3)},
+    "curved": {"total": (3, 4, 5, 6)},
+}
+
+
+def clean_seats(shape: str, raw) -> dict | None:
+    """`raw` as a valid seat choice for a piece of this shape, or None."""
+    choices = SEAT_CHOICES.get(shape)
+    if not choices or not isinstance(raw, dict):
+        return None
+    if all(raw.get(key) in allowed and not isinstance(raw.get(key), bool) for key, allowed in choices.items()):
+        return {key: raw[key] for key in choices}
+    return None
+
+
+def piece_seats(item: Item) -> dict | None:
+    """The seats picked for an L-shaped, corner or curved sofa, or None."""
+    attempt = item.attempt
+    stored = ((attempt.shapes or {}).get("seats") or {}) if attempt is not None else {}
+    return clean_seats(item.shape, stored.get(str(item.id)) if isinstance(stored, dict) else None)
+
+
+def seats_tag_words(kind: str, seats: dict) -> str:
+    """The tag with a seat count: "L-SHAPE · 3 SEATS + LOUNGE", "CORNER · 3 + 2 SEATS", "CURVED · 4 SEATS"."""
+    if kind == "L":
+        return f"L-SHAPE · {seats['long']} SEATS + LOUNGE"
+    if kind == "corner":
+        return f"CORNER · {seats['long']} + {seats['short']} SEATS"
+    return f"CURVED · {seats['total']} SEATS"
+
+
+def seats_sentence(kind: str, seats: dict) -> str:
+    """The piece paragraph's seat count for an L-shaped, corner or curved sofa."""
+    if kind == "L":
+        return f"Its long part has exactly {seats['long']} seats; the lounge is the only other seating."
+    if kind == "corner":
+        more = f"{seats['short']} more seat" + ("" if seats["short"] == 1 else "s")
+        return (
+            f"Its long part has exactly {seats['long']} seats including the corner seat, and the shorter part has "
+            f"exactly {more}."
+        )
+    return f"It has exactly {seats['total']} seats along its curve."
+
+
+# S24 (every config but the original): in every piece paragraph with a seat count
+BACK_CUSHION_SENTENCE = (
+    "Every seat has its own seat cushion with exactly one matching back cushion directly behind it: the number of "
+    "back cushions equals the number of seats."
+)
+LOUNGE_NO_BACK_CUSHION = "The lounge has no back cushion."
+
+
+def seats_debug_text(piece: dict) -> str:
+    """For the Debug panel: "3 + lounge", "3 + 2", "4", a straight sofa's "3", or "not set"."""
+    seats = piece_seats(piece["item"]) if piece["kind"] in SEAT_CHOICES else None
+    if seats:
+        if piece["kind"] == "L":
+            return f"{seats['long']} + lounge"
+        if piece["kind"] == "corner":
+            return f"{seats['long']} + {seats['short']}"
+        return str(seats["total"])
+    count = sofa_seat_count(piece["item"].category, piece["label"])
+    return str(count) if count is not None else "not set"
+
+
 def shape_type_label(item: Item, label: str, kind: str | None) -> str:
     """The type in a shape's tag: L-SHAPE, CORNER SOFA, 3-SEATER, ARMCHAIR,
-    DINING TABLE ... Mirrors typeLabel in frontend/src/shapes.js."""
+    DINING TABLE ... With seats picked (S11): "L-SHAPE · 3 SEATS + LOUNGE",
+    "CORNER · 3 + 2 SEATS", "CURVED · 4 SEATS". Mirrors typeLabel in
+    frontend/src/shapes.js."""
+    seats = piece_seats(item) if kind in SEAT_CHOICES else None
+    if seats:
+        return seats_tag_words(kind, seats)
     if kind == "L":
         return "L-SHAPE"
     if kind == "corner":
@@ -3838,6 +3943,51 @@ def draw_box_guide(guide: Image.Image, shapes: list[dict], widths: dict) -> dict
     return lifts
 
 
+ARROW_START = 0.12  # an arrow starts this share of the depth in front of its black line
+ARROW_LENGTH = 1 / 3  # and is this share of the depth long
+ARROW_MIN_PX = 44  # but at least this long in the picture (for a 1536 px wide photo)
+ARROW_MAX_REACH = 0.85  # and never past this share of the depth
+
+
+def draw_facing_arrows(guide: Image.Image, draw, shapes: list[dict], lifts: dict | None) -> None:
+    """DRAW_ARROWS: on each shape, a white arrow with a thin black outline from
+    near its black line toward the front, the way its seats face (the same
+    direction as its facing sentence, facing_fronts): one on a straight piece,
+    on an L's long part, on each part of a corner sofa, and from the middle of
+    a curved sofa's back arc toward the inside of the curve. With `lifts`
+    (boxes) it lies on the top of the box. Worked out on the floor, then drawn
+    in picture pixels: at least ARROW_MIN_PX long where the top has room (a
+    box top seen from the front is squashed), never past ARROW_MAX_REACH of
+    the depth. Labels are drawn after it."""
+    width, height = guide.size
+    unit = width / 1536
+    outline = max(round(2 * unit), 1)
+    shaft, head, head_len = 5 * unit, 13 * unit, 18 * unit  # half widths and the head's length
+    for shape in shapes:
+        top_lift = (lifts or {}).get((shape["item_id"], shape["sub_index"]), (None, lambda y: 0.0))[1]
+        raise_up = lambda x, y, lift=top_lift: (x, y - lift(y))  # noqa: E731
+        for line, inside, start_from, depth in facing_fronts(shape, width, height):
+            nx, ny = _front_vector(line, inside)
+            gap = max(depth * ARROW_START, GUIDE_LINE_PX * 0.75)
+            if depth * ARROW_MAX_REACH <= gap:
+                continue
+            on_floor = lambda along: raise_up(start_from[0] + nx * along, start_from[1] + ny * along)  # noqa: E731
+            start, end, limit = on_floor(gap), on_floor(gap + depth * ARROW_LENGTH), on_floor(depth * ARROW_MAX_REACH)
+            length = math.dist(start, end)
+            room = math.dist(start, limit)
+            if room < 1:
+                continue
+            if length < ARROW_MIN_PX * unit:  # too short to see: longer, toward the front, as far as there is room
+                length = min(ARROW_MIN_PX * unit, room)
+            ux, uy = (limit[0] - start[0]) / room, (limit[1] - start[1]) / room
+            px, py = -uy, ux  # across the arrow
+            tip = min(head_len, length * 0.5)
+            at = lambda along, across: (start[0] + ux * along + px * across, start[1] + uy * along + py * across)  # noqa: E731
+            neck = length - tip
+            polygon = [at(0, shaft), at(neck, shaft), at(neck, head), at(length, 0), at(neck, -head), at(neck, -shaft), at(0, -shaft)]
+            draw.polygon(polygon, fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=outline)
+
+
 def build_guide(db: Session, attempt: Attempt, shapes: list[dict]) -> dict:
     """The guide image exactly as the image model gets it: the shapes drawn
     in the current guide style, then padded like the room photo would be.
@@ -3882,6 +4032,8 @@ def draw_guide_image(
         guide = base
         lifts = draw_box_guide(guide, shapes, widths or {})
         draw = ImageDraw.Draw(guide)
+        if DRAW_ARROWS:
+            draw_facing_arrows(guide, draw, shapes, lifts)
         return _draw_guide_labels(guide, draw, shapes, tags, lifts)
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     fill = ImageDraw.Draw(overlay)
@@ -3911,6 +4063,8 @@ def draw_guide_image(
         draw.line(back, fill=(0, 0, 0, 255), width=GUIDE_LINE_PX, joint="curve")
         for x, y in (back[0], back[-1]):  # round ends
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=(0, 0, 0, 255))
+    if DRAW_ARROWS:
+        draw_facing_arrows(guide, draw, shapes, None)
     return _draw_guide_labels(guide, draw, shapes, tags, None)
 
 
@@ -4306,6 +4460,53 @@ def _centre(points: list) -> tuple[float, float]:
     return sum(x for x, _ in points) / len(points), sum(y for _, y in points) / len(points)
 
 
+def facing_fronts(shape: dict, sx: float, sy: float) -> list[tuple[list, tuple, tuple, float]]:
+    """The parts whose seats the facing sentence (and arrow) is about, with
+    points scaled by (sx, sy): (back line, a point inside the part, where the
+    arrow starts from, the part's depth from the line), in this order: a
+    straight piece its one part; an L its long part; a corner sofa its long
+    part, then its shorter part; a curved sofa its band, by the straight line
+    between the two ends of its back arc, the arrow from the middle of the
+    arc (p4)."""
+    kind = shape["kind"]
+    if kind == "curved":
+        p0, p1, p2, p3, p4 = [(x * sx, y * sy) for x, y in shape["points"]]
+        line, inside = [p0, p1], ((p2[0] + p3[0]) / 2, (p2[1] + p3[1]) / 2)
+        return [(line, inside, p4, _depth_from(line, inside))]
+    parts = [[(x * sx, y * sy) for x, y in part] for part in shape_parts(kind, shape["points"])]
+    if kind == "rect":
+        order = [0]
+    elif kind == "L":
+        order = [1 - shape["lounge"]]
+    else:  # corner sofa: the long part is the one with the longer longest edge (as two_part_facts)
+        longest = [max(math.dist(c[i], c[(i + 1) % 4]) for i in range(4)) for c in parts]
+        order = [0, 1] if longest[0] >= longest[1] else [1, 0]
+    fronts = []
+    for index in order:
+        line, centre = _back_line(parts[index], shape["backrest"][index]), _centre(parts[index])
+        middle = ((line[0][0] + line[-1][0]) / 2, (line[0][1] + line[-1][1]) / 2)
+        fronts.append((line, centre, middle, 2 * _depth_from(line, centre)))  # the centre is half the depth
+    return fronts
+
+
+def _front_vector(line: list, inside: tuple) -> tuple[float, float]:
+    """The unit direction square to `line`, from its middle toward `inside`."""
+    (x1, y1), (x2, y2) = line[0], line[-1]
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    dx, dy = -(y2 - y1), x2 - x1
+    if dx * (inside[0] - mx) + dy * (inside[1] - my) < 0:
+        dx, dy = -dx, -dy
+    length = math.hypot(dx, dy) or 1.0
+    return dx / length, dy / length
+
+
+def _depth_from(line: list, point: tuple) -> float:
+    """How far `point` is from the middle of `line`, measured square to it."""
+    (x1, y1), (x2, y2) = line[0], line[-1]
+    nx, ny = _front_vector(line, point)
+    return abs((point[0] - (x1 + x2) / 2) * nx + (point[1] - (y1 + y2) / 2) * ny)
+
+
 def facing_sentences(attempt: Attempt, shapes: list[dict], aspect: float) -> dict:
     """DRAW_FACING: by label, the sentence saying which way the piece's seats
     face in the photo, worked out only from its shape (photo pixels: x scaled
@@ -4357,6 +4558,21 @@ def facing_sentences(attempt: Attempt, shapes: list[dict], aspect: float) -> dic
     return out
 
 
+def seats_text(piece: dict, kind: str) -> str:
+    """What a piece paragraph adds about seats (with a leading space), or "":
+    the picked seat count of an L-shaped, corner or curved sofa (S11); and,
+    in every config but the original, the one-back-cushion-per-seat rule for
+    any sofa with a seat count, a straight sofa's included (S24)."""
+    seats = piece_seats(piece["item"]) if kind in SEAT_CHOICES else None
+    words = [seats_sentence(kind, seats)] if seats else []
+    has_count = bool(seats) or (kind == "rect" and sofa_seat_count(piece["item"].category, piece["label"]) is not None)
+    if has_count and not draw_is_fallback():
+        words.append(BACK_CUSHION_SENTENCE)
+        if kind == "L":
+            words.append(LOUNGE_NO_BACK_CUSHION)
+    return "".join(" " + w for w in words)
+
+
 def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0, facts: dict | None = None) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape. `facts` (from
@@ -4371,6 +4587,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
     paragraphs = []
     for shape in shapes:
         piece = pieces[(shape["item_id"], shape["sub_index"])]
+        seats = seats_text(piece, shape["kind"])  # "" when it has no seat count to state
         item, number = piece["item"], piece["item_index"] + 2  # Image 1 is the guide; products follow in item order
         colour = shape["colour"]
         description = (item.short_description or "").strip().rstrip(".")
@@ -4391,6 +4608,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
                 text += " " + facing[piece["tag"]]
             if shape["kind"] in SHAPE_ONLY_TEXT:
                 text += f" {SHAPE_ONLY_TEXT[shape['kind']]} {SHAPE_REBUILD_TEXT[shape['kind']]}"
+            text += seats
             if shape["kind"] in ("L", "corner", "curved"):
                 text += " " + SHAPE_TYPE_LINES[shape["kind"]]
             elif item.category in ("Sofa", "Chair"):  # a straight sofa or an armchair
@@ -4402,6 +4620,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
             if piece["tag"] in facing:
                 text += " " + facing[piece["tag"]]
             text += " " + curved_sofa_sentence(facts.get(piece["tag"]) or curved_facts(shape, aspect))
+            text += seats
             text += " " + SHAPE_TYPE_LINES["curved"]
             paragraphs.append(text)
             continue
@@ -4418,6 +4637,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0,
             )
         elif shape["kind"] == "corner":
             text += " " + corner_sofa_sentence(f or two_part_facts(shape, aspect))
+        text += seats
         if shape["kind"] in ("L", "corner"):
             text += " " + SHAPE_TYPE_LINES[shape["kind"]]
         elif item.category in ("Sofa", "Chair"):  # a straight sofa or an armchair
@@ -4434,10 +4654,12 @@ def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
     always last, nothing of the guide left."""
     pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
     count = {"L": 0, "corner": 0, "curved": 0, "straight": 0}
+    picked = 0  # L-shaped, corner or curved sofas with a seat count picked (S11)
     for shape in shapes:
         piece = pieces.get((shape["item_id"], shape["sub_index"]))
         if shape["kind"] in ("L", "corner", "curved"):
             count[shape["kind"]] += 1
+            picked += bool(piece and piece_seats(piece["item"]))
         elif piece and sofa_seat_count(piece["item"].category, piece["label"]) is not None:
             count["straight"] += 1
 
@@ -4453,9 +4675,13 @@ def shapes_final_check(attempt: Attempt, shapes: list[dict], thing: str) -> str:
         parts.append(which("corner", "the corner sofa has a backrest on both parts and no chaise;", "every corner sofa has a backrest on both parts and no chaise;"))
     if count["curved"]:
         parts.append(which("curved", "the curved sofa follows its curve;", "every curved sofa follows its curve;"))
-    if count["straight"]:
+    if picked:
+        parts.append("every sofa has the stated number of seats;")
+    elif count["straight"]:
         parts.append(which("straight", "the straight sofa has the stated number of seats;", "every straight sofa has the stated number of seats;"))
-    parts.append("no shape, label or line remains.")
+    if (picked or count["straight"]) and not draw_is_fallback():
+        parts.append("every seat has one matching back cushion;")
+    parts.append("no shape, label, arrow or line remains." if DRAW_ARROWS else "no shape, label or line remains.")
     return "Final check: " + " ".join(parts)
 
 
@@ -4483,6 +4709,8 @@ def build_shapes_prompt(
         filled = filled.replace(ADD_FURNITURE_LINE, f"{ADD_FURNITURE_LINE} {SHAPES_ONLY_SOURCE_LINE}", 1)
     if guide_style == "boxes":
         filled = filled.replace(FLAT_REMOVAL_WORDS, BOXES_REMOVAL_WORDS)
+    if DRAW_ARROWS:
+        filled = filled.replace(BOXES_REMOVAL_WORDS, BOXES_ARROWS_REMOVAL_WORDS).replace(FLAT_REMOVAL_WORDS, FLAT_ARROWS_REMOVAL_WORDS)
     thing = "box" if guide_style == "boxes" else "shape"
     look = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
     if look != "keep":
@@ -4519,9 +4747,13 @@ def build_shapes_prompt(
         look_text=SHAPES_ROOM_TREATMENT_TEXT[look],
         decor_override=shapes_decor_text(look),
         product_note=SHAPES_PRODUCT_PHOTO_NOTE,
+        seat_counted={item.id for item in attempt.items if piece_seats(item)},
     )
     # Image 1 is the guide image, not the bare room photo
-    return prompt.replace("Image 1 is a room.", GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE, 1)
+    image_line = GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE
+    if DRAW_ARROWS:
+        image_line += " " + (BOXES_ARROWS_LINE if guide_style == "boxes" else FLAT_ARROWS_LINE)
+    return prompt.replace("Image 1 is a room.", image_line, 1)
 
 
 # ---- GAP WRITER ---------------------------------------------------------------
@@ -4904,6 +5136,34 @@ class DescriptionBody(BaseModel):
     short_description: str
 
 
+class SeatsBody(BaseModel):
+    seats: dict | None = None
+
+
+@app.put("/api/attempts/{attempt_id}/items/{item_id}/seats")
+def api_set_item_seats(
+    attempt_id: int, item_id: int, body: SeatsBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> JSONResponse:
+    """S11: the seats of an L-shaped, corner or curved sofa (Furniture step).
+    No seats (null, "Not sure") clears them: no seat count anywhere."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
+    if item is None:
+        return error_response(404, "item_not_found", "That piece could not be found.")
+    seats = clean_seats(item.shape, body.seats)
+    if body.seats and seats is None:
+        return error_response(400, "invalid_seats", "Please pick the seats again.")
+    stored = dict((attempt.shapes or {}).get("seats") or {})
+    if seats:
+        stored[str(item.id)] = seats
+    else:
+        stored.pop(str(item.id), None)
+    attempt.shapes = {**(attempt.shapes or {}), "seats": stored}
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
 @app.put("/api/attempts/{attempt_id}/items/{item_id}/description")
 def api_set_item_description(
     attempt_id: int, item_id: int, body: DescriptionBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
@@ -4949,7 +5209,8 @@ def api_save_shapes(
     shapes, problem = validate_shapes(attempt, body.shapes)
     if problem:
         return error_response(400, "invalid_shapes", problem)
-    attempt.shapes = {"version": 1, "shapes": shapes}
+    # anything else kept there (the picked seats) stays
+    attempt.shapes = {**(attempt.shapes or {}), "version": 1, "shapes": shapes}
     db.commit()
     db.refresh(attempt)
     return JSONResponse(content={"attempt": attempt_detail(attempt)})
@@ -5275,6 +5536,9 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             look_used = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
             room_debug["look"] = {"key": look_used, "text": SHAPES_ROOM_TREATMENT_TEXT[look_used]}
             room_debug["variant"] = draw_variant_label()  # which experiment variant made this render
+            room_debug["seats"] = [  # each piece's seat count, for the Debug panel
+                f"{p['tag'].split(' · ')[0]} seats: {seats_debug_text(p)}" for p in attempt_pieces(attempt)
+            ]
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
             with Image.open(room_path) as room_image:
@@ -5530,6 +5794,7 @@ def get_owned_attempt(attempt_id: int, user: User, db: Session) -> Attempt:
 
 def item_public(item: Item) -> dict:
     return {
+        "seats": piece_seats(item),  # S11: picked seats of an L-shaped, corner or curved sofa, or None
         "id": item.id,
         "category": item.category,
         "type": item.type,
@@ -6194,6 +6459,12 @@ def copy_attempt(source: Attempt, db: Session) -> Attempt:
                 if s.get("item_id") in new_ids
             ],
         }
+        if isinstance(source.shapes.get("seats"), dict):  # the picked seats move to the copied pieces too
+            attempt.shapes["seats"] = {
+                str(new_ids[int(key)]): value
+                for key, value in source.shapes["seats"].items()
+                if key.isdigit() and int(key) in new_ids
+            }
     db.commit()
     db.refresh(attempt)
     # same pieces as the source: its plan and writer output carry over
@@ -6288,7 +6559,7 @@ async def api_add_items_batch(
         parsed = None
     if not isinstance(parsed, list) or not parsed:
         return error_response(400, "invalid_pieces", "Please add at least one piece.")
-    clean: list[tuple[str, float]] = []
+    clean: list[tuple[str, float, dict | None]] = []
     for entry in parsed:
         type_ = entry.get("type") if isinstance(entry, dict) else None
         width = entry.get("width_ft") if isinstance(entry, dict) else None
@@ -6296,25 +6567,32 @@ async def api_add_items_batch(
             return error_response(400, "invalid_type", "Please choose a valid type for that category.")
         if isinstance(width, bool) or not isinstance(width, (int, float)) or not width > 0:
             return error_response(400, "invalid_width", "Please enter a width in feet.")
-        clean.append((type_, float(width)))
+        # S11: the seats picked for an L-shaped, corner or curved sofa ("Not sure": none)
+        clean.append((type_, float(width), clean_seats(derive_item_shape(category, type_), entry.get("seats"))))
     if len(attempt.items) + len(clean) > MAX_ITEMS_PER_ATTEMPT:
         return error_response(400, "too_many_items", f"You can add up to {MAX_ITEMS_PER_ATTEMPT} pieces.")
     try:
         photo_path = await save_validated_upload(photo, ITEMS_DIR)
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
-    for type_, width in clean:
-        db.add(
-            Item(
-                attempt_id=attempt.id,
-                category=category,
-                type=type_,
-                width_ft=width,
-                photo_path=photo_path,
-                shape=derive_item_shape(category, type_),
-            )
+    added = []
+    for type_, width, _seats in clean:
+        item = Item(
+            attempt_id=attempt.id,
+            category=category,
+            type=type_,
+            width_ft=width,
+            photo_path=photo_path,
+            shape=derive_item_shape(category, type_),
         )
+        db.add(item)
+        added.append(item)
     db.commit()
+    picked = {str(item.id): seats for item, (_t, _w, seats) in zip(added, clean) if seats}
+    if picked:
+        stored = dict((attempt.shapes or {}).get("seats") or {})
+        attempt.shapes = {**(attempt.shapes or {}), "seats": {**stored, **picked}}
+        db.commit()
     db.refresh(attempt)
     asyncio.create_task(describe_attempt_items(attempt.id))  # their short description, for Draw on photo
     return JSONResponse(content={"attempt": attempt_detail(attempt)})

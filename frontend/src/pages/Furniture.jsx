@@ -50,6 +50,108 @@ const TYPE_CARDS = [
   { key: "Curved", label: "Curved", icon: "curved", category: "Sofa", type: "Curved" },
   { key: "chair", label: "Chair", icon: "chair", category: "Chair", type: "Single" },
 ];
+// Draw on photo: the seats of an L-shaped, corner or curved sofa, by its
+// shape ("Not sure" = none: no seat count in the prompt). Mirrors
+// SEAT_CHOICES in main.py.
+const SEAT_QUESTIONS = {
+  L: [{ key: "long", label: "Seats in the long part (not counting the lounge)", options: [2, 3, 4] }],
+  corner: [
+    { key: "long", label: "Seats in the long part (including the corner seat)", options: [2, 3, 4] },
+    { key: "short", label: "Seats in the shorter part (after the corner seat)", options: [1, 2, 3] },
+  ],
+  curved: [{ key: "total", label: "Total seats", options: [3, 4, 5, 6] }],
+};
+const CARD_SHAPE = { "L-shape": "L", Corner: "corner", Curved: "curved" };
+
+/** Every question answered: the seats to save; otherwise null ("Not sure"). */
+function completeSeats(shape, value) {
+  const questions = SEAT_QUESTIONS[shape] || [];
+  return questions.length && questions.every((q) => value?.[q.key]) ? value : null;
+}
+
+/** "3 seats + lounge", "3 + 2 seats", "4 seats", or "Seats: not sure". */
+function seatsSummary(shape, seats) {
+  if (!seats) return "Seats: not sure";
+  if (shape === "L") return `${seats.long} seats + lounge`;
+  if (shape === "corner") return `${seats.long} + ${seats.short} seats`;
+  return `${seats.total} seats`;
+}
+
+/** The seat buttons for one shape, with "Not sure". */
+function SeatQuestions({ shape, value, onChange }) {
+  const questions = SEAT_QUESTIONS[shape];
+  const notSure = !questions.some((q) => value?.[q.key]);
+  return (
+    <>
+      {questions.map((q) => (
+        <div key={q.key}>
+          <div className="section-label">{q.label}</div>
+          <div className="seat-buttons">
+            {q.options.map((n) => (
+              <button
+                key={n}
+                type="button"
+                className={`seat-btn${value?.[q.key] === n ? " selected" : ""}`}
+                onClick={() => onChange({ ...(value || {}), [q.key]: n })}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="seat-buttons" style={{ marginTop: 8 }}>
+        <button type="button" className={`seat-btn not-sure${notSure ? " selected" : ""}`} onClick={() => onChange({})}>
+          Not sure
+        </button>
+      </div>
+      {!notSure && !completeSeats(shape, value) ? (
+        <div className="count-hint" style={{ textAlign: "left" }}>Pick both, or tap Not sure.</div>
+      ) : null}
+    </>
+  );
+}
+
+/** An added L-shaped, corner or curved sofa's seats on its row; tap to change. */
+function ItemSeats({ attemptId, item, onSaved }) {
+  const toast = useToast();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.seats || {});
+
+  async function change(next) {
+    setDraft(next);
+    const seats = completeSeats(item.shape, next);
+    if (!seats && Object.keys(next).length) return; // a corner sofa with one of its two answers so far
+    try {
+      const data = await api.put(`/api/attempts/${attemptId}/items/${item.id}/seats`, { json: { seats } });
+      onSaved(data.attempt);
+      setEditing(false);
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="item-desc"
+        onClick={() => {
+          setDraft(item.seats || {});
+          setEditing(true);
+        }}
+      >
+        {seatsSummary(item.shape, item.seats)} <span className="item-desc-edit">Change</span>
+      </button>
+    );
+  }
+  return (
+    <div className="item-seats">
+      <SeatQuestions shape={item.shape} value={draft} onChange={change} />
+    </div>
+  );
+}
+
 const GREY = "#6b7280";
 const ORANGE = "#EF7B1C";
 
@@ -176,6 +278,7 @@ export default function Furniture() {
   // choice: a TYPE_CARDS key, or "Dining table" / "Bed"; null until picked
   const [choice, setChoice] = useState(null);
   const [seats, setSeats] = useState(3);
+  const [armSeats, setArmSeats] = useState({}); // an L-shaped, corner or curved sofa's seats ({} = Not sure)
   const [otherType, setOtherType] = useState("");
   const [count, setCount] = useState(1);
   const [photo, setPhoto] = useState(null);
@@ -209,6 +312,7 @@ export default function Furniture() {
   function pickCard(key) {
     setChoice(key);
     setCount(1);
+    setArmSeats({});
   }
 
   function pickOther(name) {
@@ -221,7 +325,8 @@ export default function Furniture() {
     if (!photo) return toast("Please add a photo of the piece.");
     if (!choice || total < 1) return toast("Please choose a type first.");
     // no width is asked for: every piece gets its type's usual width (the floor plan can still resize it)
-    const pieces = Array.from({ length: total }, () => ({ type: typeName, width_ft: defaultWidth(category, typeName) }));
+    const pickedSeats = askSeats ? completeSeats(armShape, armSeats) : null;
+    const pieces = Array.from({ length: total }, () => ({ type: typeName, width_ft: defaultWidth(category, typeName), seats: pickedSeats }));
     setAdding(true);
     const form = new FormData();
     form.append("category", category);
@@ -261,6 +366,9 @@ export default function Furniture() {
     typeName = otherType;
     typeLabel = choice.toLowerCase();
   }
+  // the seats of an L-shaped, corner or curved sofa are asked only where Draw on photo is on (only it uses them)
+  const armShape = card ? CARD_SHAPE[card.type] : undefined;
+  const askSeats = Boolean(features.shape_placement && armShape);
   const total = choice ? Math.max(1, Math.min(count, remaining)) : 0;
   const canAddMore = total < remaining;
 
@@ -290,6 +398,9 @@ export default function Furniture() {
               {it.category} &middot; {it.type}
             </div>
             <ItemDescription attemptId={attempt.id} item={it} onSaved={setAttempt} />
+            {features.shape_placement && SEAT_QUESTIONS[it.shape] ? (
+              <ItemSeats key={JSON.stringify(it.seats)} attemptId={attempt.id} item={it} onSaved={setAttempt} />
+            ) : null}
           </div>
           <button type="button" className="del" onClick={() => handleDelete(it.id)}>
             &times;
@@ -352,6 +463,7 @@ export default function Furniture() {
                   </div>
                 </>
               ) : null}
+              {askSeats ? <SeatQuestions shape={armShape} value={armSeats} onChange={setArmSeats} /> : null}
               {isOther ? (
                 <>
                   <div className="section-label">Size</div>

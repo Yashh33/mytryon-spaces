@@ -757,6 +757,10 @@ h2 { font-size: 19px; }
 .seat-buttons { display: flex; gap: 8px; }
 .seat-btn { flex: 1; height: 48px; border-radius: 10px; border: 1px solid var(--line); background: #fff; font-size: 18px; font-weight: 700; }
 .seat-btn.selected { background: #EF7B1C; border-color: #EF7B1C; color: #fff; }
+.seat-btn.not-sure { font-size: 15px; }
+.item-seats { margin-top: 4px; }
+.item-seats .section-label { margin-top: 8px; }
+.item-seats .seat-btn { height: 38px; font-size: 15px; }
 
 /* ==========================================================================
    Responsive layout. Phone (< 600px) keeps the single-column layout above.

@@ -31,8 +31,13 @@ export function pieceKind(subShape) {
 }
 
 /** The type in a shape's label: L-SHAPE, CORNER SOFA, 3-SEATER, ARMCHAIR,
- * DINING TABLE ... Mirrors shape_type_label in main.py. */
-export function typeLabel(category, label, kind) {
+ * DINING TABLE ... With seats picked on the Furniture step: "L-SHAPE · 3
+ * SEATS + LOUNGE", "CORNER · 3 + 2 SEATS", "CURVED · 4 SEATS". Mirrors
+ * shape_type_label in main.py. */
+export function typeLabel(category, label, kind, picked = null) {
+  if (picked && kind === "L") return `L-SHAPE · ${picked.long} SEATS + LOUNGE`;
+  if (picked && kind === "corner") return `CORNER · ${picked.long} + ${picked.short} SEATS`;
+  if (picked && kind === "curved") return `CURVED · ${picked.total} SEATS`;
   if (kind === "L") return "L-SHAPE";
   if (kind === "corner") return "CORNER SOFA";
   if (kind === "curved") return "CURVED SOFA";
@@ -61,7 +66,7 @@ export function piecesOf(items) {
         label,
         photo_url: item.photo_url,
         kind,
-        type: typeLabel(item.category, label, kind),
+        type: typeLabel(item.category, label, kind, subs.length > 1 ? null : item.seats),
         width_ft: widthFt,
       };
     });

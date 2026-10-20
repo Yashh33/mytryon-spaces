@@ -51,17 +51,7 @@ export function DebugPanel({ renderId }) {
   if (error) return <div className="debug-panel muted">{error}</div>;
   if (!data) return <div className="debug-panel muted">Loading…</div>;
 
-  // the Draw-on-photo experiment switches that made it ("walls off · open floor off · facing on · arrows on")
-  // and each piece's seats ("1 seats: 3 + lounge", "2 seats: not set"), when recorded
-  const guide = (data.images || []).find((img) => img.role === "guide");
-  const figures = [
-    data.model,
-    data.quality,
-    data.size,
-    data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null,
-    guide?.variant,
-    ...(guide?.seats || []),
-  ]
+  const figures = [data.model, data.quality, data.size, data.elapsed_s != null ? `${data.elapsed_s.toFixed(1)} s` : null]
     .filter(Boolean)
     .join(" · ");
   // tokens and estimated cost, worked out by the server from the usage saved for this render

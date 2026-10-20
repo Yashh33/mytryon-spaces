@@ -30,7 +30,6 @@ export default function AdminPrompt() {
   const [writerEnabled, setWriterEnabled] = useState(true);
   const [writerPrompt, setWriterPrompt] = useState("");
   const [shapesPrompt, setShapesPrompt] = useState("");
-  const [gapWriterPrompt, setGapWriterPrompt] = useState("");
   const [guideStyle, setGuideStyle] = useState("boxes");
   const [studioPrompt, setStudioPrompt] = useState("");
   const [studioEditPrompt, setStudioEditPrompt] = useState("");
@@ -54,7 +53,6 @@ export default function AdminPrompt() {
     setWriterEnabled(res.placement_writer_enabled);
     setWriterPrompt(res.placement_writer_prompt);
     setShapesPrompt(res.shapes_prompt);
-    setGapWriterPrompt(res.gap_writer_prompt);
     setGuideStyle(res.guide_style || "boxes");
     setStudioPrompt(res.studio_prompt);
     setStudioEditPrompt(res.studio_edit_prompt);
@@ -92,7 +90,6 @@ export default function AdminPrompt() {
         placement_writer_enabled: writerEnabled,
         placement_writer_prompt: writerPrompt,
         shapes_prompt: shapesPrompt,
-        gap_writer_prompt: gapWriterPrompt,
         guide_style: guideStyle,
         studio_prompt: studioPrompt,
         studio_edit_prompt: studioEditPrompt,
@@ -187,7 +184,7 @@ export default function AdminPrompt() {
       <textarea className="prompt-textarea" spellCheck="false" value={shapesPrompt} onChange={(e) => setShapesPrompt(e.target.value)} />
       <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
         Must contain <span className="mono">{"{{SHAPES}}"}</span> (one paragraph per drawn shape).{" "}
-        <span className="mono">{"{{OPEN_FLOOR}}"}</span> is where the gap writer&apos;s section goes (left out if it fails).{" "}
+        <span className="mono">{"{{OPEN_FLOOR}}"}</span> is no longer used: it is left out of the prompt.{" "}
         <button type="button" className="link-btn" onClick={() => setShapesPrompt(data.default_shapes_prompt)}>
           Put back the built-in draw-on-photo prompt
         </button>
@@ -195,7 +192,7 @@ export default function AdminPrompt() {
 
       <div className="section-label" style={{ marginTop: 26 }}>Draw on photo guide</div>
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
-        How the drawn pieces appear on the guide image sent to the image model (and the gap writer). 3D boxes raises each
+        How the drawn pieces appear on the guide image sent to the image model. 3D boxes raises each
         drawn shape into a see-through box about seat height; the salesman still draws flat shapes. New renders only.
       </div>
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 12 }}>
@@ -208,20 +205,6 @@ export default function AdminPrompt() {
             {label}
           </label>
         ))}
-      </div>
-
-      <div className="section-label" style={{ marginTop: 26 }}>Draw on photo (Beta) – gap writer</div>
-      <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
-        Before each draw-on-photo render, the guide image (the photo with the shapes and labels, exactly as the image model
-        gets it) goes to the vision model with this prompt. Its lines, one per shape, go into the prompt above as &quot;OPEN
-        FLOOR AROUND EACH SOFA&quot;. It waits up to 60 seconds and never blocks the render; the result is reused while the
-        shapes are unchanged.
-      </div>
-      <textarea className="prompt-textarea" spellCheck="false" value={gapWriterPrompt} onChange={(e) => setGapWriterPrompt(e.target.value)} />
-      <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-        <button type="button" className="link-btn" onClick={() => setGapWriterPrompt(data.default_gap_writer_prompt)}>
-          Put back the built-in gap writer prompt
-        </button>
       </div>
 
       <div className="section-label" style={{ marginTop: 26 }}>Product photo – create</div>

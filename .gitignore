@@ -7,3 +7,5 @@ data/
 supabase-db-backup/
 codebase-dump*.txt
 codebase_dump*.txt
+# local reference files (Draw on photo golden prompts / guide images)
+scratch/

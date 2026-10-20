@@ -358,8 +358,16 @@ def derive_item_shape(category: str, type_: str) -> str:
         return "round"
     return "rect"
 
-DEFAULT_ROOM_TREATMENT = "luxury"
+DEFAULT_ROOM_TREATMENT = "keep"
 ROOM_TREATMENT_CHOICES = ["keep", "warm", "luxury", "minimal"]
+# the looks the Finishing step offers; an attempt saved with another (warm,
+# minimal) is treated as "keep" (effective_look)
+SELECTABLE_LOOKS = ("keep", "luxury")
+
+
+def effective_look(room_treatment: str | None) -> str:
+    """The look a render uses: Keep or Luxury; any other saved look is Keep."""
+    return room_treatment if room_treatment in SELECTABLE_LOOKS else "keep"
 # The clean-up (people, tools, rubble ...) is said once, in the prompt's own
 # "Clear away people, tools, ladders ..." paragraph, not again in each look.
 _ROOM_TREATMENT_BASE = (
@@ -437,6 +445,8 @@ def decor_text(room_treatment: str) -> str:
     return f"{look_text} {NO_EXTRA_FURNITURE_TEXT}"  # one paragraph, one line
 
 
+# the old per-piece Finishing-step choices: no longer offered; the floor-plan
+# prompt still reads them on old attempts, Draw on photo ignores them
 MATERIAL_CHOICES = {
     "fabric": "woven fabric",
     "velvet": "velvet",
@@ -445,9 +455,7 @@ MATERIAL_CHOICES = {
     "boucle": "bouclé",
     "linen": "linen",
 }
-COLOUR_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
-COLOUR_NAME_RE = re.compile(r"^[A-Za-z0-9 \-'/#]{1,40}$")
-MAX_NOTE_CHARS = 300
+MAX_NOTE_CHARS = 1000  # "Anything specific?" on the Finishing step
 
 DEFAULT_LIGHTING = "warm"
 LIGHTING_CHOICES = ["warm", "daylight", "studio"]
@@ -1705,6 +1713,8 @@ def build_image_manifest(
     room_padded: bool = False,
     product_note: str | None = None,
     seat_counted: set | None = None,
+    room_fabric: dict | None = None,
+    per_piece_finish: bool = True,
 ) -> str:
     """One line per image, in the exact order sent to the model — the whole
     point being that the numbering here always matches reality: the clean
@@ -1712,7 +1722,14 @@ def build_image_manifest(
     Product lines make the photo the reference for the piece's exact design;
     only the seat count and overall width follow the stated configuration —
     otherwise the model copies the photographed seat count instead of
-    building what was actually asked for."""
+    building what was actually asked for. Draw on photo passes
+    `per_piece_finish` False: no piece's own colour, material or swatch, only
+    the room's fabric (`room_fabric`: {"image", "sofa_ids"}, or None), the
+    last image."""
+    if per_piece_finish:
+        has_finish, section = item_has_finish, None
+    else:
+        has_finish, section = (lambda item: room_fabric is not None and item.id in room_fabric["sofa_ids"]), "FABRIC"
     lines = ["Image 1 is a room." + (f" {PADDED_ROOM_LINE}" if room_padded else "")]
     n = 2
     first_image_for_photo: dict[str, int] = {}
@@ -1733,13 +1750,13 @@ def build_image_manifest(
         else:
             follows = "Only the number of seats and the overall "
         follows += "width follow the configuration stated below" if feet else "size follow what is stated below"
-        if item_has_finish(item):
+        if has_finish(item):
             # its material and colour were chosen on the Finishing step, so the
             # photograph must not be named as their reference
             lines.append(
                 f"Image {n} is a showroom photograph of a {item.category.lower()}. It is the reference "
                 "for this piece's exact design – its silhouette, curves, back and arm shape, cushions, "
-                f"legs and stitching. Its material and colour come from the {finish_section_name(items)} section, not "
+                f"legs and stitching. Its material and colour come from the {section or finish_section_name(items)} section, not "
                 f"from this photograph. {follows}; the rest of the design must match this photograph."
                 + (f" {product_note}" if product_note else "")
             )
@@ -1751,6 +1768,10 @@ def build_image_manifest(
                 + (f" {product_note}" if product_note else "")
             )
         n += 1
+    if not per_piece_finish:
+        if room_fabric is not None:
+            lines.append(f"Image {room_fabric['image']} is a photograph of a fabric swatch.")
+        return "\n".join(lines)
     numbers = fabric_image_numbers(items)
     for k, item in enumerate(items, start=1):
         if item.id in numbers:
@@ -1783,6 +1804,12 @@ def fabric_image_numbers(items: list[Item]) -> dict[int, int]:
             numbers[item.id] = n
             n += 1
     return numbers
+
+
+def room_fabric_path(items: list[Item]) -> str | None:
+    """The room's fabric photo (Finishing step: one for the whole room, saved
+    on every piece): the first piece's fabric file that exists, or None."""
+    return next((item.fabric_path for item in items if fabric_file_exists(item)), None)
 
 
 def item_has_finish(item: Item) -> bool:
@@ -1860,6 +1887,18 @@ def build_piece_finish_text(items: list[Item]) -> str:
         heading = "COLOUR AND MATERIAL – this changes the upholstery only."
         closing = f"It says nothing about shape. {keeps}"
     return "\n".join([heading, *lines, closing])
+
+
+def room_fabric_text(room_fabric: dict) -> str:
+    """Draw on photo's FABRIC section: every sofa (the sofa, when there is
+    one) upholstered in the room's fabric photo; nothing else changes."""
+    every, each = ("the sofa", "the sofa") if room_fabric["sofas"] == 1 else ("every sofa", "each sofa")
+    return (
+        "FABRIC\n"
+        f"Upholster {every} in the fabric shown in Image {room_fabric['image']}: match its colour, pattern, weave and "
+        f"texture exactly. Only the upholstery changes — {each} keeps its own design, shape, seats, cushions, arms and "
+        "legs from its own photograph. Legs and any metal or wood parts keep the finish from the sofa's own photograph."
+    )
 
 
 ARM_SHAPE_FINAL_CHECK = (
@@ -2693,16 +2732,20 @@ def build_prompt(
     decor_override: str | None = None,
     product_note: str | None = None,
     seat_counted: set | None = None,
+    room_fabric: dict | None = None,
+    per_piece_finish: bool = True,
 ) -> str:
     """`placement_text`, when given, is the placement writer's section and
     replaces the generated facts in {{PLACEMENT}}. `feet` is the
     feet_in_prompt setting. `room_padded`: the room photo is being sent with
     grey borders (see pad_to_output_ratio). `look_text`, when given, is used
     instead of the look's ROOM_TREATMENT_TEXT, `decor_override` instead of
-    decor_text(), and `product_note` ends every product image line (Draw on
-    photo only; the floor plan passes none of them)."""
+    decor_text(), and `product_note` ends every product image line;
+    `per_piece_finish` False: the pieces' own colour / material / swatch
+    choices are ignored and only the room's fabric (`room_fabric`) is used
+    (Draw on photo only; the floor plan passes none of them)."""
     pieces = build_pieces_text(items, feet)
-    image_manifest = build_image_manifest(items, feet, room_padded, product_note, seat_counted)
+    image_manifest = build_image_manifest(items, feet, room_padded, product_note, seat_counted, room_fabric, per_piece_finish)
     config_notes = build_config_notes(items, feet)
     # with the writer's text, ROOM LAYOUT keeps only the shape and camera lines
     room_layout_text = build_room_layout_text(room.layout_json, features=placement_text is None)
@@ -2719,8 +2762,12 @@ def build_prompt(
         # wording, so those only gain the no-extra-furniture rule)
         extra = decor if room_treatment in ("warm", "luxury") else NO_EXTRA_FURNITURE_TEXT
         room_treatment_text = f"{room_treatment_text}\n\n{extra}"
-    piece_finish_text = build_piece_finish_text(items)
-    piece_sources = build_piece_sources_text(items)
+    if per_piece_finish:
+        piece_finish_text = build_piece_finish_text(items)
+        piece_sources = build_piece_sources_text(items)
+    else:
+        piece_finish_text = room_fabric_text(room_fabric) if room_fabric is not None else ""
+        piece_sources = PIECE_SOURCES_PLAIN
     if "{{PIECE_SOURCES}}" not in template:
         # older saved template: the sentence is still written out in it
         template = template.replace(PIECE_SOURCES_PLAIN, piece_sources)
@@ -4597,6 +4644,23 @@ def seats_text(piece: dict, kind: str) -> str:
     return "".join(" " + w for w in words)
 
 
+# with no fabric photo, this sentence of the saved prompt ends before "unless ..."
+NO_FABRIC_SECTION_WORDS = ", unless the FABRIC section gives it another."
+
+
+def shapes_room_fabric(attempt: Attempt) -> dict | None:
+    """Draw on photo: the room's fabric photo, if one was added and there is
+    a sofa to upholster: {"path", "image": its Image number (the last image,
+    after the guide and one product photo per piece), "sofa_ids": the sofa
+    pieces' item ids, "sofas": how many sofas}; otherwise None."""
+    path = room_fabric_path(attempt.items)
+    sofa_ids = {item.id for item in attempt.items if item.category == "Sofa"}
+    if path is None or not sofa_ids:
+        return None
+    sofas = sum(1 for piece in attempt_pieces(attempt) if piece["item"].id in sofa_ids)
+    return {"path": path, "image": len(attempt.items) + 2, "sofa_ids": sofa_ids, "sofas": sofas}
+
+
 def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0) -> str:
     """{{SHAPES}}: one paragraph per shape, naming the piece, its product
     photo's Image number and how to build it on its shape: its back along its
@@ -4605,7 +4669,7 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
     room-side words. `aspect` is the room photo's width / height."""
     facing = facing_sentences(attempt, shapes, aspect)
     pieces = {(p["item"].id, p["sub_index"]): p for p in attempt_pieces(attempt)}
-    section = finish_section_name(attempt.items)
+    fabric = shapes_room_fabric(attempt)
     paragraphs = []
     for shape in shapes:
         piece = pieces[(shape["item_id"], shape["sub_index"])]
@@ -4615,8 +4679,8 @@ def build_shapes_text(attempt: Attempt, shapes: list[dict], aspect: float = 1.0)
         description = (item.short_description or "").strip().rstrip(".")
         described = f"Image {number} ({description})" if description else f"Image {number}"
         source = (
-            f"in the exact design of {described}, with the material and colour given in the {section} section"
-            if item_has_finish(item)
+            f"in the exact design of {described}, with the material and colour given in the FABRIC section"
+            if fabric is not None and item.id in fabric["sofa_ids"]
             else f"in the exact design, material and colour of {described}"
         )
         text = (
@@ -4718,8 +4782,11 @@ def build_shapes_prompt(
     )
     # covered features keep their layout
     filled = filled.replace(COVERED_DONE_WORDS, f"{COVERED_DONE_WORDS} {COVERED_LAYOUT_SENTENCE}", 1)
+    fabric = shapes_room_fabric(attempt)
+    if fabric is None:  # no FABRIC section: nothing may point at one
+        filled = filled.replace(NO_FABRIC_SECTION_WORDS, ".")
     thing = "box" if guide_style == "boxes" else "shape"
-    look = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
+    look = effective_look(attempt.room_treatment)
     look_text = SHAPES_ROOM_TREATMENT_TEXT[look]
     if look != "keep":
         # the look's paragraph edits this photograph and keeps covered features' layout
@@ -4741,7 +4808,7 @@ def build_shapes_prompt(
         filled,
         attempt.room,
         attempt.items,
-        attempt.room_treatment,
+        look,
         attempt.lighting,
         True,
         "",
@@ -4752,6 +4819,8 @@ def build_shapes_prompt(
         decor_override=shapes_decor_text(look),
         product_note=SHAPES_PRODUCT_PHOTO_NOTE,
         seat_counted={item.id for item in attempt.items if piece_seats(item)},
+        room_fabric=fabric,
+        per_piece_finish=False,
     )
     # Image 1 is the guide image, not the bare room photo
     image_line = GUIDE_BOXES_LINE if guide_style == "boxes" else GUIDE_IMAGE_LINE
@@ -5247,7 +5316,7 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
                 "padded": photo_box is not None,
                 "guide_style": guide_style,
             }
-            look_used = attempt.room_treatment if attempt.room_treatment in ROOM_TREATMENT_TEXT else DEFAULT_ROOM_TREATMENT
+            look_used = effective_look(attempt.room_treatment)
             room_debug["look"] = {"key": look_used, "text": SHAPES_ROOM_TREATMENT_TEXT[look_used]}
             JOBS[job_id] = {"status": "processing", "stage": "generating"}
         elif pad_room_photo_enabled(db):
@@ -5293,8 +5362,16 @@ async def run_generation_job(job_id: str, attempt_id: int, user_id: int, shop_id
             image_files.append(item_file)
             debug_images.append(item_debug)
 
-        # fabric swatches follow the product photos, numbered by fabric_image_numbers()
-        for item in attempt.items:
+        # Draw on photo: the room's fabric photo, once, as the last image (shapes_room_fabric)
+        room_fabric = shapes_room_fabric(attempt) if shapes else None
+        if room_fabric is not None:
+            fabric_file, fabric_debug = load_local_image_with_debug(
+                DATA_ROOT / room_fabric["path"], "fabric", f"/media/{room_fabric['path']}"
+            )
+            image_files.append(fabric_file)
+            debug_images.append(fabric_debug)
+        # floor plan: fabric swatches follow the product photos, numbered by fabric_image_numbers()
+        for item in attempt.items if not shapes else []:
             if fabric_file_exists(item):
                 fabric_file, fabric_debug = load_local_image_with_debug(
                     DATA_ROOT / item.fabric_path, "fabric", f"/media/{item.fabric_path}"
@@ -5599,6 +5676,8 @@ def attempt_detail(attempt: Attempt) -> dict:
         "fix_hint_depth": FIX_HINT_DEPTH,
         "placement_mode": attempt.placement_mode,
         "shapes": attempt.shapes,
+        # the Finishing step's one fabric photo for the room (saved on every piece)
+        "fabric_url": f"/media/{fabric}" if (fabric := room_fabric_path(attempt.items)) else None,
     }
 
 
@@ -5631,6 +5710,7 @@ async def _add_item_to_attempt(
         width_ft=width_ft,
         photo_path=photo_path,
         shape=derive_item_shape(category, type_),
+        fabric_path=room_fabric_path(attempt.items),  # the room's fabric, if one was added
     )
     db.add(item)
     discard_placement_writer(attempt)
@@ -5776,7 +5856,7 @@ def _clear_item_placement(attempt: Attempt, item_id: int, sub_index: int, db: Se
 def _set_finish(
     attempt: Attempt, room_treatment: str, lighting: str, note: str | None, db: Session
 ) -> Attempt | JSONResponse:
-    if room_treatment not in ROOM_TREATMENT_CHOICES:
+    if room_treatment not in SELECTABLE_LOOKS:
         return error_response(400, "invalid_room_treatment", "Please choose how the room should look.")
     if lighting not in LIGHTING_CHOICES:
         return error_response(400, "invalid_lighting", "Please choose a lighting option.")
@@ -6273,6 +6353,7 @@ async def api_add_items_batch(
     except UploadValidationError as exc:
         return error_response(exc.status_code, exc.error, exc.message)
     added = []
+    fabric_path = room_fabric_path(attempt.items)  # the room's fabric, if one was added
     for type_, width, _seats in clean:
         item = Item(
             attempt_id=attempt.id,
@@ -6281,6 +6362,7 @@ async def api_add_items_batch(
             width_ft=width,
             photo_path=photo_path,
             shape=derive_item_shape(category, type_),
+            fabric_path=fabric_path,
         )
         db.add(item)
         added.append(item)
@@ -6348,52 +6430,39 @@ def api_patch_attempt(
     return JSONResponse(content={"attempt": attempt_detail(result)})
 
 
-@app.post("/api/attempts/{attempt_id}/items/{item_id}/finish")
-async def api_set_item_finish(
+@app.post("/api/attempts/{attempt_id}/fabric")
+async def api_set_room_fabric(
     attempt_id: int,
-    item_id: int,
-    colour_name: str | None = Form(None),
-    colour_hex: str | None = Form(None),
-    material: str | None = Form(None),
-    clear_fabric: bool = Form(False),
-    photo: UploadFile | None = File(None),
+    photo: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    """Finishing step: a piece's optional colour, material and fabric swatch
-    photo. Only the upholstery changes — the design never does."""
+    """Finishing step: the one fabric photo for the whole room, saved on every
+    piece (each piece's old colour / material choice is cleared). Only the
+    upholstery changes — the design never does."""
     attempt = get_owned_attempt(attempt_id, user, db)
-    item = db.query(Item).filter(Item.id == item_id, Item.attempt_id == attempt.id).first()
-    if item is None:
-        return error_response(404, "item_not_found", "That piece could not be found.")
-
-    name = " ".join((colour_name or "").split())
-    hex_ = (colour_hex or "").strip()
-    if not name and not hex_:
-        new_colour: tuple[str | None, str | None] = (None, None)
-    else:
-        name = name or hex_
-        if not COLOUR_HEX_RE.match(hex_) or not COLOUR_NAME_RE.match(name):
-            return error_response(400, "invalid_colour", "Please choose a valid colour.")
-        new_colour = (name, hex_.upper())
-
-    material = (material or "").strip() or None
-    if material is not None and material not in MATERIAL_CHOICES:
-        return error_response(400, "invalid_material", "Please choose a valid material.")
-
-    fabric_path = None if clear_fabric else item.fabric_path
-    if photo is not None and photo.filename:
-        try:
-            fabric_path = await save_validated_upload(photo, FABRICS_DIR)
-        except UploadValidationError as exc:
-            return error_response(exc.status_code, exc.error, exc.message)
-
-    item.colour_name, item.colour_hex = new_colour
-    item.material = material
-    item.fabric_path = fabric_path
+    try:
+        fabric_path = await save_validated_upload(photo, FABRICS_DIR)
+    except UploadValidationError as exc:
+        return error_response(exc.status_code, exc.error, exc.message)
+    for item in attempt.items:
+        item.fabric_path = fabric_path
+        item.colour_name = item.colour_hex = item.material = None
     db.commit()
-    db.refresh(item)
-    return JSONResponse(content={"item": item_public(item)})
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
+
+
+@app.delete("/api/attempts/{attempt_id}/fabric")
+def api_remove_room_fabric(attempt_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+    """Finishing step: no fabric photo — every sofa as its own photograph."""
+    attempt = get_owned_attempt(attempt_id, user, db)
+    for item in attempt.items:
+        item.fabric_path = None
+        item.colour_name = item.colour_hex = item.material = None
+    db.commit()
+    db.refresh(attempt)
+    return JSONResponse(content={"attempt": attempt_detail(attempt)})
 
 
 @app.post("/api/attempts/{attempt_id}/generate")

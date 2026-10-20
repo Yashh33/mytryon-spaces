@@ -70,6 +70,8 @@ One behaviour only (no switches); the shared floor-plan code is separate and unc
 - Covered panels / frames / recesses keep their exact number, size and position (and their layout in a styled look).
 - Seat counts: straight sofas from their type; L / corner / curved from the Furniture step ("Not sure" = none).
 - One back cushion per seat; no coffee table; only the sofa is taken from each product photo.
+- Finishing step: one optional fabric photo for the whole room (saved on every piece), sent as the last image with a FABRIC section; no per-piece colour or material (old ones are ignored). No fabric: every sofa as its own photo.
+- Looks: Keep room as it is (default) or Luxury; an old attempt saved with Aesthetic warm or Minimal renders as Keep. "Anything specific?" up to 1000 characters, added as the prompt's last paragraph.
 - The Final check is built from the pieces present.
 
 Old prompts (wall words + open-floor lines from the gap writer) are saved in git tag draw-photo-before-cleanup.

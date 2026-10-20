@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
@@ -6,220 +6,87 @@ import { Loading, ErrorBlock } from "../components/StateBlock.jsx";
 import { TopBar } from "../components/TopBar.jsx";
 import { StepBar } from "../components/StepBar.jsx";
 import { StepFooter } from "../components/StepFooter.jsx";
-import { UploadBox } from "../components/UploadBox.jsx";
 import { useAdjustMode } from "../adjustMode.js";
-import { Chip } from "../components/Chip.jsx";
-import { photoUploadError } from "../utils.js";
+import { IMAGE_ACCEPT, normalizeToJpeg, photoUploadError } from "../utils.js";
 
+// the looks offered; an attempt saved with another (an older "warm" or "minimal") shows as Keep
 const ROOM_TREATMENTS = [
   { value: "keep", label: "Keep room as it is", desc: "Same walls, floor and decor – only the furniture is added" },
-  { value: "warm", label: "Aesthetic warm", desc: "Cosy home: warm light, rug, maybe art or a plant" },
   { value: "luxury", label: "Luxury", desc: "Deep tones, marble, brass, rich finishes" },
-  { value: "minimal", label: "Minimal", desc: "White walls, light wood, almost empty" },
 ];
 const LIGHTINGS = [
   { value: "warm", label: "Warm", desc: "Soft golden tones, cosy evening feel" },
   { value: "daylight", label: "Daylight", desc: "Bright, natural light from the windows" },
   { value: "studio", label: "Studio", desc: "Even, clean showroom light" },
 ];
-const SWATCHES = [
-  { name: "Ivory", hex: "#EDE6D8" },
-  { name: "Sand beige", hex: "#CDB79A" },
-  { name: "Camel", hex: "#B9782F" },
-  { name: "Terracotta", hex: "#B5543A" },
-  { name: "Bottle green", hex: "#244034" },
-  { name: "Navy blue", hex: "#24324F" },
-  { name: "Charcoal grey", hex: "#3C3B3A" },
-  { name: "Blush pink", hex: "#D9A7A0" },
-];
-const MATERIALS = [
-  { value: "fabric", label: "Fabric" },
-  { value: "velvet", label: "Velvet" },
-  { value: "leather", label: "Leather" },
-  { value: "faux_leather", label: "Faux leather" },
-  { value: "boucle", label: "Bouclé" },
-  { value: "linen", label: "Linen" },
-];
-const NOTE_MAX = 300;
+const NOTE_MAX = 1000;
 
-function materialLabel(value) {
-  return MATERIALS.find((m) => m.value === value)?.label || null;
-}
+const shownLook = (value) => (ROOM_TREATMENTS.some((o) => o.value === value) ? value : "keep");
 
-function finishSummary(item) {
-  const parts = [];
-  if (item.colour_hex) parts.push(item.colour_name || item.colour_hex);
-  if (item.fabric_url) parts.push("Your fabric");
-  else if (item.material) parts.push(materialLabel(item.material));
-  return parts.length ? parts.join(" · ") : "As photo";
-}
+/** "Fabric (optional)": one fabric photo for the whole room. "Capture fabric"
+ * opens the camera, "Upload fabric" the gallery / file picker; both prepare
+ * the photo the same way as every other photo upload (normalizeToJpeg). With
+ * a photo: its thumbnail, "Change" and "Remove". */
+function FabricSection({ fabricUrl, pieceCount, busy, onAdd, onRemove }) {
+  const cameraId = useId();
+  const galleryId = useId();
+  const [changing, setChanging] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [error, setError] = useState(null);
 
-function isLight(hex) {
-  const n = parseInt(hex.slice(1), 16);
-  return 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) > 160;
-}
-
-function PieceCard({ item, saving, onSave }) {
-  const [showUpload, setShowUpload] = useState(false);
-  const [customHex, setCustomHex] = useState(null);
-  const pickTimer = useRef(null);
-
-  useEffect(() => () => clearTimeout(pickTimer.current), []);
-
-  const hasColour = Boolean(item.colour_hex);
-  const isSwatch = SWATCHES.some((s) => s.hex.toUpperCase() === (item.colour_hex || "").toUpperCase());
-  const customSelected = hasColour && !isSwatch;
-  const pickerHex = customHex || (customSelected ? item.colour_hex : "#8A857E");
-  const anythingSet = hasColour || Boolean(item.material) || Boolean(item.fabric_url);
-
-  function pickCustom(hex) {
-    setCustomHex(hex);
-    clearTimeout(pickTimer.current);
-    // the native picker fires on every drag step — save once it settles
-    pickTimer.current = setTimeout(() => onSave(item, { colour_name: hex, colour_hex: hex }), 400);
+  async function handleFile(e) {
+    const picked = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!picked || preparing) return;
+    setError(null);
+    setPreparing(true);
+    try {
+      const file = await normalizeToJpeg(picked);
+      setChanging(false);
+      await onAdd(file);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPreparing(false);
+    }
   }
 
-  function addFabric(file) {
-    setShowUpload(false);
-    onSave(item, { material: null }, { photo: file });
-  }
-
+  const working = busy || preparing;
+  const showButtons = !fabricUrl || changing;
   return (
-    <div className="piece-card">
-      <div className="piece-head">
-        <img className="piece-thumb" src={item.photo_url} alt="" />
-        <div className="piece-title">
-          <div className="name">
-            {item.category} &middot; {item.type}
-          </div>
-          <div className="sub mono muted">
-            {saving ? "Saving…" : ""}
-          </div>
-        </div>
-        {anythingSet ? (
-          <button
-            type="button"
-            className="link-btn"
-            disabled={saving}
-            onClick={() => onSave(item, { colour_name: null, colour_hex: null, material: null }, { clearFabric: true })}
-          >
-            Back to photo
-          </button>
-        ) : null}
-      </div>
-
-      <div className="piece-row-label">
-        <span className="section-label">Colour</span>
-        <span className="piece-choice">{hasColour ? item.colour_name || item.colour_hex : "As photo"}</span>
-      </div>
-      <div className="swatches">
-        <button
-          type="button"
-          className={"swatch swatch-photo" + (!hasColour ? " selected" : "")}
-          aria-label="As photo"
-          aria-pressed={!hasColour}
-          onClick={() => onSave(item, { colour_name: null, colour_hex: null })}
-        >
-          {!hasColour ? <span className="swatch-check">&#10003;</span> : null}
-        </button>
-        {SWATCHES.map((s) => {
-          const selected = hasColour && s.hex.toUpperCase() === item.colour_hex.toUpperCase();
-          return (
-            <button
-              key={s.hex}
-              type="button"
-              className={"swatch" + (selected ? " selected" : "")}
-              style={{ background: s.hex }}
-              aria-label={s.name}
-              aria-pressed={selected}
-              title={s.name}
-              onClick={() => onSave(item, { colour_name: s.name, colour_hex: s.hex })}
-            >
-              {selected ? (
-                <span className="swatch-check" style={{ color: isLight(s.hex) ? "var(--ink)" : "#fff" }}>
-                  &#10003;
-                </span>
-              ) : null}
+    <div className="field">
+      <label>Fabric (optional)</label>
+      {fabricUrl ? (
+        <div className="fabric-current">
+          <a href={fabricUrl} target="_blank" rel="noreferrer" className="fabric-thumb">
+            <img src={fabricUrl} alt="Fabric" />
+          </a>
+          <div className="fabric-actions">
+            <button type="button" className="btn btn-ghost btn-small" disabled={working} onClick={() => setChanging((v) => !v)}>
+              Change
             </button>
-          );
-        })}
-        <label
-          className={"swatch swatch-custom" + (customSelected ? " selected" : "")}
-          style={customSelected ? { background: item.colour_hex } : undefined}
-          aria-label={customSelected ? item.colour_name || item.colour_hex : "Choose any colour"}
-          title="Choose any colour"
-        >
-          {customSelected ? (
-            <span className="swatch-check" style={{ color: isLight(item.colour_hex) ? "var(--ink)" : "#fff" }}>
-              &#10003;
-            </span>
-          ) : (
-            <span aria-hidden="true">+</span>
-          )}
-          <input
-            type="color"
-            className="visually-hidden"
-            value={pickerHex.toLowerCase()}
-            onChange={(e) => pickCustom(e.target.value.toUpperCase())}
-          />
-        </label>
-      </div>
-
-      <div className="piece-row-label">
-        <span className="section-label">Material</span>
-        <span className="piece-choice">
-          {item.fabric_url ? "Your fabric" : item.material ? materialLabel(item.material) : "As photo"}
-        </span>
-      </div>
-      <div className="chips">
-        <Chip
-          selected={!item.material && !item.fabric_url}
-          onClick={() => onSave(item, { material: null }, { clearFabric: true })}
-        >
-          As photo
-        </Chip>
-        {MATERIALS.map((m) => (
-          <Chip
-            key={m.value}
-            selected={!item.fabric_url && item.material === m.value}
-            onClick={() => onSave(item, { material: m.value }, { clearFabric: true })}
-          >
-            {m.label}
-          </Chip>
-        ))}
-        {!item.fabric_url ? (
-          <button
-            type="button"
-            className={"chip chip-upload" + (showUpload ? " pending" : "")}
-            onClick={() => setShowUpload((v) => !v)}
-          >
-            + Upload your fabric
-          </button>
-        ) : null}
-      </div>
-
-      {item.fabric_url ? (
-        <div className="fabric-row">
-          <div className="fabric-box">
-            <UploadBox file={null} existingUrl={item.fabric_url} onChange={addFabric} />
+            <button type="button" className="btn btn-ghost btn-small" disabled={working} onClick={onRemove}>
+              Remove
+            </button>
           </div>
-          <button
-            type="button"
-            className="btn btn-ghost btn-small"
-            disabled={saving}
-            onClick={() => onSave(item, {}, { clearFabric: true })}
-          >
-            Remove
-          </button>
-        </div>
-      ) : showUpload ? (
-        <div className="fabric-row">
-          <div className="fabric-box">
-            <UploadBox file={null} existingUrl={null} onChange={addFabric} label="Add the fabric photo" hint="Tap to take or choose one" />
-          </div>
-          <div className="hint-line">A close, well-lit photo of the fabric works best.</div>
         </div>
       ) : null}
+      {showButtons ? (
+        <div className="fabric-buttons">
+          <label htmlFor={cameraId} className={"btn btn-ghost btn-small" + (working ? " disabled" : "")} aria-disabled={working}>
+            Capture fabric
+          </label>
+          <input id={cameraId} type="file" accept={IMAGE_ACCEPT} capture="environment" className="visually-hidden" disabled={working} onChange={handleFile} />
+          <label htmlFor={galleryId} className={"btn btn-ghost btn-small" + (working ? " disabled" : "")} aria-disabled={working}>
+            Upload fabric
+          </label>
+          <input id={galleryId} type="file" accept={IMAGE_ACCEPT} className="visually-hidden" disabled={working} onChange={handleFile} />
+        </div>
+      ) : null}
+      <div className="hint-line">
+        {working ? "Saving the fabric…" : pieceCount === 1 ? "Applied to your sofa" : "Applied to all sofas in this room"}
+      </div>
+      {error ? <div className="hint-line" style={{ color: "#c0392b" }}>{error}</div> : null}
     </div>
   );
 }
@@ -233,19 +100,18 @@ export default function Finish() {
   const toast = useToast();
   const [attempt, setAttempt] = useState(null);
   const [error, setError] = useState(null);
-  const [roomTreatment, setRoomTreatment] = useState("luxury");
+  const [roomTreatment, setRoomTreatment] = useState("keep");
   const [lighting, setLighting] = useState("warm");
   const [note, setNote] = useState("");
   const [starting, setStarting] = useState(false);
-  const [saving, setSaving] = useState({}); // item id -> pending save count
-  const saveSeq = useRef({}); // item id -> latest request number, so stale replies are ignored
+  const [savingFabric, setSavingFabric] = useState(false);
 
   async function load() {
     setError(null);
     try {
       const data = await api.get(`/api/attempts/${id}`);
       setAttempt(data.attempt);
-      setRoomTreatment(data.attempt.room_treatment || "luxury");
+      setRoomTreatment(shownLook(data.attempt.room_treatment));
       setLighting(data.attempt.lighting || "warm");
       setNote(data.attempt.note || "");
     } catch (err) {
@@ -258,41 +124,31 @@ export default function Finish() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  function replaceItem(updated) {
-    setAttempt((a) => ({ ...a, items: a.items.map((it) => (it.id === updated.id ? updated : it)) }));
-  }
-
-  async function saveFinish(item, changes, { photo = null, clearFabric = false } = {}) {
-    const next = {
-      colour_name: item.colour_name,
-      colour_hex: item.colour_hex,
-      material: item.material,
-      ...changes,
-    };
+  async function addFabric(file) {
+    setSavingFabric(true);
     const form = new FormData();
-    form.append("colour_name", next.colour_name || "");
-    form.append("colour_hex", next.colour_hex || "");
-    form.append("material", next.material || "");
-    form.append("clear_fabric", clearFabric ? "true" : "false");
-    if (photo) form.append("photo", photo, photo.name || "fabric.jpg");
-
-    // show the choice straight away; the server reply confirms it
-    replaceItem({ ...item, ...next, fabric_url: clearFabric ? null : item.fabric_url });
-    const seq = (saveSeq.current[item.id] || 0) + 1;
-    saveSeq.current[item.id] = seq;
-    setSaving((s) => ({ ...s, [item.id]: (s[item.id] || 0) + 1 }));
+    form.append("photo", file, file.name || "fabric.jpg");
     try {
-      const data = await api.post(`/api/attempts/${id}/items/${item.id}/finish`, { form });
-      if (saveSeq.current[item.id] === seq) replaceItem(data.item);
+      const data = await api.post(`/api/attempts/${id}/fabric`, { form });
+      setAttempt(data.attempt);
     } catch (err) {
       toast(photoUploadError(err));
-      if (saveSeq.current[item.id] === seq) replaceItem(item);
     } finally {
-      setSaving((s) => ({ ...s, [item.id]: (s[item.id] || 1) - 1 }));
+      setSavingFabric(false);
     }
   }
 
-  const anySaving = Object.values(saving).some((n) => n > 0);
+  async function removeFabric() {
+    setSavingFabric(true);
+    try {
+      const data = await api.del(`/api/attempts/${id}/fabric`);
+      setAttempt(data.attempt);
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      setSavingFabric(false);
+    }
+  }
 
   async function handleGenerate() {
     setStarting(true);
@@ -316,7 +172,8 @@ export default function Finish() {
   if (!attempt && !error) return <div className="screen"><Loading /></div>;
   if (error) return <div className="screen"><ErrorBlock message={error} onRetry={load} /></div>;
 
-  const customisedCount = attempt.items.filter((it) => it.colour_hex || it.material || it.fabric_url).length;
+  // a "3+2" set is two pieces
+  const pieceCount = attempt.items.reduce((n, it) => n + (it.sub_pieces?.length || 1), 0);
 
   return (
     <div className="screen has-step-footer">
@@ -332,16 +189,19 @@ export default function Finish() {
       <StepBar current={4} attemptId={attempt.id} roomId={attempt.room.id} query={adjust.query} placementMode={attempt.placement_mode} />
       <h1 style={{ marginBottom: 6 }}>Customise and finish</h1>
       <p className="finish-subtitle muted">
-        Change colour or material for each piece. The design – shape, seats, arms and legs – always stays the same.
+        Add a fabric photo to re-cover the sofas, or leave it out to keep each sofa as in its photo. The design – shape,
+        seats, arms and legs – always stays the same.
       </p>
 
       <div className="finish-layout">
         <div className="finish-options">
-          <div className="piece-cards">
-            {attempt.items.map((it) => (
-              <PieceCard key={it.id} item={it} saving={(saving[it.id] || 0) > 0} onSave={saveFinish} />
-            ))}
-          </div>
+          <FabricSection
+            fabricUrl={attempt.fabric_url}
+            pieceCount={pieceCount}
+            busy={savingFabric}
+            onAdd={addFabric}
+            onRemove={removeFabric}
+          />
 
           <div className="field">
             <label>How should the room look?</label>
@@ -417,12 +277,15 @@ export default function Finish() {
             <span className="mono muted">Lighting</span>
             <span className="mono">{LIGHTINGS.find((o) => o.value === lighting)?.label}</span>
           </div>
+          <div>
+            <span className="mono muted">Fabric</span>
+            <span className="mono">{attempt.fabric_url ? "Your fabric" : "As photo"}</span>
+          </div>
           {attempt.items.map((it) => (
             <div key={it.id}>
               <span>
                 {it.category} &middot; {it.type}
               </span>
-              <span className="mono">{finishSummary(it)}</span>
             </div>
           ))}
         </div>
@@ -430,11 +293,11 @@ export default function Finish() {
 
       <StepFooter
         backTo={adjust.backTo || `/attempt/${id}/${attempt.placement_mode === "shapes" ? "draw" : "place"}`}
-        status={`${customisedCount} of ${attempt.items.length} ${attempt.items.length === 1 ? "piece" : "pieces"} customised`}
-        primaryLabel={anySaving ? "Saving…" : "Generate"}
+        status={attempt.fabric_url ? "Fabric added" : "No fabric – sofas as in their photos"}
+        primaryLabel={savingFabric ? "Saving…" : "Generate"}
         primaryBusyLabel="Starting…"
         busy={starting}
-        primaryDisabled={anySaving}
+        primaryDisabled={savingFabric}
         onPrimary={handleGenerate}
       />
     </div>
